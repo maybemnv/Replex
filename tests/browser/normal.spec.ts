@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalEnvironment, normalFlow } from "../../fixtures/apps/normal/flow.js";
+import { resetNormalFixture } from "../../fixtures/apps/normal/reset.js";
 import { runCapture } from "../../src/capture.js";
 
 const pageHtml = `<!doctype html>
@@ -50,18 +53,16 @@ describe("normal approved flow", () => {
 
   it("captures every approved checkpoint twice with stable action and scene keys", async () => {
     const first = await runCapture(normalFlow(origin), normalEnvironment(origin), {
-      artifactRoot: "work/test-normal-first",
+      artifactRoot: join(tmpdir(), "replex-test-normal-first"),
+      attempt: 1,
       values: { filterValue: "release" },
-      reset: async () => {
-        await fetch(`${origin}/__reset`, { method: "POST" });
-      },
+      reset: () => resetNormalFixture(origin),
     });
     const second = await runCapture(normalFlow(origin), normalEnvironment(origin), {
-      artifactRoot: "work/test-normal-second",
+      artifactRoot: join(tmpdir(), "replex-test-normal-second"),
+      attempt: 2,
       values: { filterValue: "release" },
-      reset: async () => {
-        await fetch(`${origin}/__reset`, { method: "POST" });
-      },
+      reset: () => resetNormalFixture(origin),
     });
 
     expect(first.run.status).toBe("passed");
@@ -76,5 +77,8 @@ describe("normal approved flow", () => {
     expect(first.actionEvents.map((event) => event.actionId)).toEqual(second.actionEvents.map((event) => event.actionId));
     expect(first.artifacts.every((artifact) => artifact.path)).toBe(true);
     expect(first.tracePath).toMatch(/trace\.zip$/);
+    expect(first.run.attempt).toBe(1);
+    expect(second.run.attempt).toBe(2);
+    expect(await readFile(first.artifacts[0].path)).not.toEqual(await readFile(first.artifacts[2].path));
   }, 30_000);
 });
