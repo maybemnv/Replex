@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { open, mkdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, type Locator, type Page } from "@playwright/test";
 import type { BrowserStep, Environment, Flow } from "./schema.js";
 
@@ -42,6 +42,7 @@ export interface CaptureOptions {
   reset?: () => Promise<void>;
   ffmpegPath?: string;
   ffprobePath?: string;
+  storageStatePath?: string;
 }
 
 export interface CaptureResult {
@@ -82,6 +83,16 @@ export function browserContextOptions(environment: Environment) {
     colorScheme: environment.colorScheme,
     serviceWorkers: "block" as const,
   };
+}
+
+export function resolveStorageStatePath(artifactRoot: string, storageStatePath: string): string {
+  const projectRoot = resolve(artifactRoot);
+  const storagePath = resolve(storageStatePath);
+  const relation = relative(projectRoot, storagePath);
+  if (!relation || (!relation.startsWith("..") && !isAbsolute(relation))) {
+    throw new Error("browser storage state must remain outside project artifacts");
+  }
+  return storagePath;
 }
 
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
@@ -180,6 +191,9 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const context = await browser.newContext({
     ...browserContextOptions(environment),
     recordVideo: { dir: rawVideoRoot, size: environment.viewport },
+    storageState: options.storageStatePath
+      ? resolveStorageStatePath(options.artifactRoot, options.storageStatePath)
+      : undefined,
   });
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
