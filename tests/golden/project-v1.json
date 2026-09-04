@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "projectId": "golden-project",
+  "brief": {
+    "audience": "Founders",
+    "message": "Show filtering",
+    "targetDurationMs": 30000
+  },
+  "environment": {
+    "appOrigin": "http://127.0.0.1:4173",
+    "allowedOrigins": ["http://127.0.0.1:4173"],
+    "viewport": {"width": 1920, "height": 1080},
+    "locale": "en-US",
+    "timezone": "Asia/Calcutta",
+    "browserVersion": "bundled-chromium",
+    "reducedMotion": "reduce",
+    "colorScheme": "light",
+    "resetLabel": "POST /__reset"
+  },
+  "flow": {
+    "id": "normal-approved-flow",
+    "approvedAt": "2026-09-01T00:00:00.000Z",
+    "prohibitedActions": ["delete", "publish", "purchase", "send"],
+    "steps": [
+      {"id":"open-release-page","order":0,"action":"goto","target":{"kind":"url","value":"http://127.0.0.1:4173/"},"consequential":false,"approved":true,"checkpoint":{"kind":"visible","expected":"Release Replay Demo","target":{"kind":"testId","value":"release-page"}},"sceneKey":"open-demo"},
+      {"id":"open-filter","order":1,"action":"click","target":{"kind":"role","value":"button","name":"Open filters"},"consequential":false,"approved":true,"checkpoint":{"kind":"visible","expected":"Filter releases","target":{"kind":"testId","value":"filter-panel"}},"sceneKey":"open-filter"},
+      {"id":"enter-filter","order":2,"action":"fill","target":{"kind":"label","value":"Filter value"},"valueRef":"filterValue","consequential":false,"approved":true,"checkpoint":{"kind":"visible","expected":"Filter value","target":{"kind":"label","value":"Filter value"}},"sceneKey":"apply-filter"},
+      {"id":"apply-filter","order":3,"action":"click","target":{"kind":"role","value":"button","name":"Apply"},"consequential":false,"approved":true,"checkpoint":{"kind":"text","expected":"Showing 3 matching releases","target":{"kind":"testId","value":"result"}},"sceneKey":"apply-filter"}
+    ]
+  },
+  "captures": {
+    "capture-open": {"id":"capture-open","sceneKey":"open-demo","runId":"run-golden","actionIds":["open-release-page"],"checkpointActionId":"open-release-page","path":"captures/open.webm","sha256":"1111111111111111111111111111111111111111111111111111111111111111","durationMs":10000,"width":1920,"height":1080,"fps":30,"capturedAt":"2026-09-01T00:00:00.000Z"},
+    "capture-filter": {"id":"capture-filter","sceneKey":"open-filter","runId":"run-golden","actionIds":["open-filter"],"checkpointActionId":"open-filter","path":"captures/filter.webm","sha256":"2222222222222222222222222222222222222222222222222222222222222222","durationMs":10000,"width":1920,"height":1080,"fps":30,"capturedAt":"2026-09-01T00:00:00.000Z"},
+    "capture-apply": {"id":"capture-apply","sceneKey":"apply-filter","runId":"run-golden","actionIds":["enter-filter","apply-filter"],"checkpointActionId":"apply-filter","path":"captures/apply.webm","sha256":"3333333333333333333333333333333333333333333333333333333333333333","durationMs":10000,"width":1920,"height":1080,"fps":30,"capturedAt":"2026-09-01T00:00:00.000Z"}
+  },
+  "scenes": [
+    {"id":"810af6fd-cc63-53fa-be41-da19f5dbd06c","sceneKey":"open-demo","captureId":"capture-open","actionIds":["open-release-page"],"checkpointActionId":"open-release-page","sourceInMs":0,"sourceOutMs":10000,"speed":1,"order":0,"transition":{"type":"cut","durationMs":0}},
+    {"id":"a8d76f9d-fae8-5554-8a58-27dc50812b61","sceneKey":"open-filter","captureId":"capture-filter","actionIds":["open-filter"],"checkpointActionId":"open-filter","sourceInMs":0,"sourceOutMs":10000,"speed":1,"order":1,"transition":{"type":"cut","durationMs":0}},
+    {"id":"e1dec0d8-e013-5dc5-a80c-3c0516cbdc88","sceneKey":"apply-filter","captureId":"capture-apply","actionIds":["enter-filter","apply-filter"],"checkpointActionId":"apply-filter","sourceInMs":0,"sourceOutMs":10000,"speed":1,"order":2,"transition":{"type":"cut","durationMs":0}}
+  ],
+  "overlays": {},
+  "outputs": [],
+  "recaptureLineage": [],
+  "currentRevisionId": "revision-0",
+  "revisions": [{"id":"revision-0","actor":"baseline","operationIds":[],"manifestSha256":"92f281939d1b6ce4ca12f6f74e4a03747e9ab1dde94a59703e6958717089970f","createdAt":"2026-09-01T00:00:00.000Z"}]
+}
