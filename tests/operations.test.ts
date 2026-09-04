@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { EditOperationSchema } from "../src/schema.js";
@@ -171,6 +174,29 @@ describe("operation reducer", () => {
     if (first.ok && second.ok) {
       expect(semanticHash(first.project)).toBe(semanticHash(second.project));
       expect(first.project.currentRevisionId).toBe(second.project.currentRevisionId);
+    }
+  });
+
+  it("persists an accepted revision and audits a rejected call without changing the committed state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-operations-"));
+    try {
+      const source = project();
+      const accepted = applyOperations(source, source.currentRevisionId, [{ type: "trim_scene", sceneId: scene(source).id, sourceInMs: 100, sourceOutMs: 9000 }], { root, createdAt: "2026-09-05T00:00:00.000Z" });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      const committed = JSON.parse(await readFile(join(root, "project.json"), "utf8")) as Project;
+      const lines = (await readFile(join(root, "operations.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(committed.currentRevisionId).toBe(accepted.revisionId);
+      expect(JSON.parse(await readFile(join(root, "revisions", `${accepted.revisionId}.json`), "utf8"))).toEqual(committed);
+      expect(lines[0]).toMatchObject({ accepted: true, resultRevisionId: accepted.revisionId });
+
+      const rejected = applyOperations(committed, committed.currentRevisionId, [{ type: "trim_scene", sceneId: scene(committed).id, sourceInMs: 9000, sourceOutMs: 9000 }], { root, createdAt: "2026-09-05T00:00:01.000Z" });
+      expect(rejected).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
+      expect(JSON.parse(await readFile(join(root, "project.json"), "utf8")).currentRevisionId).toBe(accepted.revisionId);
+      const auditLines = (await readFile(join(root, "operations.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(auditLines.at(-1)).toMatchObject({ accepted: false, error: { code: "INVALID_OPERATION" } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
