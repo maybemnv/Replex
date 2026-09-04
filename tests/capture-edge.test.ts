@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import {
   browserContextOptions,
   deriveSceneBoundaries,
+  redactEvidenceText,
   resolveStorageStatePath,
+  resolveUploadPath,
   runCapture,
   validateCapturePlan,
 } from "../src/capture.js";
@@ -42,9 +44,21 @@ describe("capture safety boundary", () => {
     expect(resolveStorageStatePath("work/project", join(tmpdir(), "replex-auth.json"))).toBe(resolve(tmpdir(), "replex-auth.json"));
   });
 
+  it("allows uploads only from an explicit operator root", () => {
+    const root = join(tmpdir(), "replex-approved-upload");
+    expect(resolveUploadPath(join(root, "fixture.json"), [root])).toBe(resolve(root, "fixture.json"));
+    expect(() => resolveUploadPath(join(tmpdir(), "secret.txt"), [root])).toThrow("outside approved roots");
+  });
+
+  it("redacts secret-bearing evidence before persistence", () => {
+    const redacted = redactEvidenceText("https://app.test/?token=abc password=hunter2");
+    expect(redacted).not.toContain("abc");
+    expect(redacted).not.toContain("hunter2");
+  });
+
   it("reports a checkpoint mismatch as a typed failure", async () => {
     const server = await listen((_, response) => {
-      response.writeHead(200, { "content-type": "text/html" }).end("<main>wrong page</main>");
+      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page">wrong page</main>');
     });
     const origin = server.origin;
 
@@ -92,7 +106,7 @@ describe("capture safety boundary", () => {
 
   it("attributes action failures to the action that failed", async () => {
     const server = await listen((_, response) => {
-      response.writeHead(200, { "content-type": "text/html" }).end("<main data-testid=\"release-page\">ok</main>");
+      response.writeHead(200, { "content-type": "text/html" }).end("<main data-testid=\"release-page\">Release Replay Demo</main>");
     });
     try {
       await expect(
@@ -108,7 +122,7 @@ describe("capture safety boundary", () => {
   it("enforces a declared wait condition", async () => {
     const server = await listen((_, response) => {
       response.writeHead(200, { "content-type": "text/html" }).end(`
-        <main data-testid="release-page">ok</main>
+        <main data-testid="release-page">Release Replay Demo</main>
         <p data-testid="status">Loading</p>
         <script>setTimeout(() => { document.querySelector('[data-testid=status]').textContent = 'Ready'; }, 50)</script>
       `);
@@ -180,9 +194,27 @@ describe("capture safety boundary", () => {
     }
   }, 30_000);
 
+  it("blocks off-origin background requests", async () => {
+    const target = await listen((_, response) => response.writeHead(200).end("outside"));
+    const source = await listen((_, response) => response.writeHead(200, { "content-type": "text/html" }).end(`
+      <main data-testid="release-page">Release Replay Demo</main>
+      <script>fetch(${JSON.stringify(target.origin)})</script>
+    `));
+    const flow = normalFlow(source.origin);
+    flow.steps = [flow.steps[0]];
+    try {
+      await expect(runCapture(flow, normalEnvironment(source.origin), {
+        artifactRoot: join(tmpdir(), "replex-edge-background-origin"),
+      })).rejects.toMatchObject({ code: "ORIGIN_NOT_ALLOWED", actionId: "open-release-page" });
+    } finally {
+      await source.close();
+      await target.close();
+    }
+  }, 30_000);
+
   it("uses the declared semantic role instead of assuming a button", async () => {
     const server = await listen((_, response) => {
-      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page"><a aria-label="Details" href="#details">Open</a></main>');
+      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page">Release Replay Demo<a aria-label="Details" href="#details">Open</a></main>');
     });
     const flow = normalFlow(server.origin);
     flow.steps = [
@@ -207,32 +239,14 @@ describe("capture safety boundary", () => {
     }
   }, 30_000);
 
-  it("records the attempt and action log when media finalization fails", async () => {
-    const server = await listen((_, response) => {
-      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page">ok</main>');
-    });
-    const flow = normalFlow(server.origin);
-    flow.steps = [flow.steps[0]];
-    let failure: { runPath: string };
-    try {
-      try {
-        await runCapture(flow, normalEnvironment(server.origin), {
-          artifactRoot: join(tmpdir(), "replex-edge-media-failure"),
-          attempt: 7,
-          ffprobePath: "C:/missing/ffprobe.exe",
-        });
-        throw new Error("expected media finalization to fail");
-      } catch (error) {
-        failure = error as typeof failure;
-      }
-      await expect(readFile(failure.runPath, "utf8")).resolves.toContain('"attempt": 7');
-      const actionsPath = join(dirname(failure.runPath), "logs", "actions.json");
-      const actions = JSON.parse(await readFile(actionsPath, "utf8")) as Array<Record<string, unknown>>;
-      expect(actions[0]).toMatchObject({ attempt: 7, actionId: "open-release-page", outcome: "passed" });
-    } finally {
-      await server.close();
-    }
-  }, 30_000);
+  it("fails media preflight before opening the application", async () => {
+    const origin = "http://127.0.0.1:1";
+    await expect(runCapture(normalFlow(origin), normalEnvironment(origin), {
+      artifactRoot: join(tmpdir(), "replex-edge-media-preflight"),
+      ffmpegPath: "C:/missing/ffmpeg.exe",
+      ffprobePath: "C:/missing/ffprobe.exe",
+    })).rejects.toMatchObject({ code: "STARTUP_CHECK_FAILED", missing: expect.arrayContaining(["ffmpeg", "ffprobe"]) });
+  });
 });
 
 it("derives scene boundaries directly from monotonic event times", () => {

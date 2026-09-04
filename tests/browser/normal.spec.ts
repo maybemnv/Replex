@@ -14,6 +14,7 @@ const pageHtml = `<!doctype html>
     <h1>Release Replay Demo</h1>
     <button type="button" aria-label="Open filters" id="open-filter">Open filters</button>
     <section data-testid="filter-panel" hidden>
+      <h2>Filter releases</h2>
       <label for="filter-value">Filter value</label>
       <input id="filter-value" name="filter-value" />
       <button type="button" aria-label="Apply" id="apply-filter">Apply</button>
