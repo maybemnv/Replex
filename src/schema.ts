@@ -223,6 +223,55 @@ export const OverlaySchema = z
     if (value.text.length > (value.kind === "title" ? 80 : 120)) context.addIssue({ code: "custom", path: ["text"], message: "overlay text is too long" });
   });
 
+const OperationReasonSchema = nonEmptyText.max(500);
+
+export const EditOperationSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("create_scene"), scene: SceneSchema }).strict(),
+  z.object({
+    type: z.literal("trim_scene"),
+    sceneId: IdSchema,
+    sourceInMs: MillisecondsSchema,
+    sourceOutMs: MillisecondsSchema,
+  }).strict(),
+  z.object({ type: z.literal("reorder_scene"), sceneIds: z.array(IdSchema).min(1) }).strict(),
+  z.object({
+    type: z.literal("replace_capture"),
+    sceneId: IdSchema,
+    captureId: IdSchema,
+    reason: OperationReasonSchema,
+  }).strict(),
+  z.object({ type: z.literal("set_speed"), sceneId: IdSchema, speed: SceneSchema.shape.speed }).strict(),
+  z.object({ type: z.literal("set_focus"), sceneId: IdSchema, focus: FocusSchema }).strict(),
+  z.object({
+    type: z.literal("set_title"),
+    overlay: OverlaySchema.and(z.object({ kind: z.literal("title") }).strict()),
+  }).strict(),
+  z.object({
+    type: z.literal("set_callout"),
+    overlay: OverlaySchema.and(z.object({ kind: z.literal("callout") }).strict()),
+  }).strict(),
+  z.object({ type: z.literal("set_transition"), sceneId: IdSchema, transition: TransitionSchema }).strict(),
+]);
+
+export const OperationBatchSchema = z.array(EditOperationSchema).min(1);
+
+export const OperationErrorSchema = z.object({
+  code: nonEmptyText,
+  detail: nonEmptyText,
+}).strict();
+
+export const OperationRecordSchema = z.object({
+  id: IdSchema,
+  baseRevisionId: IdSchema,
+  resultRevisionId: IdSchema.optional(),
+  actor: z.enum(["baseline", "model", "operator", "recapture"]),
+  input: EditOperationSchema,
+  accepted: z.boolean(),
+  error: OperationErrorSchema.optional(),
+  evidenceRefs: z.array(nonEmptyText),
+  createdAt: z.string().datetime({ offset: true }),
+}).strict();
+
 export const MediaProbeSchema = z
   .object({
     durationMs: MillisecondsSchema,
@@ -356,6 +405,10 @@ export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 export type Capture = z.infer<typeof CaptureSchema>;
 export type Scene = z.infer<typeof SceneSchema>;
 export type Overlay = z.infer<typeof OverlaySchema>;
+export type EditOperation = z.infer<typeof EditOperationSchema>;
+export type OperationBatch = z.infer<typeof OperationBatchSchema>;
+export type OperationError = z.infer<typeof OperationErrorSchema>;
+export type OperationRecord = z.infer<typeof OperationRecordSchema>;
 export type RenderOutput = z.infer<typeof RenderOutputSchema>;
 export type Revision = z.infer<typeof RevisionSchema>;
 export type RecaptureLineage = z.infer<typeof RecaptureLineageSchema>;
