@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createServer, type RequestListener, type Server } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
@@ -44,15 +44,46 @@ describe("capture safety boundary", () => {
     expect(resolveStorageStatePath("work/project", join(tmpdir(), "replex-auth.json"))).toBe(resolve(tmpdir(), "replex-auth.json"));
   });
 
-  it("allows uploads only from an explicit operator root", () => {
-    const root = join(tmpdir(), "replex-approved-upload");
-    expect(resolveUploadPath(join(root, "fixture.json"), [root])).toBe(resolve(root, "fixture.json"));
-    expect(() => resolveUploadPath(join(tmpdir(), "secret.txt"), [root])).toThrow("outside approved roots");
+  it("allows uploads only from an explicit operator root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-approved-upload-"));
+    const outsideRoot = await mkdtemp(join(tmpdir(), "replex-private-upload-"));
+    const fixture = join(root, "fixture.json");
+    const secret = join(outsideRoot, "secret.txt");
+    try {
+      await writeFile(fixture, "{}");
+      await writeFile(secret, "private");
+      await expect(resolveUploadPath(fixture, [root])).resolves.toBe(await realpath(fixture));
+      await expect(resolveUploadPath(secret, [root])).rejects.toThrow("outside approved roots");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a JSONL attempt record when plan validation fails", async () => {
+    const flow = normalFlow("http://127.0.0.1:4173");
+    flow.steps[0] = { ...flow.steps[0], approved: false };
+    let failure: { runPath: string; actionLogPath: string };
+    try {
+      await runCapture(flow, normalEnvironment("http://127.0.0.1:4173"), {
+        artifactRoot: join(tmpdir(), "replex-edge-plan-failure"),
+        attempt: 9,
+      });
+      throw new Error("expected plan validation failure");
+    } catch (error) {
+      failure = error as typeof failure;
+    }
+    await expect(readFile(failure.runPath, "utf8")).resolves.toContain('"status": "failed"');
+    const event = JSON.parse((await readFile(failure.actionLogPath, "utf8")).trim()) as Record<string, unknown>;
+    expect(event).toMatchObject({ stage: "preflight", attempt: 9, actionId: "open-release-page", outcome: "failed" });
   });
 
   it("redacts secret-bearing evidence before persistence", () => {
-    const redacted = redactEvidenceText("https://app.test/?token=abc password=hunter2");
+    const redacted = redactEvidenceText('https://app.test/?access_token=abc "refresh_token":"r3fr3sh" Authorization: Bearer auth-value cookie=session password=hunter2');
     expect(redacted).not.toContain("abc");
+    expect(redacted).not.toContain("r3fr3sh");
+    expect(redacted).not.toContain("auth-value");
+    expect(redacted).not.toContain("session");
     expect(redacted).not.toContain("hunter2");
   });
 
@@ -267,6 +298,15 @@ it("derives scene boundaries directly from monotonic event times", () => {
     [2, 6],
     [6, 20],
   ]);
+});
+
+it("rejects missing or regressed scene boundary events", () => {
+  const scenes = [
+    { sceneKey: "one", actionIds: ["a"], checkpointActionId: "a" },
+    { sceneKey: "two", actionIds: ["b"], checkpointActionId: "b" },
+  ];
+  expect(() => deriveSceneBoundaries(scenes, [{ actionId: "b", atMs: 2_000 }], 3)).toThrow("missing scene checkpoint event");
+  expect(() => deriveSceneBoundaries(scenes, [{ actionId: "a", atMs: 4_000 }, { actionId: "b", atMs: 5_000 }], 3)).toThrow("invalid scene boundary");
 });
 
 async function listen(handler: RequestListener) {
