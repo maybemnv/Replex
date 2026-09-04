@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { open, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { chromium, type Locator, type Page } from "@playwright/test";
@@ -43,6 +43,17 @@ export interface CaptureResult {
   actionEvents: Array<{ actionId: string; atMs: number }>;
   captures: Array<{ sceneKey: string; durationMs: number; actionIds: string[] }>;
   artifacts: Array<{ sceneKey: string; path: string }>;
+}
+
+export function fingerprintCapture(
+  bytes: Buffer,
+  provenance: { runId: string; actionIds: string[]; checkpointActionId: string },
+): string {
+  if (bytes.length === 0) throw new Error("capture is empty");
+  return createHash("sha256")
+    .update(bytes)
+    .update(JSON.stringify(provenance))
+    .digest("hex");
 }
 
 export function browserContextOptions(environment: Environment) {
