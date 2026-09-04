@@ -70,5 +70,6 @@ describe("normal approved flow", () => {
     expect(first.captures.map((capture) => capture.sceneKey)).toEqual(second.captures.map((capture) => capture.sceneKey));
     expect(first.actionEvents.map((event) => event.actionId)).toEqual(second.actionEvents.map((event) => event.actionId));
     expect(first.artifacts.every((artifact) => artifact.path)).toBe(true);
+    expect(first.tracePath).toMatch(/trace\.zip$/);
   }, 30_000);
 });
