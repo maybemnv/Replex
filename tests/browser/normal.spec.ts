@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { stat } from "node:fs/promises";
 import { normalEnvironment, normalFlow } from "../../fixtures/apps/normal/flow.js";
 import { runCapture } from "../../src/capture.js";
 
@@ -67,6 +68,10 @@ describe("normal approved flow", () => {
     expect(second.run.status).toBe("passed");
     expect(first.captures).toHaveLength(3);
     expect(first.captures.every((capture) => capture.durationMs > 0)).toBe(true);
+    expect(new Set(first.captures.map((capture) => capture.sourcePath)).size).toBe(3);
+    expect(first.captures.every((capture) => /^[a-f0-9]{64}$/.test(capture.sha256))).toBe(true);
+    expect(first.captures.every((capture) => capture.checkpointActionId && capture.actionIds.length > 0)).toBe(true);
+    await Promise.all(first.captures.map(async (capture) => expect((await stat(capture.sourcePath)).size).toBeGreaterThan(0)));
     expect(first.captures.map((capture) => capture.sceneKey)).toEqual(second.captures.map((capture) => capture.sceneKey));
     expect(first.actionEvents.map((event) => event.actionId)).toEqual(second.actionEvents.map((event) => event.actionId));
     expect(first.artifacts.every((artifact) => artifact.path)).toBe(true);
