@@ -40,6 +40,7 @@ export interface CaptureOptions {
 
 export interface CaptureResult {
   run: { id: string; status: "passed" };
+  tracePath: string;
   actionEvents: Array<{ actionId: string; atMs: number }>;
   captures: Array<{ sceneKey: string; durationMs: number; actionIds: string[] }>;
   artifacts: Array<{ sceneKey: string; path: string }>;
@@ -157,11 +158,13 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   await options.reset?.();
   const browser = await chromium.launch();
   const context = await browser.newContext(browserContextOptions(environment));
+  await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   const startedAt = Date.now();
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const runId = randomUUID();
+  const tracePath = join(options.artifactRoot, runId, "trace.zip");
   const artifacts: CaptureResult["artifacts"] = [];
 
   try {
@@ -175,8 +178,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       await writeImmutableArtifact(path, await page.screenshot());
       artifacts.push({ sceneKey: scene.sceneKey, path });
     }
+    await context.tracing.stop({ path: tracePath });
     return {
       run: { id: runId, status: "passed" },
+      tracePath,
       actionEvents,
       captures: scenePlan.map((scene) => ({ sceneKey: scene.sceneKey, durationMs: Math.max(1, Date.now() - startedAt), actionIds: scene.actionIds })),
       artifacts,
