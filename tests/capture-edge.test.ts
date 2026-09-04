@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
-import { browserContextOptions, runCapture, validateCapturePlan } from "../src/capture.js";
+import { browserContextOptions, resolveStorageStatePath, runCapture, validateCapturePlan } from "../src/capture.js";
 
 describe("capture safety boundary", () => {
   it("rejects a prohibited consequential action before execution", () => {
@@ -27,6 +29,11 @@ describe("capture safety boundary", () => {
       colorScheme: "light",
       serviceWorkers: "block",
     });
+  });
+
+  it("keeps browser storage state outside project artifacts", () => {
+    expect(() => resolveStorageStatePath("work/project", "work/project/auth.json")).toThrow("outside project artifacts");
+    expect(resolveStorageStatePath("work/project", join(tmpdir(), "replex-auth.json"))).toBe(resolve(tmpdir(), "replex-auth.json"));
   });
 
   it("reports a checkpoint mismatch as a typed failure", async () => {
