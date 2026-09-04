@@ -4,7 +4,13 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
-import { browserContextOptions, resolveStorageStatePath, runCapture, validateCapturePlan } from "../src/capture.js";
+import {
+  browserContextOptions,
+  deriveSceneBoundaries,
+  resolveStorageStatePath,
+  runCapture,
+  validateCapturePlan,
+} from "../src/capture.js";
 
 describe("capture safety boundary", () => {
   it("rejects a prohibited consequential action before execution", () => {
@@ -43,10 +49,11 @@ describe("capture safety boundary", () => {
     const origin = server.origin;
 
     try {
-      let failure: { code: string; actionId: string; evidencePath: string; tracePath: string };
+      let failure: { code: string; actionId: string; evidencePath: string; tracePath: string; runPath: string };
       try {
         await runCapture(normalFlow(origin), normalEnvironment(origin), {
           artifactRoot: "work/edge-checkpoint",
+          attempt: 4,
         });
         throw new Error("expected capture to fail");
       } catch (error) {
@@ -55,7 +62,11 @@ describe("capture safety boundary", () => {
       expect(failure).toMatchObject({ code: "CHECKPOINT_MISMATCH", actionId: "open-release-page" });
       const evidence = JSON.parse(await readFile(failure.evidencePath, "utf8")) as Record<string, unknown>;
       expect(evidence).toMatchObject({ actionId: "open-release-page", url: `${origin}/` });
+      expect(evidence.domExcerpt).toEqual(expect.any(String));
+      expect(String(evidence.domExcerpt).length).toBeLessThanOrEqual(4000);
       await expect(stat(failure.tracePath)).resolves.toMatchObject({ size: expect.any(Number) });
+      const run = JSON.parse(await readFile(failure.runPath, "utf8")) as Record<string, unknown>;
+      expect(run).toMatchObject({ attempt: 4, status: "failed", actionId: "open-release-page" });
     } finally {
       await server.close();
     }
@@ -70,13 +81,124 @@ describe("capture safety boundary", () => {
     try {
       await expect(
         runCapture(normalFlow(origin), normalEnvironment(origin), {
-          artifactRoot: "work/edge-auth",
+          artifactRoot: join(tmpdir(), "replex-edge-auth"),
+          attempt: 3,
         }),
       ).rejects.toMatchObject({ code: "AUTH_EXPIRED", actionId: "open-release-page" });
     } finally {
       await server.close();
     }
   }, 30_000);
+
+  it("attributes action failures to the action that failed", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end("<main data-testid=\"release-page\">ok</main>");
+    });
+    try {
+      await expect(
+        runCapture(normalFlow(server.origin), normalEnvironment(server.origin), {
+          artifactRoot: join(tmpdir(), "replex-edge-action"),
+        }),
+      ).rejects.toMatchObject({ code: "ACTION_FAILED", actionId: "open-filter" });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it("enforces a declared wait condition", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end(`
+        <main data-testid="release-page">ok</main>
+        <p data-testid="status">Loading</p>
+        <script>setTimeout(() => { document.querySelector('[data-testid=status]').textContent = 'Ready'; }, 50)</script>
+      `);
+    });
+    const flow = normalFlow(server.origin);
+    flow.steps = [
+      flow.steps[0],
+      {
+        id: "wait-ready",
+        order: 1,
+        action: "waitFor",
+        target: { kind: "testId", value: "status" },
+        consequential: false,
+        approved: true,
+        checkpoint: { kind: "text", target: { kind: "testId", value: "status" }, expected: "Ready" },
+        sceneKey: "ready",
+      },
+    ];
+    try {
+      await expect(
+        runCapture(flow, normalEnvironment(server.origin), {
+          artifactRoot: join(tmpdir(), "replex-edge-wait"),
+        }),
+      ).resolves.toMatchObject({ run: { status: "passed" } });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it("checks URL and attribute checkpoints using their declared semantics", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end("<main data-testid=\"status\" data-state=\"ready\">ok</main>");
+    });
+    try {
+      const urlFlow = normalFlow(server.origin);
+      urlFlow.steps = [{
+        ...urlFlow.steps[0],
+        checkpoint: { kind: "url", expected: `${server.origin}/` },
+      }];
+      await expect(runCapture(urlFlow, normalEnvironment(server.origin), {
+        artifactRoot: join(tmpdir(), "replex-edge-url"),
+      })).resolves.toMatchObject({ run: { status: "passed" } });
+
+      const attributeFlow = normalFlow(server.origin);
+      attributeFlow.steps = [{
+        ...attributeFlow.steps[0],
+        checkpoint: { kind: "attribute", target: { kind: "testId", value: "status" }, expected: "data-state=ready" },
+      }];
+      await expect(runCapture(attributeFlow, normalEnvironment(server.origin), {
+        artifactRoot: join(tmpdir(), "replex-edge-attribute"),
+      })).resolves.toMatchObject({ run: { status: "passed" } });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it("rejects a runtime redirect outside the allowed origin", async () => {
+    const target = await listen((_, response) => response.writeHead(200).end("outside"));
+    const source = await listen((_, response) => response.writeHead(302, { location: target.origin }).end());
+    const flow = normalFlow(source.origin);
+
+    try {
+      await expect(runCapture(flow, normalEnvironment(source.origin), {
+        artifactRoot: "work/edge-redirect",
+      })).rejects.toMatchObject({ code: "ORIGIN_NOT_ALLOWED", actionId: "open-release-page" });
+    } finally {
+      await source.close();
+      await target.close();
+    }
+  }, 30_000);
+});
+
+it("derives scene boundaries directly from monotonic event times", () => {
+  expect(deriveSceneBoundaries(
+    [
+      { sceneKey: "one", actionIds: ["a"], checkpointActionId: "a" },
+      { sceneKey: "two", actionIds: ["b"], checkpointActionId: "b" },
+      { sceneKey: "three", actionIds: ["c"], checkpointActionId: "c" },
+    ],
+    [
+      { actionId: "a", atMs: 2_000 },
+      { actionId: "b", atMs: 6_000 },
+      { actionId: "c", atMs: 9_000 },
+    ],
+    20,
+  ).map(({ startSeconds, endSeconds }) => [startSeconds, endSeconds])).toEqual([
+    [0, 2],
+    [2, 6],
+    [6, 20],
+  ]);
 });
 
 async function listen(handler: RequestListener) {
