@@ -3,9 +3,10 @@ import { createServer, type Server } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dynamicEnvironment, dynamicFlow, type DynamicFlowOptions } from "../../fixtures/apps/dynamic/flow.js";
+import { dynamicEnvironment, dynamicFlow } from "../../fixtures/apps/dynamic/flow.js";
 import { renderDynamicFixture, type DynamicFixtureState } from "../../fixtures/apps/dynamic/app.js";
-import { changeDynamicFixture, injectDynamicFailure, resetDynamicFixture } from "../../fixtures/apps/dynamic/reset.js";
+import { injectDynamicFailure, resetDynamicFixture } from "../../fixtures/apps/dynamic/reset.js";
+import { changeDynamicFixture } from "../../fixtures/apps/dynamic/change.js";
 import { runCapture, type CaptureRunError } from "../../src/capture.js";
 
 describe("dynamic SaaS approved flow", () => {
