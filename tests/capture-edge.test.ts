@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createServer, type RequestListener, type Server } from "node:http";
+import { readFile, stat } from "node:fs/promises";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { browserContextOptions, runCapture, validateCapturePlan } from "../src/capture.js";
 
@@ -35,11 +36,19 @@ describe("capture safety boundary", () => {
     const origin = server.origin;
 
     try {
-      await expect(
-        runCapture(normalFlow(origin), normalEnvironment(origin), {
+      let failure: { code: string; actionId: string; evidencePath: string; tracePath: string };
+      try {
+        await runCapture(normalFlow(origin), normalEnvironment(origin), {
           artifactRoot: "work/edge-checkpoint",
-        }),
-      ).rejects.toMatchObject({ code: "CHECKPOINT_MISMATCH", actionId: "open-release-page" });
+        });
+        throw new Error("expected capture to fail");
+      } catch (error) {
+        failure = error as typeof failure;
+      }
+      expect(failure).toMatchObject({ code: "CHECKPOINT_MISMATCH", actionId: "open-release-page" });
+      const evidence = JSON.parse(await readFile(failure.evidencePath, "utf8")) as Record<string, unknown>;
+      expect(evidence).toMatchObject({ actionId: "open-release-page", url: `${origin}/` });
+      await expect(stat(failure.tracePath)).resolves.toMatchObject({ size: expect.any(Number) });
     } finally {
       await server.close();
     }
