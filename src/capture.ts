@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { open, mkdir, readFile, rm } from "node:fs/promises";
+import { open, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, expect as playwrightExpect, type Locator, type Page } from "@playwright/test";
-import { checkStartupTools, StartupCheckError } from "./cli.js";
 import type { BrowserStep, Environment, Flow } from "./schema.js";
 
 export class CapturePlanError extends Error {
@@ -30,6 +29,14 @@ export class CaptureRunError extends Error {
   ) {
     super(message);
     this.name = "CaptureRunError";
+  }
+}
+
+export class CaptureStartupError extends Error {
+  readonly code = "STARTUP_CHECK_FAILED" as const;
+  constructor(readonly missing: Array<"ffmpeg" | "ffprobe">) {
+    super(`missing required startup tools: ${missing.join(", ")}`);
+    this.name = "CaptureStartupError";
   }
 }
 
@@ -110,10 +117,11 @@ export function resolveStorageStatePath(artifactRoot: string, storageStatePath: 
   return storagePath;
 }
 
-export function resolveUploadPath(path: string, roots: string[]): string {
-  const resolvedPath = resolve(path);
-  const allowed = roots.some((root) => {
-    const relation = relative(resolve(root), resolvedPath);
+export async function resolveUploadPath(path: string, roots: string[]): Promise<string> {
+  const resolvedPath = await realpath(path);
+  const resolvedRoots = await Promise.all(roots.map((root) => realpath(root)));
+  const allowed = resolvedRoots.some((root) => {
+    const relation = relative(root, resolvedPath);
     return !relation || (!relation.startsWith("..") && !isAbsolute(relation));
   });
   if (!allowed) throw new Error("upload path is outside approved roots");
@@ -122,8 +130,8 @@ export function resolveUploadPath(path: string, roots: string[]): string {
 
 export function redactEvidenceText(value: string): string {
   return value
-    .replace(/([?&](?:token|key|password|secret|auth)=)[^&#\s"']+/gi, "$1[REDACTED]")
-    .replace(/\b(?:token|password|secret|authorization)\s*[:=]\s*[^\s<"']+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`);
+    .replace(/([?&](?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[_-]?key|password|secret|auth|cookie)=)[^&#\s"']+/gi, "$1[REDACTED]")
+    .replace(/(["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[_-]?key|password|secret|authorization|cookie)["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^"',}\s<]+/gi, "$1[REDACTED]");
 }
 
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
@@ -135,7 +143,7 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
     if (!step.approved) {
       throw new CapturePlanError("ACTION_NOT_APPROVED", step.id, "action is not approved");
     }
-    if (step.action === "goto" && step.target?.kind === "url") {
+    if (step.target?.kind === "url") {
       const origin = new URL(step.target.value).origin;
       if (!environment.allowedOrigins.includes(origin)) {
         throw new CapturePlanError("ORIGIN_NOT_ALLOWED", step.id, `origin is not allowed: ${origin}`);
@@ -168,6 +176,22 @@ export async function writeImmutableArtifact(path: string, data: Buffer): Promis
   } finally {
     await handle.close();
   }
+}
+
+function jsonLines(values: unknown[]): Buffer {
+  return Buffer.from(values.length ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n` : "");
+}
+
+function assertMediaTools(options: CaptureOptions): void {
+  const tools = [
+    ["ffmpeg", options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg"],
+    ["ffprobe", options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe"],
+  ] as const;
+  const missing = tools.flatMap(([name, path]) => {
+    const result = spawnSync(path, ["-version"], { encoding: "utf8", windowsHide: true, shell: false, timeout: 10_000 });
+    return result.error || result.status !== 0 ? [name] : [];
+  });
+  if (missing.length) throw new CaptureStartupError(missing);
 }
 
 function locatorFor(page: Page, step: BrowserStep): Locator {
@@ -218,9 +242,7 @@ async function executeStep(page: Page, step: BrowserStep, values: Record<string,
   } else if (step.action === "select") {
     await locatorFor(page, step).selectOption(values[step.valueRef ?? ""] ?? "");
   } else if (step.action === "upload") {
-    await locatorFor(page, step).setInputFiles(resolveUploadPath(values[step.valueRef ?? ""], uploadRoots));
-  } else if (step.action === "waitFor") {
-    await locatorFor(page, step).waitFor({ state: "visible" });
+    await locatorFor(page, step).setInputFiles(await resolveUploadPath(values[step.valueRef ?? ""], uploadRoots));
   }
 }
 
@@ -239,10 +261,10 @@ export function deriveSceneBoundaries(
   const eventTimes = new Map(events.map((event) => [event.actionId, event.atMs]));
   let startSeconds = 0;
   return scenes.map((scene, index) => {
-    const checkpointSeconds = (eventTimes.get(scene.checkpointActionId) ?? 0) / 1000;
-    const endSeconds = index === scenes.length - 1
-      ? videoDurationSeconds
-      : Math.min(videoDurationSeconds, Math.max(startSeconds + 0.05, checkpointSeconds));
+    const checkpointMs = eventTimes.get(scene.checkpointActionId);
+    if (checkpointMs === undefined) throw new Error(`missing scene checkpoint event: ${scene.checkpointActionId}`);
+    const endSeconds = index === scenes.length - 1 ? videoDurationSeconds : checkpointMs / 1000;
+    if (endSeconds <= startSeconds || endSeconds > videoDurationSeconds) throw new Error(`invalid scene boundary: ${scene.sceneKey}`);
     const boundary = { ...scene, startSeconds, endSeconds };
     startSeconds = endSeconds;
     return boundary;
@@ -250,12 +272,28 @@ export function deriveSceneBoundaries(
 }
 
 export async function runCapture(flow: Flow, environment: Environment, options: CaptureOptions): Promise<CaptureResult> {
-  validateCapturePlan(flow, environment);
-  const startup = checkStartupTools({ ffmpeg: options.ffmpegPath, ffprobe: options.ffprobePath });
-  if (!startup.ok) throw new StartupCheckError(startup);
-  await options.reset?.();
   const runId = randomUUID();
   const runRoot = join(options.artifactRoot, runId);
+  const attempt = options.attempt ?? 1;
+  const runPath = join(runRoot, "run.json");
+  const actionLogPath = join(runRoot, "logs", "actions.jsonl");
+  const consoleLogPath = join(runRoot, "logs", "console.jsonl");
+  try {
+    validateCapturePlan(flow, environment);
+    assertMediaTools(options);
+    await options.reset?.();
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    const actionId = "actionId" in failure && typeof failure.actionId === "string" ? failure.actionId : "preflight";
+    const code = "code" in failure && typeof failure.code === "string" ? failure.code : "RESET_FAILED";
+    await writeImmutableArtifact(actionLogPath, jsonLines([{
+      runId, stage: "preflight", attempt, actionId, atMs: 0, outcome: "failed", code, message: redactEvidenceText(failure.message),
+    }]));
+    await writeImmutableArtifact(consoleLogPath, jsonLines([]));
+    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, status: "failed", actionId, code }, null, 2)));
+    Object.assign(failure, { runPath, actionLogPath, consoleLogPath });
+    throw failure;
+  }
   const rawVideoRoot = join(runRoot, "raw-video");
   await mkdir(rawVideoRoot, { recursive: true });
   const browser = await chromium.launch();
@@ -270,18 +308,14 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const page = await context.newPage();
   page.setDefaultTimeout(5_000);
   const video = page.video();
-  const consoleEvents: string[] = [];
-  page.on("console", (message) => consoleEvents.push(message.text()));
-  page.on("pageerror", (error) => consoleEvents.push(error.message));
   const startedAt = performance.now();
+  const consoleEvents: Array<{ attempt: number; atMs: number; type: string; message: string }> = [];
+  page.on("console", (message) => consoleEvents.push({ attempt, atMs: performance.now() - startedAt, type: message.type(), message: message.text() }));
+  page.on("pageerror", (error) => consoleEvents.push({ attempt, atMs: performance.now() - startedAt, type: "pageerror", message: error.message }));
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const tracePath = join(runRoot, "traces", "trace.zip");
-  const actionLogPath = join(runRoot, "logs", "actions.json");
-  const consoleLogPath = join(runRoot, "logs", "console.json");
   const artifacts: CaptureResult["artifacts"] = [];
-  const attempt = options.attempt ?? 1;
-  const runPath = join(runRoot, "run.json");
   let contextClosed = false;
   let logsWritten = false;
   let currentActionId = flow.id;
@@ -289,15 +323,22 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   await context.route("**/*", async (route) => {
     const request = route.request();
     const url = request.url();
-    if (!url.startsWith("http://") && !url.startsWith("https://")) return route.continue();
-    const origin = new URL(url).origin;
-    if (environment.allowedOrigins.includes(origin)) return route.continue();
-    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+    const parsed = new URL(url);
+    if (!request.isNavigationRequest() && !["http:", "https:"].includes(parsed.protocol)) return route.continue();
+    if (environment.allowedOrigins.includes(parsed.origin)) return route.continue();
+    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${parsed.origin}`);
     await route.abort("blockedbyclient");
+  });
+  await context.routeWebSocket(/wss?:\/\//, (route) => {
+    const url = new URL(route.url());
+    const origin = `${url.protocol === "wss:" ? "https:" : "http:"}//${url.host}`;
+    if (environment.allowedOrigins.includes(origin)) return route.connectToServer();
+    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+    route.close({ code: 1008, reason: "origin is not allowed" });
   });
   const observePage = (observedPage: Page) => observedPage.on("framenavigated", (frame) => {
     const url = frame.url();
-    if (!url.startsWith("http://") && !url.startsWith("https://")) return;
+    if (url === "about:blank") return;
     const origin = new URL(url).origin;
     if (!environment.allowedOrigins.includes(origin)) {
       runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
@@ -350,11 +391,12 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         artifacts.push({ sceneKey: scene.sceneKey, boundary: "after", path });
       }
     }
+    if (runtimeOriginError) throw runtimeOriginError;
     await context.tracing.stop({ path: tracePath });
     await context.close();
     contextClosed = true;
-    await writeImmutableArtifact(actionLogPath, Buffer.from(redactEvidenceText(JSON.stringify(actionEvents, null, 2))));
-    await writeImmutableArtifact(consoleLogPath, Buffer.from(redactEvidenceText(JSON.stringify(consoleEvents, null, 2))));
+    await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
+    await writeImmutableArtifact(consoleLogPath, jsonLines(consoleEvents.map((event) => ({ ...event, message: redactEvidenceText(event.message) }))));
     logsWritten = true;
     if (!video) throw new Error("Playwright video recording did not start");
     const rawVideoPath = await video.path();
@@ -390,7 +432,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
           url: redactEvidenceText(page.url()),
           bodyText: redactEvidenceText(bodyText),
           domExcerpt: redactEvidenceText(domExcerpt),
-          consoleEvents: consoleEvents.slice(-50).map(redactEvidenceText),
+          consoleEvents: consoleEvents.slice(-50).map((event) => ({ ...event, message: redactEvidenceText(event.message) })),
           screenshotPath,
         }, null, 2)),
       );
@@ -400,8 +442,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       failure.runPath = runPath;
     }
     if (!logsWritten) {
-      await writeImmutableArtifact(actionLogPath, Buffer.from(redactEvidenceText(JSON.stringify(actionEvents, null, 2))));
-      await writeImmutableArtifact(consoleLogPath, Buffer.from(redactEvidenceText(JSON.stringify(consoleEvents, null, 2))));
+      await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
+      await writeImmutableArtifact(consoleLogPath, jsonLines(consoleEvents.map((event) => ({ ...event, message: redactEvidenceText(event.message) }))));
     }
     await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({
       id: runId,
@@ -409,7 +451,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       status: "failed",
       actionId: failure.actionId,
       code: failure.code,
-    }, null, 2))).catch(() => undefined);
+    }, null, 2)));
     failure.runPath = runPath;
     throw failure;
   } finally {
