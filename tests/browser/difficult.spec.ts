@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { difficultEnvironment, difficultFlow } from "../../fixtures/apps/difficult/flow.js";
 import { renderDifficultFixture, type DifficultFixtureState } from "../../fixtures/apps/difficult/app.js";
-import { changeDifficultFixture, injectDifficultFailure, resetDifficultFixture } from "../../fixtures/apps/difficult/reset.js";
+import { injectDifficultFailure, resetDifficultFixture } from "../../fixtures/apps/difficult/reset.js";
+import { changeDifficultFixture } from "../../fixtures/apps/difficult/change.js";
 import { runCapture, type CaptureRunError } from "../../src/capture.js";
 
 describe("difficult browser approved flow", () => {
