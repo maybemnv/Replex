@@ -17,6 +17,9 @@ export class CapturePlanError extends Error {
 }
 
 export class CaptureRunError extends Error {
+  evidencePath?: string;
+  tracePath?: string;
+
   constructor(
     readonly code: "AUTH_EXPIRED" | "CHECKPOINT_MISMATCH",
     readonly actionId: string,
@@ -181,6 +184,9 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   const video = page.video();
+  const consoleEvents: string[] = [];
+  page.on("console", (message) => consoleEvents.push(message.text()));
+  page.on("pageerror", (error) => consoleEvents.push(error.message));
   const startedAt = Date.now();
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
@@ -212,6 +218,34 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       captures,
       artifacts,
     };
+  } catch (error) {
+    if (!contextClosed) {
+      const failure = error instanceof CaptureRunError
+        ? error
+        : new CaptureRunError("CHECKPOINT_MISMATCH", "unknown", error instanceof Error ? error.message : String(error));
+      const failureRoot = join(runRoot, "failure");
+      const screenshotPath = join(failureRoot, "screenshot.png");
+      const evidencePath = join(failureRoot, "evidence.json");
+      await writeImmutableArtifact(screenshotPath, await page.screenshot());
+      const bodyText = (await page.locator("body").innerText().catch(() => "")).slice(0, 4000);
+      await writeImmutableArtifact(
+        evidencePath,
+        Buffer.from(JSON.stringify({
+          actionId: failure.actionId,
+          code: failure.code,
+          message: failure.message,
+          url: page.url(),
+          bodyText,
+          consoleEvents: consoleEvents.slice(-50),
+          screenshotPath,
+        }, null, 2)),
+      );
+      await context.tracing.stop({ path: tracePath });
+      failure.evidencePath = evidencePath;
+      failure.tracePath = tracePath;
+      throw failure;
+    }
+    throw error;
   } finally {
     if (!contextClosed) await context.close();
     await browser.close();
