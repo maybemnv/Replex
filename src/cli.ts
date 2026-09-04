@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -20,6 +19,7 @@ export interface StartupToolStatus {
   name: ToolName;
   path: string;
   available: boolean;
+  version?: string;
   detail?: string;
 }
 
@@ -60,16 +60,15 @@ const defaultIO: CliIO = {
 export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [--config <path>]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --help           Show this help\n`;
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
-  if (name === "chromium") {
-    return existsSync(path)
-      ? { name, path, available: true }
-      : { name, path, available: false, detail: "Playwright Chromium executable does not exist" };
-  }
-
-  const result = spawnSync(path, ["-version"], { stdio: "ignore", windowsHide: true });
+  const result = spawnSync(path, [name === "chromium" ? "--version" : "-version"], {
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+  });
   if (result.error) return { name, path, available: false, detail: result.error.message };
   if (result.status !== 0) return { name, path, available: false, detail: `exited with status ${result.status}` };
-  return { name, path, available: true };
+  const version = `${result.stdout}${result.stderr}`.trim().split(/\r?\n/, 1)[0];
+  return { name, path, available: true, version };
 }
 
 export function checkStartupTools(paths: ToolPaths = {}): StartupCheckResult {
