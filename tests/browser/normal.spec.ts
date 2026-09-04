@@ -82,7 +82,7 @@ describe("normal approved flow", () => {
     expect(first.run.attempt).toBe(1);
     expect(second.run.attempt).toBe(2);
     expect(await readFile(first.artifacts[0].path)).not.toEqual(await readFile(first.artifacts[2].path));
-    const actionLog = JSON.parse(await readFile(first.logs.actionsPath, "utf8")) as Array<Record<string, unknown>>;
+    const actionLog = (await readFile(first.logs.actionsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(actionLog[0]).toMatchObject({ attempt: 1, outcome: "passed", target: { kind: "url" }, checkpoint: { kind: "visible" } });
     await expect(stat(first.logs.consolePath)).resolves.toMatchObject({ size: expect.any(Number) });
   }, 30_000);
