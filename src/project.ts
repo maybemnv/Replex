@@ -13,7 +13,9 @@ import {
   type Project,
 } from "./schema.js";
 
-export type SourceCapture = Capture;
+export type SourceCapture = ProjectCaptureInput;
+
+export type { Overlay, Project, RecaptureLineage, RenderOutput, Revision, Scene } from "./schema.js";
 
 export type ProjectCaptureInput = {
   id: string;
