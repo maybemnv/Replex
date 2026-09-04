@@ -25,13 +25,13 @@ function scene(projectValue: Project, index = 0) {
   return projectValue.scenes[index];
 }
 
-function capture(id: string, sceneKey: string, durationMs = 10000) {
+function capture(id: string, sceneKey: string, durationMs = 10000, actionIds = [sceneKey], checkpointActionId = actionIds.at(-1)!) {
   return {
     id,
     sceneKey,
     runId: `run-${id}`,
-    actionIds: [sceneKey],
-    checkpointActionId: sceneKey,
+    actionIds,
+    checkpointActionId,
     path: `captures/${id}.webm`,
     sha256: createHash("sha256").update(id).digest("hex"),
     durationMs,
@@ -73,7 +73,7 @@ describe("EditOperationSchema", () => {
 describe("operation reducer", () => {
   it("creates a scene only from an existing capture and valid flow links", () => {
     const source = project();
-    const newCapture = capture("capture-new", "new-scene", 1000);
+    const newCapture = capture("capture-new", "new-scene", 1000, ["new-step"], "new-step");
     const input = {
       ...source,
       captures: { ...source.captures, [newCapture.id]: newCapture },
@@ -102,7 +102,7 @@ describe("operation reducer", () => {
 
   it("replaces a capture without changing source bytes or scene identity", () => {
     const source = project();
-    const replacement = capture("capture-open-new", "open-demo");
+    const replacement = capture("capture-open-new", "open-demo", 10000, ["open-release-page"], "open-release-page");
     const input = { ...source, captures: { ...source.captures, [replacement.id]: replacement } };
     const sourceHash = source.captures["capture-open"].sha256;
     const result = applyOperations(input, input.currentRevisionId, [{ type: "replace_capture", sceneId: scene(input).id, captureId: replacement.id, reason: "changed UI" }]);
