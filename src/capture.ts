@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { open, mkdir, readFile, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { chromium, type Locator, type Page } from "@playwright/test";
+import { chromium, expect as playwrightExpect, type Locator, type Page } from "@playwright/test";
 import type { BrowserStep, Environment, Flow } from "./schema.js";
 
 export class CapturePlanError extends Error {
@@ -53,7 +53,15 @@ export interface CaptureResult {
   runPath: string;
   rawVideoPath: string;
   tracePath: string;
-  actionEvents: Array<{ actionId: string; atMs: number }>;
+  logs: { actionsPath: string; consolePath: string };
+  actionEvents: Array<{
+    actionId: string;
+    attempt: number;
+    atMs: number;
+    target?: BrowserStep["target"];
+    checkpoint: BrowserStep["checkpoint"];
+    outcome: "passed" | "failed";
+  }>;
   captures: Array<{
     sceneKey: string;
     sourcePath: string;
@@ -147,7 +155,7 @@ export async function writeImmutableArtifact(path: string, data: Buffer): Promis
 function locatorFor(page: Page, step: BrowserStep): Locator {
   const target = step.target;
   if (!target) throw new CaptureRunError("CHECKPOINT_MISMATCH", step.id, "step has no target");
-  if (target.kind === "role") return page.getByRole(target.value as "button", target.name ? { name: target.name } : undefined);
+  if (target.kind === "role") return page.getByRole(target.value as Parameters<Page["getByRole"]>[0], target.name ? { name: target.name } : undefined);
   if (target.kind === "label") return page.getByLabel(target.value);
   if (target.kind === "testId") return page.getByTestId(target.value);
   return page.locator(`a[href="${target.value}"]`);
@@ -156,20 +164,20 @@ function locatorFor(page: Page, step: BrowserStep): Locator {
 async function checkCheckpoint(page: Page, step: BrowserStep): Promise<void> {
   try {
     if (step.checkpoint.kind === "url") {
-      if (page.url() !== step.checkpoint.expected) throw new Error("URL did not match");
+      await playwrightExpect(page).toHaveURL(step.checkpoint.expected);
       return;
     }
     const locator = locatorFor(page, { ...step, target: step.checkpoint.target ?? step.target });
     if (step.checkpoint.kind === "text") {
-      await locator.filter({ hasText: step.checkpoint.expected }).waitFor({ state: "visible" });
+      await playwrightExpect(locator).toContainText(step.checkpoint.expected);
     } else if (step.checkpoint.kind === "attribute") {
       const separator = step.checkpoint.expected.indexOf("=");
       if (separator < 1) throw new Error("attribute checkpoint must use name=value");
       const name = step.checkpoint.expected.slice(0, separator);
       const expected = step.checkpoint.expected.slice(separator + 1);
-      if (await locator.getAttribute(name) !== expected) throw new Error("attribute did not match");
-    } else if (!(await locator.isVisible())) {
-      throw new Error("target was not visible");
+      await playwrightExpect(locator).toHaveAttribute(name, expected);
+    } else {
+      await playwrightExpect(locator).toBeVisible();
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -201,7 +209,7 @@ function assertRuntimeOrigin(page: Page, environment: Environment, actionId: str
 
 export function deriveSceneBoundaries(
   scenes: ScenePlan[],
-  events: CaptureResult["actionEvents"],
+  events: Array<{ actionId: string; atMs: number }>,
   videoDurationSeconds: number,
 ): Array<ScenePlan & { startSeconds: number; endSeconds: number }> {
   const eventTimes = new Map(events.map((event) => [event.actionId, event.atMs]));
@@ -242,15 +250,41 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const startedAt = performance.now();
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
-  const tracePath = join(options.artifactRoot, runId, "trace.zip");
+  const tracePath = join(runRoot, "traces", "trace.zip");
+  const actionLogPath = join(runRoot, "logs", "actions.json");
+  const consoleLogPath = join(runRoot, "logs", "console.json");
   const artifacts: CaptureResult["artifacts"] = [];
   const attempt = options.attempt ?? 1;
   const runPath = join(runRoot, "run.json");
   let contextClosed = false;
+  let logsWritten = false;
+  let currentActionId = flow.id;
+  let runtimeOriginError: CaptureRunError | undefined;
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    if (!request.isNavigationRequest()) return route.continue();
+    const url = request.url();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return route.continue();
+    const origin = new URL(url).origin;
+    if (environment.allowedOrigins.includes(origin)) return route.continue();
+    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+    await route.abort("blockedbyclient");
+  });
+  const observePage = (observedPage: Page) => observedPage.on("framenavigated", (frame) => {
+    const url = frame.url();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return;
+    const origin = new URL(url).origin;
+    if (!environment.allowedOrigins.includes(origin)) {
+      runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+    }
+  });
+  context.on("page", observePage);
+  observePage(page);
 
   try {
     const startedScenes = new Set<string>();
     for (const step of flow.steps) {
+      currentActionId = step.id;
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
         const path = join(runRoot, "screenshots", `${step.sceneKey}-before.png`);
         await writeImmutableArtifact(path, await page.screenshot());
@@ -259,13 +293,31 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       }
       try {
         await executeStep(page, step, options.values ?? {});
+        if (runtimeOriginError) throw runtimeOriginError;
+        assertRuntimeOrigin(page, environment, step.id);
+        await checkCheckpoint(page, step);
       } catch (error) {
-        if (error instanceof CaptureRunError) throw error;
-        throw new CaptureRunError("ACTION_FAILED", step.id, error instanceof Error ? error.message : String(error));
+        const failure = runtimeOriginError ?? (error instanceof CaptureRunError
+          ? error
+          : new CaptureRunError("ACTION_FAILED", step.id, error instanceof Error ? error.message : String(error)));
+        actionEvents.push({
+          actionId: step.id,
+          attempt,
+          atMs: performance.now() - startedAt,
+          target: step.target,
+          checkpoint: step.checkpoint,
+          outcome: "failed",
+        });
+        throw failure;
       }
-      assertRuntimeOrigin(page, environment, step.id);
-      await checkCheckpoint(page, step);
-      actionEvents.push({ actionId: step.id, atMs: performance.now() - startedAt });
+      actionEvents.push({
+        actionId: step.id,
+        attempt,
+        atMs: performance.now() - startedAt,
+        target: step.target,
+        checkpoint: step.checkpoint,
+        outcome: "passed",
+      });
       const scene = scenePlan.find((candidate) => candidate.checkpointActionId === step.id);
       if (scene) {
         const path = join(runRoot, "screenshots", `${scene.sceneKey}-after.png`);
@@ -276,26 +328,28 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     await context.tracing.stop({ path: tracePath });
     await context.close();
     contextClosed = true;
+    await writeImmutableArtifact(actionLogPath, Buffer.from(JSON.stringify(actionEvents, null, 2)));
+    await writeImmutableArtifact(consoleLogPath, Buffer.from(JSON.stringify(consoleEvents, null, 2)));
+    logsWritten = true;
     if (!video) throw new Error("Playwright video recording did not start");
     const rawVideoPath = await video.path();
     const captures = await splitSourceCaptures(rawVideoPath, runRoot, runId, scenePlan, actionEvents, options);
-    await writeImmutableArtifact(join(runRoot, "logs", "actions.json"), Buffer.from(JSON.stringify(actionEvents, null, 2)));
-    await writeImmutableArtifact(join(runRoot, "logs", "console.json"), Buffer.from(JSON.stringify(consoleEvents, null, 2)));
     await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, status: "passed" }, null, 2)));
     return {
       run: { id: runId, attempt, status: "passed" },
       runPath,
       rawVideoPath,
       tracePath,
+      logs: { actionsPath: actionLogPath, consolePath: consoleLogPath },
       actionEvents,
       captures,
       artifacts,
     };
   } catch (error) {
+    const failure = error instanceof CaptureRunError
+      ? error
+      : new CaptureRunError("ACTION_FAILED", currentActionId, error instanceof Error ? error.message : String(error));
     if (!contextClosed) {
-      const failure = error instanceof CaptureRunError
-        ? error
-        : new CaptureRunError("CHECKPOINT_MISMATCH", "unknown", error instanceof Error ? error.message : String(error));
       const failureRoot = join(runRoot, "failure");
       const screenshotPath = join(failureRoot, "screenshot.png");
       const evidencePath = join(failureRoot, "evidence.json");
@@ -316,19 +370,23 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         }, null, 2)),
       );
       await context.tracing.stop({ path: tracePath });
-      await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({
-        id: runId,
-        attempt,
-        status: "failed",
-        actionId: failure.actionId,
-        code: failure.code,
-      }, null, 2)));
       failure.evidencePath = evidencePath;
       failure.tracePath = tracePath;
       failure.runPath = runPath;
-      throw failure;
     }
-    throw error;
+    if (!logsWritten) {
+      await writeImmutableArtifact(actionLogPath, Buffer.from(JSON.stringify(actionEvents, null, 2)));
+      await writeImmutableArtifact(consoleLogPath, Buffer.from(JSON.stringify(consoleEvents, null, 2)));
+    }
+    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({
+      id: runId,
+      attempt,
+      status: "failed",
+      actionId: failure.actionId,
+      code: failure.code,
+    }, null, 2))).catch(() => undefined);
+    failure.runPath = runPath;
+    throw failure;
   } finally {
     if (!contextClosed) await context.close();
     await browser.close();
