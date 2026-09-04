@@ -63,15 +63,11 @@ describe("CLI", () => {
   });
 
   it("records the version reported by an executable", () => {
-    const result = checkStartupTools({
-      chromium: process.execPath,
-      ffmpeg: "C:/missing/ffmpeg.exe",
-      ffprobe: "C:/missing/ffprobe.exe",
-    });
+    const result = checkStartupTools({ ffmpeg: "C:/missing/ffmpeg.exe", ffprobe: "C:/missing/ffprobe.exe" });
 
     expect(result.tools.find((tool) => tool.name === "chromium")).toMatchObject({
       available: true,
-      version: expect.stringContaining("v"),
+      version: expect.stringMatching(/(?:Chrome|Chromium)\//),
     });
   });
 });
