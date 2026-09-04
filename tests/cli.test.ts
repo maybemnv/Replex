@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runCli } from "../src/cli.js";
+import { fileURLToPath } from "node:url";
+import { checkStartupTools, runCli } from "../src/cli.js";
 
 function captureOutput() {
   const output = { stdout: "", stderr: "" };
@@ -49,5 +50,28 @@ describe("CLI", () => {
     expect(output.stderr).toContain("chromium");
     expect(output.stderr).toContain("ffmpeg");
     expect(output.stderr).toContain("ffprobe");
+  });
+
+  it("executes Chromium's version probe instead of trusting an existing path", () => {
+    const result = checkStartupTools({
+      chromium: fileURLToPath(import.meta.url),
+      ffmpeg: "C:/missing/ffmpeg.exe",
+      ffprobe: "C:/missing/ffprobe.exe",
+    });
+
+    expect(result.missing).toContain("chromium");
+  });
+
+  it("records the version reported by an executable", () => {
+    const result = checkStartupTools({
+      chromium: process.execPath,
+      ffmpeg: "C:/missing/ffmpeg.exe",
+      ffprobe: "C:/missing/ffprobe.exe",
+    });
+
+    expect(result.tools.find((tool) => tool.name === "chromium")).toMatchObject({
+      available: true,
+      version: expect.stringContaining("v"),
+    });
   });
 });
