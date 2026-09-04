@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { open, mkdir } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { open, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { chromium, type Locator, type Page } from "@playwright/test";
 import type { BrowserStep, Environment, Flow } from "./schema.js";
@@ -36,13 +37,25 @@ export interface CaptureOptions {
   artifactRoot: string;
   values?: Record<string, string>;
   reset?: () => Promise<void>;
+  ffmpegPath?: string;
+  ffprobePath?: string;
 }
 
 export interface CaptureResult {
   run: { id: string; status: "passed" };
   tracePath: string;
   actionEvents: Array<{ actionId: string; atMs: number }>;
-  captures: Array<{ sceneKey: string; durationMs: number; actionIds: string[] }>;
+  captures: Array<{
+    sceneKey: string;
+    sourcePath: string;
+    sha256: string;
+    width: number;
+    height: number;
+    durationMs: number;
+    runId: string;
+    actionIds: string[];
+    checkpointActionId: string;
+  }>;
   artifacts: Array<{ sceneKey: string; path: string }>;
 }
 
@@ -156,16 +169,24 @@ async function executeStep(page: Page, step: BrowserStep, values: Record<string,
 export async function runCapture(flow: Flow, environment: Environment, options: CaptureOptions): Promise<CaptureResult> {
   validateCapturePlan(flow, environment);
   await options.reset?.();
+  const runId = randomUUID();
+  const runRoot = join(options.artifactRoot, runId);
+  const rawVideoRoot = join(runRoot, "raw-video");
+  await mkdir(rawVideoRoot, { recursive: true });
   const browser = await chromium.launch();
-  const context = await browser.newContext(browserContextOptions(environment));
+  const context = await browser.newContext({
+    ...browserContextOptions(environment),
+    recordVideo: { dir: rawVideoRoot, size: environment.viewport },
+  });
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
+  const video = page.video();
   const startedAt = Date.now();
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
-  const runId = randomUUID();
   const tracePath = join(options.artifactRoot, runId, "trace.zip");
   const artifacts: CaptureResult["artifacts"] = [];
+  let contextClosed = false;
 
   try {
     for (const step of flow.steps) {
@@ -179,15 +200,85 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       artifacts.push({ sceneKey: scene.sceneKey, path });
     }
     await context.tracing.stop({ path: tracePath });
+    await context.close();
+    contextClosed = true;
+    if (!video) throw new Error("Playwright video recording did not start");
+    const rawVideoPath = await video.path();
+    const captures = await splitSourceCaptures(rawVideoPath, runRoot, runId, scenePlan, actionEvents, options);
     return {
       run: { id: runId, status: "passed" },
       tracePath,
       actionEvents,
-      captures: scenePlan.map((scene) => ({ sceneKey: scene.sceneKey, durationMs: Math.max(1, Date.now() - startedAt), actionIds: scene.actionIds })),
+      captures,
       artifacts,
     };
   } finally {
-    await context.close();
+    if (!contextClosed) await context.close();
     await browser.close();
   }
+}
+
+async function splitSourceCaptures(
+  rawVideoPath: string,
+  runRoot: string,
+  runId: string,
+  scenes: ScenePlan[],
+  events: CaptureResult["actionEvents"],
+  options: CaptureOptions,
+): Promise<CaptureResult["captures"]> {
+  const ffmpeg = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
+  const ffprobe = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
+  const rawProbe = probeVideo(ffprobe, rawVideoPath);
+  const eventTimes = new Map(events.map((event) => [event.actionId, event.atMs]));
+  const finalEventMs = Math.max(1, ...events.map((event) => event.atMs));
+  let previousEnd = 0;
+  const captures: CaptureResult["captures"] = [];
+
+  for (const [index, scene] of scenes.entries()) {
+    const checkpointMs = eventTimes.get(scene.checkpointActionId) ?? finalEventMs;
+    const endSeconds = index === scenes.length - 1
+      ? rawProbe.durationSeconds
+      : Math.max(previousEnd + 0.05, (checkpointMs / finalEventMs) * rawProbe.durationSeconds);
+    const durationSeconds = Math.max(0.05, endSeconds - previousEnd);
+    const sourcePath = join(runRoot, "captures", `${scene.sceneKey}.webm`);
+    await mkdir(dirname(sourcePath), { recursive: true });
+    const result = spawnSync(
+      ffmpeg,
+      ["-hide_banner", "-loglevel", "error", "-ss", previousEnd.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", sourcePath],
+      { encoding: "utf8", windowsHide: true, shell: false },
+    );
+    if (result.error || result.status !== 0) {
+      throw new Error(`ffmpeg scene split failed: ${result.error?.message ?? result.stderr.trim()}`);
+    }
+    const probe = probeVideo(ffprobe, sourcePath);
+    const provenance = { runId, actionIds: scene.actionIds, checkpointActionId: scene.checkpointActionId };
+    const bytes = await readFile(sourcePath);
+    captures.push({
+      sceneKey: scene.sceneKey,
+      sourcePath,
+      sha256: fingerprintCapture(bytes, provenance),
+      width: probe.width,
+      height: probe.height,
+      durationMs: Math.max(1, Math.round(probe.durationSeconds * 1000)),
+      ...provenance,
+    });
+    previousEnd = endSeconds;
+  }
+  return captures;
+}
+
+function probeVideo(ffprobe: string, path: string): { width: number; height: number; durationSeconds: number } {
+  const result = spawnSync(
+    ffprobe,
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration", "-of", "json", path],
+    { encoding: "utf8", windowsHide: true, shell: false },
+  );
+  if (result.error || result.status !== 0) throw new Error(`ffprobe failed: ${result.error?.message ?? result.stderr.trim()}`);
+  const parsed = JSON.parse(result.stdout) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
+  const stream = parsed.streams?.[0];
+  const durationSeconds = Number(parsed.format?.duration);
+  if (!stream?.width || !stream.height || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error("ffprobe returned invalid video metadata");
+  }
+  return { width: stream.width, height: stream.height, durationSeconds };
 }
