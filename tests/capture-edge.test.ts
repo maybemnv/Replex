@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import {
   browserContextOptions,
@@ -177,6 +177,60 @@ describe("capture safety boundary", () => {
     } finally {
       await source.close();
       await target.close();
+    }
+  }, 30_000);
+
+  it("uses the declared semantic role instead of assuming a button", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page"><a aria-label="Details" href="#details">Open</a></main>');
+    });
+    const flow = normalFlow(server.origin);
+    flow.steps = [
+      flow.steps[0],
+      {
+        id: "open-details",
+        order: 1,
+        action: "click",
+        target: { kind: "role", value: "link", name: "Details" },
+        consequential: false,
+        approved: true,
+        checkpoint: { kind: "url", expected: `${server.origin}/#details` },
+        sceneKey: "details",
+      },
+    ];
+    try {
+      await expect(runCapture(flow, normalEnvironment(server.origin), {
+        artifactRoot: join(tmpdir(), "replex-edge-role"),
+      })).resolves.toMatchObject({ run: { status: "passed" } });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it("records the attempt and action log when media finalization fails", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="release-page">ok</main>');
+    });
+    const flow = normalFlow(server.origin);
+    flow.steps = [flow.steps[0]];
+    let failure: { runPath: string };
+    try {
+      try {
+        await runCapture(flow, normalEnvironment(server.origin), {
+          artifactRoot: join(tmpdir(), "replex-edge-media-failure"),
+          attempt: 7,
+          ffprobePath: "C:/missing/ffprobe.exe",
+        });
+        throw new Error("expected media finalization to fail");
+      } catch (error) {
+        failure = error as typeof failure;
+      }
+      await expect(readFile(failure.runPath, "utf8")).resolves.toContain('"attempt": 7');
+      const actionsPath = join(dirname(failure.runPath), "logs", "actions.json");
+      const actions = JSON.parse(await readFile(actionsPath, "utf8")) as Array<Record<string, unknown>>;
+      expect(actions[0]).toMatchObject({ attempt: 7, actionId: "open-release-page", outcome: "passed" });
+    } finally {
+      await server.close();
     }
   }, 30_000);
 });
