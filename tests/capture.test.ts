@@ -6,6 +6,7 @@ import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import {
   CapturePlanError,
   buildScenePlan,
+  fingerprintCapture,
   validateCapturePlan,
   writeImmutableArtifact,
 } from "../src/capture.js";
@@ -42,6 +43,14 @@ describe("approved capture plan", () => {
 });
 
 describe("immutable capture artifacts", () => {
+  it("fingerprints non-empty bytes with immutable provenance", () => {
+    const source = Buffer.from("capture-bytes");
+    const provenance = { runId: "run-1", actionIds: ["open-release-page"], checkpointActionId: "open-release-page" };
+
+    expect(fingerprintCapture(source, provenance)).toEqual(fingerprintCapture(source, provenance));
+    expect(() => fingerprintCapture(Buffer.alloc(0), provenance)).toThrow("capture is empty");
+  });
+
   it("does not overwrite an existing artifact", async () => {
     const root = join(tmpdir(), `replex-capture-${Date.now()}`);
     await mkdir(root, { recursive: true });
