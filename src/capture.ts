@@ -4,6 +4,7 @@ import { open, mkdir, readFile, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, expect as playwrightExpect, type Locator, type Page } from "@playwright/test";
+import { checkStartupTools, StartupCheckError } from "./cli.js";
 import type { BrowserStep, Environment, Flow } from "./schema.js";
 
 export class CapturePlanError extends Error {
@@ -46,6 +47,7 @@ export interface CaptureOptions {
   ffmpegPath?: string;
   ffprobePath?: string;
   storageStatePath?: string;
+  uploadRoots?: string[];
 }
 
 export interface CaptureResult {
@@ -106,6 +108,22 @@ export function resolveStorageStatePath(artifactRoot: string, storageStatePath: 
     throw new Error("browser storage state must remain outside project artifacts");
   }
   return storagePath;
+}
+
+export function resolveUploadPath(path: string, roots: string[]): string {
+  const resolvedPath = resolve(path);
+  const allowed = roots.some((root) => {
+    const relation = relative(resolve(root), resolvedPath);
+    return !relation || (!relation.startsWith("..") && !isAbsolute(relation));
+  });
+  if (!allowed) throw new Error("upload path is outside approved roots");
+  return resolvedPath;
+}
+
+export function redactEvidenceText(value: string): string {
+  return value
+    .replace(/([?&](?:token|key|password|secret|auth)=)[^&#\s"']+/gi, "$1[REDACTED]")
+    .replace(/\b(?:token|password|secret|authorization)\s*[:=]\s*[^\s<"']+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`);
 }
 
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
@@ -178,6 +196,10 @@ async function checkCheckpoint(page: Page, step: BrowserStep): Promise<void> {
       await playwrightExpect(locator).toHaveAttribute(name, expected);
     } else {
       await playwrightExpect(locator).toBeVisible();
+      const observed = [await locator.textContent(), await locator.getAttribute("aria-label"), step.checkpoint.target?.name, step.checkpoint.target?.value]
+        .filter(Boolean)
+        .join(" ");
+      if (!observed.includes(step.checkpoint.expected)) throw new Error("visible state did not match expected value");
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -185,7 +207,7 @@ async function checkCheckpoint(page: Page, step: BrowserStep): Promise<void> {
   }
 }
 
-async function executeStep(page: Page, step: BrowserStep, values: Record<string, string>): Promise<void> {
+async function executeStep(page: Page, step: BrowserStep, values: Record<string, string>, uploadRoots: string[]): Promise<void> {
   if (step.action === "goto") {
     const response = await page.goto(step.target?.value ?? "");
     if (response?.status() === 401) throw new CaptureRunError("AUTH_EXPIRED", step.id, "authentication expired");
@@ -196,7 +218,9 @@ async function executeStep(page: Page, step: BrowserStep, values: Record<string,
   } else if (step.action === "select") {
     await locatorFor(page, step).selectOption(values[step.valueRef ?? ""] ?? "");
   } else if (step.action === "upload") {
-    await locatorFor(page, step).setInputFiles(values[step.valueRef ?? ""]);
+    await locatorFor(page, step).setInputFiles(resolveUploadPath(values[step.valueRef ?? ""], uploadRoots));
+  } else if (step.action === "waitFor") {
+    await locatorFor(page, step).waitFor({ state: "visible" });
   }
 }
 
@@ -227,6 +251,8 @@ export function deriveSceneBoundaries(
 
 export async function runCapture(flow: Flow, environment: Environment, options: CaptureOptions): Promise<CaptureResult> {
   validateCapturePlan(flow, environment);
+  const startup = checkStartupTools({ ffmpeg: options.ffmpegPath, ffprobe: options.ffprobePath });
+  if (!startup.ok) throw new StartupCheckError(startup);
   await options.reset?.();
   const runId = randomUUID();
   const runRoot = join(options.artifactRoot, runId);
@@ -262,7 +288,6 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   let runtimeOriginError: CaptureRunError | undefined;
   await context.route("**/*", async (route) => {
     const request = route.request();
-    if (!request.isNavigationRequest()) return route.continue();
     const url = request.url();
     if (!url.startsWith("http://") && !url.startsWith("https://")) return route.continue();
     const origin = new URL(url).origin;
@@ -292,7 +317,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         startedScenes.add(step.sceneKey);
       }
       try {
-        await executeStep(page, step, options.values ?? {});
+        await executeStep(page, step, options.values ?? {}, options.uploadRoots ?? []);
         if (runtimeOriginError) throw runtimeOriginError;
         assertRuntimeOrigin(page, environment, step.id);
         await checkCheckpoint(page, step);
@@ -328,8 +353,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     await context.tracing.stop({ path: tracePath });
     await context.close();
     contextClosed = true;
-    await writeImmutableArtifact(actionLogPath, Buffer.from(JSON.stringify(actionEvents, null, 2)));
-    await writeImmutableArtifact(consoleLogPath, Buffer.from(JSON.stringify(consoleEvents, null, 2)));
+    await writeImmutableArtifact(actionLogPath, Buffer.from(redactEvidenceText(JSON.stringify(actionEvents, null, 2))));
+    await writeImmutableArtifact(consoleLogPath, Buffer.from(redactEvidenceText(JSON.stringify(consoleEvents, null, 2))));
     logsWritten = true;
     if (!video) throw new Error("Playwright video recording did not start");
     const rawVideoPath = await video.path();
@@ -362,10 +387,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
           actionId: failure.actionId,
           code: failure.code,
           message: failure.message,
-          url: page.url(),
-          bodyText,
-          domExcerpt,
-          consoleEvents: consoleEvents.slice(-50),
+          url: redactEvidenceText(page.url()),
+          bodyText: redactEvidenceText(bodyText),
+          domExcerpt: redactEvidenceText(domExcerpt),
+          consoleEvents: consoleEvents.slice(-50).map(redactEvidenceText),
           screenshotPath,
         }, null, 2)),
       );
@@ -375,8 +400,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       failure.runPath = runPath;
     }
     if (!logsWritten) {
-      await writeImmutableArtifact(actionLogPath, Buffer.from(JSON.stringify(actionEvents, null, 2)));
-      await writeImmutableArtifact(consoleLogPath, Buffer.from(JSON.stringify(consoleEvents, null, 2)));
+      await writeImmutableArtifact(actionLogPath, Buffer.from(redactEvidenceText(JSON.stringify(actionEvents, null, 2))));
+      await writeImmutableArtifact(consoleLogPath, Buffer.from(redactEvidenceText(JSON.stringify(consoleEvents, null, 2))));
     }
     await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({
       id: runId,
