@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { Capture, Project } from "./schema.js";
 import { applyOperations } from "./operations.js";
 
@@ -21,6 +24,8 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   if (!target) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture scene key does not exist" };
   const previous = project.captures[target.captureId];
   if (!previous || input.id === previous.id || input.durationMs <= 0 || !input.changedStepIds.length) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture metadata is incomplete" };
+  const sourcePath = safePath(root, input.path);
+  if (!sourcePath || !existsSync(sourcePath) || createHash("sha256").update(readFileSync(sourcePath)).digest("hex") !== input.sha256) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture is missing or does not match its SHA-256" };
   const expectedSteps = new Set(target.actionIds);
   if (input.changedStepIds.some((id) => !expectedSteps.has(id))) return { ok: false, code: "INVALID_RECAPTURE", detail: "changed steps must belong to the target scene" };
   const replacement: Capture = {
@@ -34,10 +39,16 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   };
   const before = unaffectedProjection(project, target.id);
   const withCapture: Project = { ...project, captures: { ...project.captures, [replacement.id]: replacement } };
-  const mutation = applyOperations(withCapture, withCapture.currentRevisionId, [{ type: "replace_capture", sceneId: target.id, captureId: replacement.id, reason: input.reason }], { actor: "recapture", root });
+  const mutation = applyOperations(withCapture, withCapture.currentRevisionId, [{ type: "replace_capture", sceneId: target.id, captureId: replacement.id, changedStepIds: input.changedStepIds, reason: input.reason }], { actor: "recapture", root });
   if (!mutation.ok) return { ok: false, code: "INVALID_RECAPTURE", detail: mutation.detail };
   if (unaffectedProjection(mutation.project, target.id) !== before) return { ok: false, code: "PRESERVATION_MISMATCH", detail: "unaffected scene, overlay, or capture semantics changed" };
   return { ok: true, project: mutation.project, preserved: true };
+}
+
+function safePath(root: string, value: string): string | undefined {
+  if (isAbsolute(value) || value.includes("..")) return undefined;
+  const resolved = resolve(root, value);
+  return relative(resolve(root), resolved).startsWith("..") ? undefined : resolved;
 }
 
 function unaffectedProjection(project: Project, targetSceneId: string): string {

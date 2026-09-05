@@ -238,6 +238,7 @@ export const EditOperationSchema = z.discriminatedUnion("type", [
     type: z.literal("replace_capture"),
     sceneId: IdSchema,
     captureId: IdSchema,
+    changedStepIds: z.array(IdSchema).min(1).optional(),
     reason: OperationReasonSchema,
   }).strict(),
   z.object({ type: z.literal("set_speed"), sceneId: IdSchema, speed: SceneSchema.shape.speed }).strict(),
