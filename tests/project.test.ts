@@ -15,9 +15,9 @@ function project() {
     environment: normalEnvironment(origin),
     flow: normalFlow(origin),
     captures: [
-      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000 },
-      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000 },
-      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000 },
+      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000, sha256: "a".repeat(64) },
+      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000, sha256: "b".repeat(64) },
+      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000, sha256: "c".repeat(64) },
     ],
   });
 }
@@ -60,6 +60,13 @@ describe("project persistence", () => {
     expect(() => ProjectSchema.parse({ ...first, unknown: true })).toThrow();
   });
 
+  it("rejects ungrounded capture provenance and dangling revisions", () => {
+    const first = project();
+    expect(() => createProject({ ...projectInput(), projectId: "bad-provenance", captures: [{ id: "capture-bad", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000, sha256: "a".repeat(64), actionIds: ["wrong-action"] }] })).toThrow("capture actions do not match approved flow");
+    expect(() => ProjectSchema.parse({ ...first, currentRevisionId: "missing" })).toThrow("current revision does not exist");
+    expect(() => ProjectSchema.parse({ ...first, captures: { ...first.captures, "capture-open": { ...first.captures["capture-open"], path: "../outside.mp4" } } })).toThrow("project-relative");
+  });
+
   it("derives stable scene IDs from only the project and approved scene key", () => {
     const first = project();
     const second = project();
@@ -91,7 +98,19 @@ describe("project persistence", () => {
   it("keeps the last complete project after an interrupted atomic write", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-project-"));
     const first = project();
-    const next = { ...project(), currentRevisionId: "revision-next", revision: { id: "revision-next", manifestSha256: "pending" } };
+    const baseline = project();
+    const next = {
+      ...baseline,
+      currentRevisionId: "revision-next",
+      revisions: [...baseline.revisions, {
+        id: "revision-next",
+        parentId: "revision-0",
+        actor: "operator" as const,
+        operationIds: [],
+        manifestSha256: semanticHash(baseline),
+        createdAt: "2026-09-02T00:00:00.000Z",
+      }],
+    };
 
     try {
       await writeRevision(root, first);
@@ -114,9 +133,9 @@ function projectInput(): Omit<ProjectInput, "projectId"> {
     environment: normalEnvironment(origin),
     flow: normalFlow(origin),
     captures: [
-      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000 },
-      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000 },
-      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000 },
+      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000, sha256: "a".repeat(64) },
+      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000, sha256: "b".repeat(64) },
+      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000, sha256: "c".repeat(64) },
     ],
   };
 }

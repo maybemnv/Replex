@@ -177,7 +177,7 @@ export const CaptureSchema = z
     runId: IdSchema,
     actionIds: z.array(IdSchema).min(1),
     checkpointActionId: IdSchema,
-    path: nonEmptyText,
+    path: nonEmptyText.refine((path) => !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path) && !path.split(/[\\/]+/).includes(".."), "capture path must be project-relative"),
     sha256: Sha256Schema,
     durationMs: MillisecondsSchema.refine((value) => value > 0, "capture duration must be positive"),
     width: z.number().int().positive(),
@@ -288,8 +288,16 @@ export const ProjectSchema = z
     const captureIds = new Set(Object.keys(value.captures));
     const sceneIds = new Set(value.scenes.map((scene) => scene.id));
     const revisionIds = new Set(value.revisions.map((revision) => revision.id));
+    if (revisionIds.size !== value.revisions.length) context.addIssue({ code: "custom", path: ["revisions"], message: "revision IDs must be unique" });
+    if (!revisionIds.has(value.currentRevisionId)) context.addIssue({ code: "custom", path: ["currentRevisionId"], message: "current revision does not exist" });
     for (const [key, capture] of Object.entries(value.captures)) {
       if (key !== capture.id) context.addIssue({ code: "custom", path: ["captures", key], message: "capture key must equal capture id" });
+      const steps = value.flow.steps.filter((step) => step.sceneKey === capture.sceneKey);
+      if (steps.length !== capture.actionIds.length || steps.some((step, index) => step.id !== capture.actionIds[index])) context.addIssue({ code: "custom", path: ["captures", key, "actionIds"], message: "capture actions must match the approved scene flow" });
+      if (capture.checkpointActionId !== steps.at(-1)?.id) context.addIssue({ code: "custom", path: ["captures", key, "checkpointActionId"], message: "capture checkpoint must match the approved scene flow" });
+    }
+    for (const [index, revision] of value.revisions.entries()) {
+      if (revision.parentId && (!revisionIds.has(revision.parentId) || revision.parentId === revision.id)) context.addIssue({ code: "custom", path: ["revisions", index, "parentId"], message: "revision parent must be another existing revision" });
     }
     for (const [index, scene] of value.scenes.entries()) {
       if (!captureIds.has(scene.captureId)) context.addIssue({ code: "custom", path: ["scenes", index, "captureId"], message: "scene capture does not exist" });
