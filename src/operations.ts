@@ -52,7 +52,9 @@ export function applyOperations(
   }
 
   const revisionId = revisionIdFor(baseRevisionId, parsedBatch.data);
-  const operationIds = parsedBatch.data.map(() => randomUUID());
+  const operationIds = parsedBatch.data.map((operation, index) =>
+    `operation-${digest(canonicalJson({ revisionId, index, operation })).slice(0, 16)}`,
+  );
   const next = structuredClone(project) as Project;
 
   for (const [index, operation] of parsedBatch.data.entries()) {
