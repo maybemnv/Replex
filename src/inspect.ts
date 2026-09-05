@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Project } from "./schema.js";
 
@@ -14,7 +14,7 @@ export type InspectionRequest =
 export interface ArtifactReference {
   id: string;
   path: string;
-  kind: "capture" | "screenshot" | "verification";
+  kind: "capture" | "screenshot" | "trace" | "verification";
 }
 
 export type InspectionResult =
@@ -26,8 +26,6 @@ const MAX_SUMMARY_CHARS = 1000;
 /** The model-facing read seam: stable IDs in, short redacted facts and handles out. */
 export function inspectProject(project: Project, root: string, request: InspectionRequest): InspectionResult {
   if (!validRequest(request)) return { ok: false, code: "INVALID_REQUEST", detail: "inspection request must use one fixed tool and stable ID fields" };
-  if (request.kind === "inspect_browser_trace") return { ok: false, code: "FORBIDDEN", detail: "raw browser traces are never model-disclosable" };
-
   let summary: string;
   let artifacts: ArtifactReference[] = [];
   switch (request.kind) {
@@ -56,12 +54,26 @@ export function inspectProject(project: Project, root: string, request: Inspecti
     case "inspect_screenshot": {
       const scene = project.scenes.find((candidate) => candidate.id === request.sceneId);
       if (!scene) return { ok: false, code: "NOT_FOUND", detail: "scene does not exist" };
-      summary = `No screenshot is disclosed for scene ${scene.id}; request its bounded capture metadata instead.`;
+      const path = `screenshots/${scene.sceneKey}-after.png`;
+      if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "targeted screenshot does not exist" };
+      summary = `Targeted post-checkpoint screenshot is available for scene ${scene.id}.`;
+      artifacts = [{ id: `screenshot:${scene.id}:after`, path, kind: "screenshot" }];
       break;
     }
-    case "inspect_verification_results":
-      summary = `No persisted verification result is attached to revision ${project.currentRevisionId}. Verification must run before rendering.`;
+    case "inspect_browser_trace": {
+      const path = "traces/trace.zip";
+      if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "trace evidence does not exist" };
+      summary = "Trace evidence exists. The raw trace remains undisclosed; use the named capture and checkpoint evidence instead.";
+      artifacts = [{ id: "trace:latest", path, kind: "trace" }];
       break;
+    }
+    case "inspect_verification_results": {
+      const path = `verification/${project.currentRevisionId}.json`;
+      if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "verification evidence does not exist" };
+      summary = `Verification evidence is available for revision ${project.currentRevisionId}.`;
+      artifacts = [{ id: `verification:${project.currentRevisionId}`, path, kind: "verification" }];
+      break;
+    }
   }
   const redacted = redact(summary);
   const result: InspectionResult = { ok: true, tool: request.kind, summary: cap(redacted), artifacts, truncated: redacted.length > MAX_SUMMARY_CHARS };
