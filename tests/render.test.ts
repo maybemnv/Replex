@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { buildRenderJob, executeRenderJob, type RenderJob } from "../src/render.js";
-import { createProject, type Project } from "../src/project.js";
+import { createProject, type Project, writeRevision } from "../src/project.js";
 import { verifyProject } from "../src/verify.js";
 
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
@@ -86,12 +86,15 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       };
       const verification = verifyProject(source, root);
       const job = buildRenderJob(source, root, verification);
+      await writeRevision(root, source as Project);
       const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath });
 
       expect(result.outputPath).toBe(join(root, "renders", "revision-0.mp4"));
       expect(result.probe).toMatchObject({ width: 1920, height: 1080, fps: 30, videoCodec: "h264", audioCodec: "aac" });
       expect(result.probe.durationMs).toBeGreaterThanOrEqual(25000);
       expect(result.probe.durationMs).toBeLessThanOrEqual(35000);
+      expect(result.output).toMatchObject({ id: "render-output-revision-0", revisionId: "revision-0", path: "renders/revision-0.mp4", verificationId: verification.id });
+      expect((JSON.parse(await readFile(join(root, "project.json"), "utf8")) as Project).outputs).toEqual([result.output]);
       expect(await readFile(join(root, "renders", "revision-0.render-job.json"), "utf8")).toContain(job.sha256);
       expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("-filter_complex");
     } finally {

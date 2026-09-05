@@ -200,4 +200,18 @@ describe("operation reducer", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("redacts secret-shaped rejected operation inputs in the audit trail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-operations-redaction-"));
+    try {
+      const source = project();
+      const rejected = applyOperations(source, source.currentRevisionId, [{ type: "set_title", overlay: { id: "title-1", sceneId: scene(source).id, kind: "title", text: "password=hidden-value", placement: "top", startMs: 10000, endMs: 10000 } }], { root });
+      expect(rejected).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
+      const audit = JSON.parse((await readFile(join(root, "operations.jsonl"), "utf8")).trim());
+      expect(JSON.stringify(audit)).not.toContain("hidden-value");
+      expect(audit.operations[0].overlay.text).toContain("[REDACTED]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

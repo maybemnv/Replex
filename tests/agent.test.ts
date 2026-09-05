@@ -83,4 +83,22 @@ describe("recorded bounded model loop", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("fails closed when Claude reports tool use without a parsed call", async () => {
+    const { root, project } = await fixture();
+    try {
+      let calls = 0;
+      const result = await runClaudeDraft(project, root, {
+        createMessage: async () => {
+          calls += 1;
+          return { stopReason: "tool_use" as const, toolCalls: [] };
+        },
+      });
+      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL", toolCalls: 0 });
+      if (!result.ok) expect(result.detail).toContain("without a parsed tool call");
+      expect(calls).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

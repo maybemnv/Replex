@@ -31,6 +31,17 @@ describe("adversarial evaluation ledger", () => {
     expect(decision).toMatchObject({ decision: "FAIL", productionAuthorized: false });
   });
 
+  it("requires unique attempts, one recapture, and coherent stage statuses", () => {
+    const duplicateAttempts = passingRows.map((row) => row.app === "dynamic" ? { ...row, attempt: 1 as const } : row);
+    expect(calculateDecision(duplicateAttempts, { usefulnessReviews: [true, true, true] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["dynamic unique attempt IDs"]) });
+
+    const duplicateRecapture = passingRows.map((row) => row.app === "dynamic" ? { ...row, recapture: "passed" as const } : row);
+    expect(calculateDecision(duplicateRecapture, { usefulnessReviews: [true, true, true] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["dynamic exactly one recapture evidence"]) });
+
+    const contradictory = passingRows.map((row, index) => index === 0 ? { ...row, capture: "failed" as const, edit: "passed" as const } : row);
+    expect(calculateDecision(contradictory, { usefulnessReviews: [true, true, true] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["normal attempt 1 contradictory stage statuses"]) });
+  });
+
   it("persists raw rows with a decision and never lets not-run stages pass", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-evaluation-"));
     try {

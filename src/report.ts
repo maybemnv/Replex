@@ -12,8 +12,15 @@ export interface ReportInput {
 export function generateReport(project: Project, root: string, input: ReportInput = {}): string {
   const reportPath = join(root, "report.html");
   writeFileSync(join(root, "tokens.css"), TOKENS, "utf8");
-  writeFileSync(reportPath, reportHtml(project, input), "utf8");
+  writeFileSync(reportPath, reportHtml(project, { ...input, render: input.render ?? authoritativeRender(project) }), "utf8");
   return reportPath;
+}
+
+function authoritativeRender(project: Project): ReportInput["render"] {
+  const output = [...project.outputs].reverse().find((candidate) => candidate.revisionId === project.currentRevisionId);
+  return output
+    ? { path: output.path, durationMs: output.ffprobe.durationMs, verification: "passed" }
+    : undefined;
 }
 
 function reportHtml(project: Project, input: ReportInput): string {
