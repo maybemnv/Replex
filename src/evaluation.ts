@@ -1,5 +1,5 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 export type StageStatus = "passed" | "failed" | "not_run" | "not_applicable";
 export type AppId = "normal" | "dynamic" | "difficult";
@@ -35,6 +35,11 @@ export interface EvaluationEvidence {
   decision: GateDecision;
 }
 
+export interface EvaluationInput {
+  usefulnessReviews: boolean[];
+  evidenceRoot?: string;
+}
+
 /** Calls every app twice and records each attempt as evidence, including failures. */
 export async function runAdversarialEvaluation(
   apps: AppId[],
@@ -46,7 +51,7 @@ export async function runAdversarialEvaluation(
 }
 
 /** Applies fixed POC thresholds. It never upgrades missing external evidence into a pass. */
-export function calculateDecision(rows: EvaluationRow[], input: { usefulnessReviews: boolean[] }): GateDecision {
+export function calculateDecision(rows: EvaluationRow[], input: EvaluationInput): GateDecision {
   const missing: string[] = [];
   const failed: string[] = [];
   const expected = ["normal", "dynamic", "difficult"] as const;
@@ -55,6 +60,7 @@ export function calculateDecision(rows: EvaluationRow[], input: { usefulnessRevi
   const finalOutputs = rows.filter((row) => row.render === "passed").length + rows.filter((row) => row.recapture === "passed").length;
   const recapturesPassed = rows.filter((row) => row.recapture === "passed").length;
   const usefulnessYes = input.usefulnessReviews.filter(Boolean).length;
+  if (!hasRetainedArtifacts(input.evidenceRoot, rows)) missing.push("retained evaluation artifacts");
   for (const row of rows) {
     for (const stage of ["browser", "capture", "edit", "model", "verify", "render"] as const) {
       if (row[stage] === "not_run") missing.push(`${row.app} attempt ${row.attempt} ${stage} evidence`);
@@ -74,8 +80,8 @@ export function calculateDecision(rows: EvaluationRow[], input: { usefulnessRevi
 }
 
 /** Persists raw measured rows and a fixed-threshold decision without changing either. */
-export function writeEvaluation(root: string, rows: EvaluationRow[], input: { usefulnessReviews: boolean[] }): EvaluationEvidence {
-  const decision = calculateDecision(rows, input);
+export function writeEvaluation(root: string, rows: EvaluationRow[], input: EvaluationInput): EvaluationEvidence {
+  const decision = calculateDecision(rows, { ...input, evidenceRoot: root });
   mkdirSync(root, { recursive: true });
   const rowsPath = join(root, "rows.json");
   const summaryPath = join(root, "summary.json");
@@ -104,4 +110,14 @@ function writeText(path: string, value: string): void {
   const temporary = `${path}.tmp`;
   writeFileSync(temporary, value, "utf8");
   renameSync(temporary, path);
+}
+
+function hasRetainedArtifacts(root: string | undefined, rows: EvaluationRow[]): boolean {
+  if (!root || !rows.length || rows.some((row) => !row.artifacts.length)) return false;
+  const base = resolve(root);
+  return rows.every((row) => row.artifacts.every((artifact) => {
+    if (isAbsolute(artifact) || artifact.includes("..")) return false;
+    const path = resolve(base, artifact);
+    return !relative(base, path).startsWith("..") && existsSync(path) && statSync(path).size > 0;
+  }));
 }
