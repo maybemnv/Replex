@@ -39,17 +39,25 @@ npm run cli -- --help
 
 Keep every project under the ignored `work/` directory. Keep Playwright storage state outside the project and repository, for example `work/auth/operator-state.json`; never commit it or pass its contents to the model.
 
+`capture` is not an initializer: it needs an existing canonical `work/<project-id>/project.json` containing the approved environment and flow. Bootstrap that manifest once through the programmatic `createProject(...)` and `writeRevision(...)` APIs using only an approved fixture flow and immutable capture metadata. There is deliberately no CLI `init` command, because it must not invent an environment, browser flow, or source-capture identity.
+
 ```powershell
 # Startup checks run before every command.
+# Browser capture materializes a new canonical capture revision.
+npm run cli -- capture --project work/<project-id> --artifact-root work/<project-id>/captures
+
+# Verify, render the deterministic baseline, then write the report with its authoritative video.
 npm run cli -- verify --project work/<project-id>
 npm run cli -- baseline --project work/<project-id>
 npm run cli -- report --project work/<project-id>
 
-# Browser capture requires an existing approved project flow.
-npm run cli -- capture --project work/<project-id> --artifact-root work/<project-id>/captures
+# With a real operator-supplied Claude key, make the bounded draft; then report again.
+npm run cli -- agent-draft --project work/<project-id>
+npm run cli -- report --project work/<project-id>
 
 # Recapture accepts only an operator-created JSON input for the named scene.
 npm run cli -- recapture --project work/<project-id> --input work/<project-id>/recapture.json
+npm run cli -- render --project work/<project-id>
 ```
 
 The CLI emits structured JSON. A render only runs when a successful verification record exists for the exact current revision. Captures, traces, screenshots, operation logs, verification records, FFmpeg argv/stderr, and reports remain under the local project root.
@@ -73,7 +81,9 @@ The operator must run and retain, without replacing failed first attempts:
 2. A real-Claude grounded draft and verified render for each measured run.
 3. One controlled changed-state selective recapture and verified render per app.
 4. Stage-failure evidence, artifact paths, first cause, correction time, and the three target-user usefulness reviews.
-5. `writeEvaluation(...)` output as `work/evaluation-<date>/rows.json`, `summary.json`, and `decision.md`.
+5. A purpose-built operator runner must call `runAdversarialEvaluation(["normal", "dynamic", "difficult"], runner)` for attempts 1 and 2, retaining every raw artifact path in each returned `EvaluationRow`, then call `writeEvaluation(...)` into `work/evaluation-<date>/`.
+
+There is no CLI shortcut for step 5: it cannot supply a real Claude run, a controlled changed state, or three independent human reviews. Do not construct passing rows by hand. The evaluator is intentionally fail-closed and will return `REWORK` or `FAIL` when those retained artifacts and review inputs are absent.
 
 Use the fixed `PASS`, `FAIL`, or `REWORK` decision in the generated evaluation evidence. `productionAuthorized` remains false even for a POC PASS: moving beyond the POC requires the separate PRD production gate.
 
