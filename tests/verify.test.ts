@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -35,6 +35,7 @@ describe("project verification", () => {
       const result = verifyProject(project, root);
       expect(result).toMatchObject({ passed: true, phase: "scene" });
       expect(result.checks.every((check) => check.passed)).toBe(true);
+      expect(JSON.parse(await readFile(join(root, "verification", "revision-0.json"), "utf8"))).toMatchObject({ id: "verification-revision-0", passed: true });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -47,6 +48,17 @@ describe("project verification", () => {
       const result = verifyProject(missing, root);
       expect(result).toMatchObject({ passed: false, firstCause: "capture" });
       expect(result.checks).toContainEqual(expect.objectContaining({ code: "CAPTURE_EXISTS", passed: false }));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing source-media probe as a capture failure when strict checks are requested", async () => {
+    const { root, project } = await fixture();
+    try {
+      const result = verifyProject(project, root, { checkMedia: true, ffprobePath: join(root, "missing-ffprobe") });
+      expect(result).toMatchObject({ passed: false, firstCause: "capture" });
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "CAPTURE_MEDIA", passed: false }));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
