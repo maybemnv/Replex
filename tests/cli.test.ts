@@ -1,6 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
+import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { checkStartupTools, runCli } from "../src/cli.js";
+import { createProject, loadProject, writeRevision } from "../src/project.js";
+
+const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
+const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
+const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
 
 function captureOutput() {
   const output = { stdout: "", stderr: "" };
@@ -109,5 +120,91 @@ describe("CLI", () => {
       available: false,
       detail: expect.stringContaining("version signature"),
     });
+  });
+
+  describe.skipIf(!mediaAvailable)("capture materialization", () => {
+    let server: Server;
+    let origin: string;
+
+    beforeAll(async () => {
+      server = createServer((_request, response) => {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html>
+          <main data-testid="release-page">
+            <h1>Release Replay Demo</h1>
+            <button type="button" aria-label="Open filters" id="open-filter">Open filters</button>
+            <section data-testid="filter-panel" hidden>
+              <h2>Filter releases</h2>
+              <label for="filter-value">Filter value</label>
+              <input id="filter-value" name="filter-value" />
+              <button type="button" aria-label="Apply" id="apply-filter">Apply</button>
+            </section>
+            <p data-testid="result" hidden>Showing 3 matching releases</p>
+          </main>
+          <script>
+            const panel = document.querySelector('[data-testid="filter-panel"]');
+            document.querySelector('#open-filter').addEventListener('click', () => { panel.hidden = false; });
+            document.querySelector('#apply-filter').addEventListener('click', () => {
+              document.querySelector('[data-testid="result"]').hidden = false;
+            });
+          </script>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("fixture server did not start");
+      origin = `http://127.0.0.1:${address.port}`;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    });
+
+    it("writes a canonical revision with immutable project-relative captures", async () => {
+      const root = await mkdtemp(join(tmpdir(), "replex-cli-capture-"));
+      try {
+        const initial = createProject({
+          projectId: "cli-capture-project",
+          brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 },
+          environment: normalEnvironment(origin),
+          flow: normalFlow(origin),
+          captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey) => ({
+            id: `stale-${sceneKey}`,
+            sceneKey,
+            path: `captures/${sceneKey}.webm`,
+            durationMs: 10000,
+          })),
+        });
+        await writeRevision(root, initial);
+
+        const output = { stdout: "", stderr: "" };
+        const exitCode = await runCli(["capture", "--project", root], {
+          io: {
+            stdout: (value) => { output.stdout += value; },
+            stderr: (value) => { output.stderr += value; },
+          },
+          toolPaths: { ffmpeg: ffmpegPath, ffprobe: ffprobePath },
+        });
+
+        expect(exitCode, output.stderr).toBe(0);
+        const materialized = await loadProject(root);
+        expect(materialized.currentRevisionId).not.toBe(initial.currentRevisionId);
+        expect(materialized.revisions).toHaveLength(2);
+        expect(materialized.revisions.at(-1)).toMatchObject({ parentId: initial.currentRevisionId, actor: "baseline" });
+        expect(Object.values(materialized.captures)).toHaveLength(3);
+        for (const capture of Object.values(materialized.captures)) {
+          expect(capture.path).not.toMatch(/^([A-Za-z]:[\\/]|[\\/]|\.\.)/);
+          expect(await stat(join(root, capture.path))).toMatchObject({ size: expect.any(Number) });
+        }
+        expect(materialized.scenes.map((scene) => scene.id)).toEqual(initial.scenes.map((scene) => scene.id));
+        const revisionPath = join(root, "revisions", `${materialized.currentRevisionId}.json`);
+        await expect(readFile(revisionPath, "utf8")).resolves.toBe(await readFile(join(root, "project.json"), "utf8"));
+        const response = output.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(response[0]).toMatchObject({ command: "capture", status: "completed" });
+        expect(response[0].revisionId).toBe(materialized.currentRevisionId);
+        expect(new Set((response[0].captures as Array<{ path: string }>).map(({ path }) => path)))
+          .toEqual(new Set(Object.values(materialized.captures).map((capture) => capture.path)));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }, 60_000);
   });
 });

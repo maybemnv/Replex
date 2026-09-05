@@ -13,6 +13,7 @@ export interface RenderJobOverlay {
   placement: Overlay["placement"];
   startMs: number;
   endMs: number;
+  assetPath: string;
 }
 
 export interface RenderJobScene {
@@ -89,6 +90,7 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   const renderRoot = dirname(outputPath);
   mkdirSync(renderRoot, { recursive: true });
   const temporary = `${outputPath}.${job.sha256.slice(0, 12)}.tmp.mp4`;
+  writeOverlayAssets(job, root);
   const argv = buildFfmpegArgv(job, root, temporary);
   const stem = outputPath.slice(0, -4);
   writeFileSync(`${stem}.render-job.json`, `${JSON.stringify(job, null, 2)}\n`, "utf8");
@@ -126,19 +128,33 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
     outMs: scene.sourceOutMs,
     speed: scene.speed,
     ...(scene.focus ? { focus: scene.focus } : {}),
-    overlays: Object.values(project.overlays).filter((overlay) => overlay.sceneId === scene.id).map(({ id, kind, text, placement, startMs, endMs }) => ({ id, kind, text, placement, startMs, endMs })),
+    overlays: Object.values(project.overlays).filter((overlay) => overlay.sceneId === scene.id).map((overlay) => ({
+      id: overlay.id,
+      kind: overlay.kind,
+      text: overlay.text,
+      placement: overlay.placement,
+      startMs: overlay.startMs,
+      endMs: overlay.endMs,
+      assetPath: overlayAssetPath(overlay),
+    })),
     transition: scene.transition,
   };
 }
 
 function buildFfmpegArgv(job: RenderJob, root: string, temporary: string): string[] {
-  const inputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
+  const sourceInputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
+  const overlays = job.scenes.flatMap((scene) => scene.overlays);
+  const overlayInputs = overlays.flatMap((overlay) => ["-loop", "1", "-framerate", "30", "-t", seconds(overlay.endMs), "-i", resolveProjectPath(root, overlay.assetPath)]);
   const totalSeconds = renderedDurationSeconds(job.scenes);
-  const audioInput = job.scenes.length;
-  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index));
+  const audioInput = job.scenes.length + overlays.length;
+  let overlayInput = job.scenes.length;
+  const filters = job.scenes.flatMap((scene, index) => {
+    const indexes = scene.overlays.map(() => overlayInput++);
+    return sceneFilters(scene, index, indexes);
+  });
   filters.push(...timelineFilters(job.scenes));
   return [
-    "-y", ...inputs,
+    "-y", ...sourceInputs, ...overlayInputs,
     "-f", "lavfi", "-t", seconds(totalSeconds * 1000), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
     "-filter_complex", filters.join(";"),
     "-map", "[video]", "-map", `${audioInput}:a`, "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", temporary,
@@ -167,15 +183,13 @@ function timelineFilters(scenes: RenderJobScene[]): string[] {
   return filters;
 }
 
-function sceneFilters(scene: RenderJobScene, index: number): string[] {
+function sceneFilters(scene: RenderJobScene, index: number, overlayInputIndexes: number[]): string[] {
   const focus = focusFilters(scene.focus);
   const filters = [`[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2${focus}[base${index}]`];
   let previous = `base${index}`;
   for (const [overlayIndex, overlay] of scene.overlays.entries()) {
     const next = `overlay${index}_${overlayIndex}`;
-    const y = overlay.placement === "bottom" ? "h-text_h-72" : overlay.placement === "target" ? "(h-text_h)/2" : "72";
-    const color = overlay.kind === "title" ? "white" : "0xF5C56B";
-    filters.push(`[${previous}]drawtext=fontfile='C\\:/Windows/Fonts/arial.ttf':text='${escapeDrawText(overlay.text)}':x=(w-text_w)/2:y=${y}:fontcolor=${color}:fontsize=46:box=1:boxcolor=black@0.55:boxborderw=18:enable='between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})'[${next}]`);
+    filters.push(`[${previous}][${overlayInputIndexes[overlayIndex]}:v]overlay=x=0:y=0:eof_action=repeat:enable='between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})'[${next}]`);
     previous = next;
   }
   filters.push(`[${previous}]null[scene${index}]`);
@@ -228,8 +242,29 @@ function renderedDurationSeconds(scenes: RenderJobScene[]): number {
   return scenes.reduce((total, scene, index) => total + sceneDurationSeconds(scene) - (index && scenes[index - 1].transition.type === "crossfade" ? scenes[index - 1].transition.durationMs / 1000 : 0), 0);
 }
 
-function escapeDrawText(value: string): string {
-  return value.replace(/[\\':,\[\]]/g, "\\$&").replace(/[\r\n]/g, " ");
+function writeOverlayAssets(job: RenderJob, root: string): void {
+  for (const overlay of job.scenes.flatMap((scene) => scene.overlays)) {
+    const path = resolveProjectPath(root, overlay.assetPath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, overlaySvg(overlay), "utf8");
+  }
+}
+
+function overlayAssetPath(overlay: Pick<RenderJobOverlay, "id" | "kind" | "text" | "placement">): string {
+  const id = overlay.id.replace(/[^A-Za-z0-9._-]/g, "_") || "overlay";
+  const fingerprint = sha256(canonicalJson(overlay)).slice(0, 16);
+  return `render-assets/${id}-${fingerprint}.svg`;
+}
+
+function overlaySvg(overlay: RenderJobOverlay): string {
+  const y = overlay.placement === "bottom" ? 964 : overlay.placement === "target" ? 540 : 136;
+  const fill = overlay.kind === "title" ? "#111827" : "#F5C56B";
+  const color = overlay.kind === "title" ? "#FFFFFF" : "#111827";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080"><rect x="160" y="${y - 72}" width="1600" height="128" rx="24" fill="${fill}" fill-opacity="0.94"/><text x="960" y="${y}" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="46" font-weight="700" fill="${color}">${escapeXml(overlay.text)}</text></svg>\n`;
+}
+
+function escapeXml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
 }
 
 function sha256(value: string): string {

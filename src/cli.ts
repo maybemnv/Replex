@@ -5,7 +5,7 @@ import { join, relative, resolve } from "node:path";
 import { chromium } from "@playwright/test";
 import { runClaudeDraft } from "./agent.js";
 import { runCapture } from "./capture.js";
-import { capturesFromRun, loadProject } from "./project.js";
+import { capturesFromRun, loadProject, materializeCaptureRun, writeRevision } from "./project.js";
 import { reconcileCapture } from "./reconcile.js";
 import { buildRenderJob, executeRenderJob } from "./render.js";
 import { generateReport } from "./report.js";
@@ -210,12 +210,14 @@ async function executeCommand(command: Command, args: ParsedArgs, options: RunCl
       storageStatePath: args.storageStatePath,
       uploadRoots: args.uploadRoots,
     });
+    const materialized = materializeCaptureRun(root, project, run);
+    await writeRevision(root, materialized);
     const captureRoot = capturesFromRun(run).root;
     const captures = capturesFromRun(run).captures.map((capture) => ({
       ...capture,
       path: relative(root, resolve(captureRoot, capture.path ?? "")).replace(/\\/g, "/"),
     }));
-    printJson(io, { command, status: "completed", run: run.run, runPath: relative(root, run.runPath).replace(/\\/g, "/"), captures });
+    printJson(io, { command, status: "completed", run: run.run, revisionId: materialized.currentRevisionId, runPath: relative(root, run.runPath).replace(/\\/g, "/"), captures });
     return 0;
   }
   if (command === "verify") {

@@ -32,6 +32,7 @@ export interface VerificationOptions {
 
 /** Mechanical authorization for a render; no aesthetic or publishability claim is made here. */
 export function verifyProject(project: Project, root: string, options: VerificationOptions = {}): VerificationResult {
+  const checkMedia = options.checkMedia ?? true;
   const checks: VerificationCheck[] = [];
   let firstCause: FirstCause | undefined;
   const check = (code: string, passed: boolean, detail: string, cause: FirstCause, evidencePaths?: string[]) => {
@@ -55,7 +56,7 @@ export function verifyProject(project: Project, root: string, options: Verificat
     const present = Boolean(path && existsSync(path) && statSync(path).size > 0);
     check("CAPTURE_EXISTS", present, `Capture ${capture.id} exists and is non-empty.`, "capture", path ? [capture.path] : undefined);
     if (present && path) check("CAPTURE_HASH", sha256File(path) === capture.sha256, `Capture ${capture.id} matches its recorded SHA-256.`, "capture", [capture.path]);
-    if (options.checkMedia && present && path && !checkedCaptures.has(capture.id)) {
+    if (checkMedia && present && path && !checkedCaptures.has(capture.id)) {
       checkedCaptures.add(capture.id);
       const media = probeCapture(path, capture, options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe");
       check("CAPTURE_MEDIA", media.passed, media.detail, "capture", [capture.path]);

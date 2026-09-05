@@ -31,8 +31,7 @@ describe("recorded bounded model loop", () => {
         { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-1", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 2000 } } },
         { tool: "verify_project", input: {} },
       ]);
-      expect(result).toMatchObject({ ok: true, toolCalls: 3 });
-      if (!result.ok) return;
+      expect(result).toMatchObject({ ok: false, code: "VERIFICATION_FAILED", toolCalls: 3 });
       expect(result.project.currentRevisionId).not.toBe("revision-0");
       expect(result.project.overlays["title-1"].text).toBe("Filter releases");
       expect(await (await import("node:fs/promises")).readFile(join(root, "operations.jsonl"), "utf8")).toContain('"evidenceRefs":["capture:capture-0"]');
@@ -78,7 +77,7 @@ describe("recorded bounded model loop", () => {
         { stopReason: "end_turn" as const, toolCalls: [] },
       ];
       const result = await runClaudeDraft(project, root, { createMessage: async () => responses.shift()! });
-      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL", toolCalls: 3 });
+      expect(result).toMatchObject({ ok: false, code: "VERIFICATION_FAILED", toolCalls: 3 });
       expect(result.project.overlays["title-live"].text).toBe("Filter releases");
     } finally {
       await rm(root, { recursive: true, force: true });

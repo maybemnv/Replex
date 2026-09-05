@@ -66,6 +66,38 @@ export function capturesFromRun(run: CaptureResult): { root: string; captures: P
   };
 }
 
+/** Builds the next canonical baseline from one completed immutable capture run. */
+export function materializeCaptureRun(root: string, project: Project, run: CaptureResult): Project {
+  const captured = capturesFromRun(run);
+  const captures = captured.captures.map((capture) => {
+    if (!capture.path) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
+    return { ...capture, path: projectRelativePath(root, captured.root, capture.path) };
+  });
+  const baseline = createProject({
+    projectId: project.projectId,
+    brief: project.brief,
+    environment: project.environment,
+    flow: project.flow,
+    captures,
+  });
+  const revisionId = `revision-capture-${run.run.id}`;
+  return ProjectSchema.parse({
+    ...baseline,
+    currentRevisionId: revisionId,
+    revisions: [
+      ...project.revisions,
+      {
+        id: revisionId,
+        parentId: project.currentRevisionId,
+        actor: "baseline",
+        operationIds: [],
+        manifestSha256: semanticHash(baseline),
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  });
+}
+
 const DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_CAPTURED_AT = "1970-01-01T00:00:00.000Z";
@@ -214,6 +246,15 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     capturedAt,
     ...(input.predecessorId ? { predecessorId: input.predecessorId } : {}),
   };
+}
+
+function projectRelativePath(projectRoot: string, artifactRoot: string, path: string): string {
+  const resolved = resolve(artifactRoot, path);
+  const relativePath = relative(resolve(projectRoot), resolved).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || relativePath.startsWith("/")) {
+    throw new Error("captured media must be stored inside the project root");
+  }
+  return relativePath;
 }
 
 /** Binds a capture identity to its immutable media instead of trusting caller invention. */
