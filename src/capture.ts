@@ -610,7 +610,7 @@ async function splitSourceCaptures(
     captures.push({
       sceneKey: scene.sceneKey,
       sourcePath,
-      sha256: fingerprintCapture(bytes, provenance),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
       width: probe.width,
       height: probe.height,
       durationMs: Math.max(1, Math.round(probe.durationSeconds * 1000)),

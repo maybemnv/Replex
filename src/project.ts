@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
+import type { CaptureResult } from "./capture.js";
 import {
   BriefSchema,
   EnvironmentSchema,
@@ -42,6 +43,27 @@ export interface ProjectInput {
   environment: Environment;
   flow: Flow;
   captures: ProjectCaptureInput[] | Record<string, ProjectCaptureInput>;
+}
+
+/** Converts one immutable browser attempt into project-relative capture inputs. */
+export function capturesFromRun(run: CaptureResult): { root: string; captures: ProjectCaptureInput[] } {
+  const root = dirname(run.runPath);
+  return {
+    root,
+    captures: run.captures.map((capture) => ({
+      id: `capture-${capture.sceneKey}-${capture.runId}`,
+      sceneKey: capture.sceneKey,
+      path: relative(root, capture.sourcePath).replace(/\\/g, "/"),
+      runId: capture.runId,
+      actionIds: capture.actionIds,
+      checkpointActionId: capture.checkpointActionId,
+      sha256: capture.sha256,
+      durationMs: capture.durationMs,
+      width: capture.width,
+      height: capture.height,
+      fps: 30,
+    })),
+  };
 }
 
 const DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
