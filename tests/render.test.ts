@@ -73,12 +73,16 @@ describe("RenderJob", () => {
 
 describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
   it("renders a 27-second 1080p H.264/AAC MP4, probes it, decodes it, and writes an evidence report", async () => {
-    const root = await mkdtemp(join(tmpdir(), "replex-render-"));
+      const root = await mkdtemp(join(tmpdir(), "replex-render-"));
     try {
       const base = project(root);
-      const source = { ...base, scenes: [{ ...base.scenes[0], focus: { preset: "box" as const, bounds: { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }, startMs: 0, endMs: 3000 }, transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...base.scenes.slice(1)] };
       await mkdir(join(root, "captures"), { recursive: true });
       for (const index of [1, 2, 3]) makeSource(join(root, "captures", `${index}.mp4`), index);
+      const source = {
+        ...base,
+        captures: Object.fromEntries(await Promise.all(Object.entries(base.captures).map(async ([id, capture]) => [id, { ...capture, sha256: createHash("sha256").update(await readFile(join(root, capture.path))).digest("hex") }]))) as Project["captures"],
+        scenes: [{ ...base.scenes[0], focus: { preset: "box" as const, bounds: { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }, startMs: 0, endMs: 3000 }, transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...base.scenes.slice(1)],
+      };
       const verification = verifyProject(source, root);
       const job = buildRenderJob(source, root, verification);
       const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath });
@@ -97,6 +101,6 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
 
 function makeSource(path: string, index: number): void {
   const colors = ["0x243447", "0x355c7d", "0x5c3d2e"];
-  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${colors[index - 1]}:s=1920x1080:r=30:d=9`, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
+  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${colors[index - 1]}:s=1920x1080:r=30:d=9`, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
   if (run.status !== 0) throw new Error(run.stderr || "could not create render fixture");
 }
