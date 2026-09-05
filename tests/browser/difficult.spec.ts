@@ -52,6 +52,7 @@ describe("difficult browser approved flow", () => {
     artifactRoot: join(tmpdir(), `replex-difficult-${attempt}`),
     attempt,
     values: { difficultProjectName: "Release Replay", difficultAsset: uploadPath },
+    uploadRoots: [tmpdir()],
     ...(reset ? { reset: () => resetDifficultFixture(origin) } : {}),
   });
 
