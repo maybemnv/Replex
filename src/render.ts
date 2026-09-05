@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { Focus, Overlay, Project, Scene, Transition } from "./schema.js";
+import { loadVerificationResult } from "./verify.js";
 
 export interface RenderJobOverlay {
   id: string;
@@ -80,6 +81,8 @@ export function buildRenderJob(project: Project, root: string, verification: { i
 
 /** Executes a closed, argv-only FFmpeg plan and retains the plan before promotion. */
 export function executeRenderJob(job: RenderJob, root: string, options: RenderOptions = {}): RenderExecution {
+  const verification = loadVerificationResult(root, job.revisionId);
+  if (!verification || !verification.passed || verification.id !== job.verificationId) throw new Error("render requires persisted successful verification for the current revision");
   const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
   const outputPath = resolveProjectPath(root, job.output.path);

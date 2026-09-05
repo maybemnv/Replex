@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { buildRenderJob, executeRenderJob, type RenderJob } from "../src/render.js";
 import { createProject, type Project } from "../src/project.js";
+import { verifyProject } from "../src/verify.js";
 
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
 const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
@@ -58,6 +59,16 @@ describe("RenderJob", () => {
     expect(() => buildRenderJob({ ...source, scenes: [{ ...source.scenes[0], transition: { type: "crossfade", durationMs: 250 } }, ...source.scenes.slice(1)] }, root, { id: "verification-project", passed: true })).not.toThrow();
     expect(() => buildRenderJob(source, root, { id: "verification-project", passed: false })).toThrow("successful verification");
   });
+
+  it("refuses to execute without the persisted verification for this revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-render-gate-"));
+    try {
+      const job = buildRenderJob(project(root), root, { id: "verification-project", passed: true });
+      expect(() => executeRenderJob(job, root, { ffmpegPath: "missing-ffmpeg", ffprobePath: "missing-ffprobe" })).toThrow("persisted successful verification");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
@@ -68,7 +79,8 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       const source = { ...base, scenes: [{ ...base.scenes[0], focus: { preset: "box" as const, bounds: { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }, startMs: 0, endMs: 3000 }, transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...base.scenes.slice(1)] };
       await mkdir(join(root, "captures"), { recursive: true });
       for (const index of [1, 2, 3]) makeSource(join(root, "captures", `${index}.mp4`), index);
-      const job = buildRenderJob(source, root, { id: "verification-project", passed: true });
+      const verification = verifyProject(source, root);
+      const job = buildRenderJob(source, root, verification);
       const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath });
 
       expect(result.outputPath).toBe(join(root, "renders", "revision-0.mp4"));

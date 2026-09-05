@@ -32,8 +32,9 @@ describe.skipIf(!mediaAvailable)("agent edits across selective recapture", () =>
       expect(reconciled).toMatchObject({ ok: true, preserved: true });
       if (!reconciled.ok) return;
       expect(reconciled.project.overlays["agent-title"]).toEqual(agent.project.overlays["agent-title"]);
-      expect(verifyProject(reconciled.project, root).passed).toBe(true);
-      const rendered = executeRenderJob(buildRenderJob(reconciled.project, root, { id: "verification-recapture", passed: true }), root, { ffmpegPath, ffprobePath });
+      const verification = verifyProject(reconciled.project, root);
+      expect(verification.passed).toBe(true);
+      const rendered = executeRenderJob(buildRenderJob(reconciled.project, root, verification), root, { ffmpegPath, ffprobePath });
       expect(rendered.probe.durationMs).toBeGreaterThanOrEqual(25000);
     } finally {
       await rm(root, { recursive: true, force: true });
