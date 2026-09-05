@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calculateDecision, runAdversarialEvaluation, type EvaluationRow, writeEvaluation } from "../src/evaluation.js";
@@ -13,8 +13,15 @@ describe("adversarial evaluation ledger", () => {
     expect(rows.find((row) => row.app === "dynamic" && row.attempt === 1)).toMatchObject({ browser: "failed", firstCause: "checkpoint_state" });
   });
 
-  it("requires every technical and external gate before PASS", () => {
-    expect(calculateDecision(passingRows, { usefulnessReviews: [true, true, false] })).toMatchObject({ decision: "PASS" });
+  it("requires retained artifacts before a decision can pass", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-evaluation-artifacts-"));
+    try {
+      expect(calculateDecision(passingRows, { usefulnessReviews: [true, true, false], evidenceRoot: root })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["retained evaluation artifacts"]) });
+      await Promise.all(["run.json", "actions.jsonl", "render.mp4"].map((path) => writeFile(join(root, path), "evidence")));
+      expect(calculateDecision(passingRows, { usefulnessReviews: [true, true, false], evidenceRoot: root })).toMatchObject({ decision: "PASS" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
     expect(calculateDecision(passingRows, { usefulnessReviews: [] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["usefulness reviews"]) });
   });
 
@@ -27,6 +34,7 @@ describe("adversarial evaluation ledger", () => {
   it("persists raw rows with a decision and never lets not-run stages pass", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-evaluation-"));
     try {
+      await Promise.all(["run.json", "actions.jsonl", "render.mp4"].map((path) => writeFile(join(root, path), "evidence")));
       const result = writeEvaluation(root, passingRows, { usefulnessReviews: [true, true, false] });
       expect(result.decision).toMatchObject({ decision: "PASS", productionAuthorized: false });
       expect(await readFile(result.summaryPath, "utf8")).toContain('"decision": "PASS"');
