@@ -41,7 +41,7 @@ describe("selective recapture reconciliation", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.skipIf(!mediaAvailable)("rejects replacement media with incompatible dimensions", async () => {
     const { root, project } = await fixture();
@@ -54,7 +54,7 @@ describe("selective recapture reconciliation", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("rejects a replacement with the wrong durable scene key", async () => {
     const { root, project } = await fixture();
@@ -69,6 +69,6 @@ describe("selective recapture reconciliation", () => {
 });
 
 async function writeVideo(path: string, durationSeconds: number, width: number, height: number): Promise<void> {
-  const result = spawnSync(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `color=c=0x355c7d:s=${width}x${height}:r=30:d=${durationSeconds}`, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", path], { encoding: "utf8", windowsHide: true });
+  const result = spawnSync(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `color=c=0x355c7d:s=${width}x${height}:r=30:d=${durationSeconds}`, "-an", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", path], { encoding: "utf8", windowsHide: true });
   if (result.status !== 0) throw new Error(result.stderr || result.error?.message || "ffmpeg failed");
 }

@@ -59,8 +59,10 @@ export function verifyProject(project: Project, root: string, options: Verificat
       checkedCaptures.add(capture.id);
       const media = probeCapture(path, capture, options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe");
       check("CAPTURE_MEDIA", media.passed, media.detail, "capture", [capture.path]);
-      const visual = scanCapture(path, options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg");
-      check("CAPTURE_BLANK_FREEZE", visual.passed, visual.detail, "capture", [capture.path]);
+      if (media.passed) {
+        const visual = scanCapture(path, options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg");
+        check("CAPTURE_BLANK_FREEZE", visual.passed, visual.detail, "capture", [capture.path]);
+      }
     }
     const flowSteps = new Set(project.flow.steps.map((step) => step.id));
     const provenance = scene.actionIds.every((id) => flowSteps.has(id) && capture.actionIds.includes(id)) && scene.actionIds.includes(scene.checkpointActionId) && scene.checkpointActionId === capture.checkpointActionId;
