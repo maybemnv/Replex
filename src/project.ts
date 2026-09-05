@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, join, parse as parsePath } from "node:path";
+import { dirname, isAbsolute, join, parse as parsePath } from "node:path";
 import {
   BriefSchema,
   EnvironmentSchema,
@@ -132,6 +132,8 @@ export async function writeRevision(
   options: { interruptBeforeCommit?: boolean } = {},
 ): Promise<void> {
   const canonicalProject = ProjectSchema.parse(stripLegacyRevision(project));
+  const currentRevision = canonicalProject.revisions.find((revision) => revision.id === canonicalProject.currentRevisionId);
+  if (!currentRevision || currentRevision.manifestSha256 !== semanticHash(canonicalProject)) throw new Error("current revision manifest hash does not match semantic project state");
   const serialized = JSON.stringify(canonicalProject, null, 2) + "\n";
   const revisionsRoot = join(root, "revisions");
   await mkdir(revisionsRoot, { recursive: true });
@@ -148,13 +150,17 @@ export async function loadProject(root: string): Promise<Project> {
 
 function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: Environment): Capture {
   const steps = flow.steps.filter((step) => step.sceneKey === input.sceneKey);
-  const actionIds = input.actionIds?.length ? input.actionIds : steps.map((step) => step.id);
-  const checkpointActionId = input.checkpointActionId ?? actionIds.at(-1);
-  if (!checkpointActionId) throw new Error(`missing checkpoint for scene key: ${input.sceneKey}`);
+  const expectedActionIds = steps.map((step) => step.id);
+  const actionIds = input.actionIds ?? expectedActionIds;
+  if (actionIds.length !== expectedActionIds.length || actionIds.some((id, index) => id !== expectedActionIds[index])) throw new Error(`capture actions do not match approved flow: ${input.sceneKey}`);
+  const checkpointActionId = input.checkpointActionId ?? expectedActionIds.at(-1);
+  if (!checkpointActionId || checkpointActionId !== expectedActionIds.at(-1)) throw new Error(`capture checkpoint does not match approved flow: ${input.sceneKey}`);
   const path = input.path ?? input.sourcePath ?? `captures/${input.id}.webm`;
+  if (isAbsolute(path) || path.split(/[\\/]+/).includes("..")) throw new Error("capture path must be project-relative");
   const runId = input.runId ?? `run-${input.id}`;
   const capturedAt = input.capturedAt ?? DEFAULT_CAPTURED_AT;
-  const sha256 = input.sha256 ?? createHash("sha256").update(canonicalJson({ id: input.id, runId, actionIds, path, durationMs: input.durationMs })).digest("hex");
+  if (!input.sha256) throw new Error(`capture SHA-256 is required: ${input.sceneKey}`);
+  const sha256 = input.sha256;
   return {
     id: input.id,
     sceneKey: input.sceneKey,
