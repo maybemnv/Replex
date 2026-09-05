@@ -12,6 +12,26 @@ import {
 } from "../src/capture.js";
 
 describe("approved capture plan", () => {
+  it("rejects duplicate action IDs before execution or scene planning", () => {
+    const flow = normalFlow("http://127.0.0.1:4173");
+    flow.steps[1] = { ...flow.steps[1], id: flow.steps[0].id };
+
+    expect(() => validateCapturePlan(flow, normalEnvironment("http://127.0.0.1:4173"))).toThrowError(
+      expect.objectContaining({ code: "FLOW_INVALID", actionId: flow.steps[1].id }),
+    );
+    expect(() => buildScenePlan(flow)).toThrowError("action IDs must be unique");
+  });
+
+  it("rejects a flow whose declared order is not contiguous", () => {
+    const flow = normalFlow("http://127.0.0.1:4173");
+    flow.steps[1] = { ...flow.steps[1], order: 3 };
+
+    expect(() => validateCapturePlan(flow, normalEnvironment("http://127.0.0.1:4173"))).toThrowError(
+      expect.objectContaining({ code: "FLOW_INVALID", actionId: flow.steps[1].id }),
+    );
+    expect(() => buildScenePlan(flow)).toThrowError("order must match its declared position");
+  });
+
   it("rejects an unapproved consequential action before execution", () => {
     const flow = normalFlow("http://127.0.0.1:4173");
     flow.steps[1] = { ...flow.steps[1], consequential: true, approved: false };

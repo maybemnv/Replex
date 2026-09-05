@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { open, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -8,7 +9,7 @@ import type { BrowserStep, Environment, Flow } from "./schema.js";
 
 export class CapturePlanError extends Error {
   constructor(
-    readonly code: "ACTION_NOT_APPROVED" | "ORIGIN_NOT_ALLOWED",
+    readonly code: "ACTION_NOT_APPROVED" | "ORIGIN_NOT_ALLOWED" | "FLOW_INVALID",
     readonly actionId: string,
     message: string,
   ) {
@@ -58,7 +59,7 @@ export interface CaptureOptions {
 }
 
 export interface CaptureResult {
-  run: { id: string; attempt: number; status: "passed" };
+  run: { id: string; attempt: number; startedAt: string; endedAt: string; status: "passed" };
   runPath: string;
   rawVideoPath: string;
   tracePath: string;
@@ -110,9 +111,21 @@ export function browserContextOptions(environment: Environment) {
 export function resolveStorageStatePath(artifactRoot: string, storageStatePath: string): string {
   const projectRoot = resolve(artifactRoot);
   const storagePath = resolve(storageStatePath);
-  const relation = relative(projectRoot, storagePath);
-  if (!relation || (!relation.startsWith("..") && !isAbsolute(relation))) {
+  const isWithin = (root: string, candidate: string) => {
+    const relation = relative(root, candidate);
+    return !relation || (!relation.startsWith("..") && !isAbsolute(relation));
+  };
+  if (isWithin(projectRoot, storagePath)) {
     throw new Error("browser storage state must remain outside project artifacts");
+  }
+  try {
+    const projectRealpath = realpathSync(projectRoot);
+    const storageRealpath = realpathSync(storagePath);
+    if (isWithin(projectRealpath, storageRealpath)) {
+      throw new Error("browser storage state must remain outside project artifacts");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return storagePath;
 }
@@ -135,6 +148,7 @@ export function redactEvidenceText(value: string): string {
 }
 
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
+  validateFlowStructure(flow);
   if (!environment.allowedOrigins.includes(environment.appOrigin)) {
     throw new CapturePlanError("ORIGIN_NOT_ALLOWED", flow.id, "app origin is not allowed");
   }
@@ -156,7 +170,21 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
   }
 }
 
+export function validateFlowStructure(flow: Flow): void {
+  const actionIds = new Set<string>();
+  for (const [index, step] of flow.steps.entries()) {
+    if (actionIds.has(step.id)) {
+      throw new CapturePlanError("FLOW_INVALID", step.id, "flow action IDs must be unique");
+    }
+    if (step.order !== index) {
+      throw new CapturePlanError("FLOW_INVALID", step.id, `flow step order must match its declared position (${index})`);
+    }
+    actionIds.add(step.id);
+  }
+}
+
 export function buildScenePlan(flow: Flow): ScenePlan[] {
+  validateFlowStructure(flow);
   const scenes = new Map<string, ScenePlan>();
   for (const step of flow.steps) {
     if (!step.sceneKey) continue;
@@ -273,6 +301,7 @@ export function deriveSceneBoundaries(
 
 export async function runCapture(flow: Flow, environment: Environment, options: CaptureOptions): Promise<CaptureResult> {
   const runId = randomUUID();
+  const startedAt = new Date().toISOString();
   const runRoot = join(options.artifactRoot, runId);
   const attempt = options.attempt ?? 1;
   const runPath = join(runRoot, "run.json");
@@ -290,7 +319,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       runId, stage: "preflight", attempt, actionId, atMs: 0, outcome: "failed", code, message: redactEvidenceText(failure.message),
     }]));
     await writeImmutableArtifact(consoleLogPath, jsonLines([]));
-    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, status: "failed", actionId, code }, null, 2)));
+    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, startedAt, endedAt: new Date().toISOString(), status: "failed", actionId, code }, null, 2)));
     Object.assign(failure, { runPath, actionLogPath, consoleLogPath });
     throw failure;
   }
@@ -308,10 +337,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const page = await context.newPage();
   page.setDefaultTimeout(5_000);
   const video = page.video();
-  const startedAt = performance.now();
+  const startedAtMs = performance.now();
   const consoleEvents: Array<{ attempt: number; atMs: number; type: string; message: string }> = [];
-  page.on("console", (message) => consoleEvents.push({ attempt, atMs: performance.now() - startedAt, type: message.type(), message: message.text() }));
-  page.on("pageerror", (error) => consoleEvents.push({ attempt, atMs: performance.now() - startedAt, type: "pageerror", message: error.message }));
+  page.on("console", (message) => consoleEvents.push({ attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
+  page.on("pageerror", (error) => consoleEvents.push({ attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const tracePath = join(runRoot, "traces", "trace.zip");
@@ -369,7 +398,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         actionEvents.push({
           actionId: step.id,
           attempt,
-          atMs: performance.now() - startedAt,
+          atMs: performance.now() - startedAtMs,
           target: step.target,
           checkpoint: step.checkpoint,
           outcome: "failed",
@@ -379,7 +408,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       actionEvents.push({
         actionId: step.id,
         attempt,
-        atMs: performance.now() - startedAt,
+        atMs: performance.now() - startedAtMs,
         target: step.target,
         checkpoint: step.checkpoint,
         outcome: "passed",
@@ -401,9 +430,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     if (!video) throw new Error("Playwright video recording did not start");
     const rawVideoPath = await video.path();
     const captures = await splitSourceCaptures(rawVideoPath, runRoot, runId, scenePlan, actionEvents, options);
-    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, status: "passed" }, null, 2)));
+    const endedAt = new Date().toISOString();
+    await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, startedAt, endedAt, status: "passed" }, null, 2)));
     return {
-      run: { id: runId, attempt, status: "passed" },
+      run: { id: runId, attempt, startedAt, endedAt, status: "passed" },
       runPath,
       rawVideoPath,
       tracePath,
@@ -423,6 +453,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       await writeImmutableArtifact(screenshotPath, await page.screenshot());
       const bodyText = (await page.locator("body").innerText().catch(() => "")).slice(0, 4000);
       const domExcerpt = (await page.locator("body").evaluate((element) => element.outerHTML).catch(() => "")).slice(0, 4000);
+      const accessibilityExcerpt = (await page.locator("body").ariaSnapshot().catch(() => "")).slice(0, 4000);
       await writeImmutableArtifact(
         evidencePath,
         Buffer.from(JSON.stringify({
@@ -432,6 +463,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
           url: redactEvidenceText(page.url()),
           bodyText: redactEvidenceText(bodyText),
           domExcerpt: redactEvidenceText(domExcerpt),
+          accessibilityExcerpt: redactEvidenceText(accessibilityExcerpt),
           consoleEvents: consoleEvents.slice(-50).map((event) => ({ ...event, message: redactEvidenceText(event.message) })),
           screenshotPath,
         }, null, 2)),
@@ -448,6 +480,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({
       id: runId,
       attempt,
+      startedAt,
+      endedAt: new Date().toISOString(),
       status: "failed",
       actionId: failure.actionId,
       code: failure.code,
