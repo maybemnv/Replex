@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
-import { runRecordedAgentDraft } from "../src/agent.js";
+import { runClaudeDraft, runRecordedAgentDraft } from "../src/agent.js";
 import { createProject } from "../src/project.js";
 
 async function fixture() {
@@ -63,6 +63,23 @@ describe("recorded bounded model loop", () => {
     try {
       const result = runRecordedAgentDraft(project, root, Array.from({ length: 21 }, () => ({ tool: "inspect_project", input: {} })));
       expect(result).toMatchObject({ ok: false, code: "BUDGET_EXHAUSTED" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps revision and verification state across real-client turns", async () => {
+    const { root, project } = await fixture();
+    try {
+      const responses = [
+        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-1", tool: "inspect_project", input: {} }] },
+        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-2", tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-live", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 1000 } } }] },
+        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-3", tool: "verify_project", input: {} }] },
+        { stopReason: "end_turn" as const, toolCalls: [] },
+      ];
+      const result = await runClaudeDraft(project, root, { createMessage: async () => responses.shift()! });
+      expect(result).toMatchObject({ ok: true, toolCalls: 3 });
+      if (result.ok) expect(result.project.overlays["title-live"].text).toBe("Filter releases");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
