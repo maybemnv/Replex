@@ -15,6 +15,7 @@ export function renderDynamicFixture(state: DynamicFixtureState): string {
       <label for="email">Email</label><input id="email" name="email" type="email">
       <label for="password">Password</label><input id="password" name="password" type="password">
       <button type="submit">Sign in</button>
+      <p data-testid="auth-error" hidden>Disposable credentials were rejected</p>
     </form>
   </main>
   <section data-testid="dashboard" hidden>
@@ -37,7 +38,10 @@ export function renderDynamicFixture(state: DynamicFixtureState): string {
     const modal = document.querySelector('[data-testid="details-modal"]');
     const status = document.querySelector('[data-testid="data-status"]');
     document.querySelector('#login-form').addEventListener('submit', (event) => {
-      event.preventDefault(); auth.hidden = true; dashboard.hidden = false;
+      event.preventDefault();
+      const valid = document.querySelector('#email').value === 'demo@example.test' && document.querySelector('#password').value === 'fixture-password';
+      if (!valid) { document.querySelector('[data-testid="auth-error"]').hidden = false; return; }
+      auth.hidden = true; dashboard.hidden = false;
     });
     document.querySelector('#plan').addEventListener('change', (event) => {
       event.currentTarget.dataset.state = 'selected';
