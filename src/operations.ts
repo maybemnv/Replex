@@ -19,6 +19,7 @@ type Actor = OperationRecord["actor"];
 
 export interface ApplyOperationsOptions {
   actor?: Actor;
+  evidenceRefs?: string[];
   root?: string;
   artifactRoot?: string;
   operationsPath?: string;
@@ -387,7 +388,7 @@ function persistAccepted(
         actor,
         input,
         accepted: true,
-        evidenceRefs: [],
+        evidenceRefs: options.evidenceRefs ?? [],
         createdAt,
       };
       OperationRecordSchema.parse(record);
