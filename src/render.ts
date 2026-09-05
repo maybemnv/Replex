@@ -3,10 +3,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { chromium } from "@playwright/test";
+import { deflateSync } from "node:zlib";
 import type { Focus, Overlay, Project, Scene, Transition } from "./schema.js";
 import { loadVerificationResult } from "./verify.js";
-import { pathToFileURL } from "node:url";
 
 export interface RenderJobOverlay {
   id: string;
@@ -248,18 +247,7 @@ function writeOverlayAssets(job: RenderJob, root: string): void {
   for (const overlay of job.scenes.flatMap((scene) => scene.overlays)) {
     const path = resolveProjectPath(root, overlay.assetPath);
     mkdirSync(dirname(path), { recursive: true });
-    const svgPath = path.replace(/\.png$/, ".svg");
-    writeFileSync(svgPath, overlaySvg(overlay), "utf8");
-    const run = spawnSync(chromium.executablePath(), [
-      "--headless=new",
-      "--disable-gpu",
-      "--hide-scrollbars",
-      "--window-size=1920,1080",
-      "--default-background-color=00000000",
-      `--screenshot=${path}`,
-      pathToFileURL(svgPath).href,
-    ], { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
-    if (run.status !== 0 || !existsSync(path)) throw new Error(`overlay asset generation failed: ${(run.stderr || run.error?.message || "Chromium screenshot failed").trim()}`);
+    writeFileSync(path, overlayPng(overlay));
   }
 }
 
@@ -269,16 +257,63 @@ function overlayAssetPath(overlay: Pick<RenderJobOverlay, "id" | "kind" | "text"
   return `render-assets/${id}-${fingerprint}.png`;
 }
 
-function overlaySvg(overlay: RenderJobOverlay): string {
-  const y = overlay.placement === "bottom" ? 964 : overlay.placement === "target" ? 540 : 136;
-  const fill = overlay.kind === "title" ? "#111827" : "#F5C56B";
-  const color = overlay.kind === "title" ? "#FFFFFF" : "#111827";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080"><rect x="160" y="${y - 72}" width="1600" height="128" rx="24" fill="${fill}" fill-opacity="0.94"/><text x="960" y="${y}" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="46" font-weight="700" fill="${color}">${escapeXml(overlay.text)}</text></svg>\n`;
+function overlayPng(overlay: RenderJobOverlay): Buffer {
+  const width = 1920;
+  const height = 1080;
+  const pixels = Buffer.alloc(width * height * 4);
+  const y = overlay.placement === "bottom" ? 892 : overlay.placement === "target" ? 476 : 72;
+  const background: [number, number, number] = overlay.kind === "title" ? [17, 24, 39] : [245, 197, 107];
+  const foreground: [number, number, number] = overlay.kind === "title" ? [255, 255, 255] : [17, 24, 39];
+  drawRect(pixels, width, 160, y, 1600, 128, background);
+  drawText(pixels, width, overlay.text, y + 36, foreground);
+  return png(width, height, pixels);
 }
 
-function escapeXml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
+function drawRect(pixels: Buffer, width: number, x: number, y: number, rectangleWidth: number, rectangleHeight: number, color: [number, number, number]): void {
+  for (let row = y; row < y + rectangleHeight; row += 1) for (let column = x; column < x + rectangleWidth; column += 1) setPixel(pixels, width, column, row, color);
 }
+
+function drawText(pixels: Buffer, width: number, value: string, y: number, color: [number, number, number]): void {
+  const glyphs = value.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").slice(0, 35).split("");
+  const scale = 8;
+  const characterWidth = 6 * scale;
+  let x = Math.max(192, Math.floor((1920 - glyphs.length * characterWidth) / 2));
+  for (const character of glyphs) {
+    for (const [row, line] of (FONT[character] ?? FONT[" "]).entries()) for (const [column, bit] of [...line].entries()) if (bit === "1") drawRect(pixels, width, x + column * scale, y + row * scale, scale, scale, color);
+    x += characterWidth;
+  }
+}
+
+function setPixel(pixels: Buffer, width: number, x: number, y: number, color: [number, number, number]): void {
+  const index = (y * width + x) * 4;
+  pixels[index] = color[0]; pixels[index + 1] = color[1]; pixels[index + 2] = color[2]; pixels[index + 3] = 255;
+}
+
+function png(width: number, height: number, pixels: Buffer): Buffer {
+  const rows = Buffer.alloc((width * 4 + 1) * height);
+  for (let row = 0; row < height; row += 1) pixels.copy(rows, row * (width * 4 + 1) + 1, row * width * 4, (row + 1) * width * 4);
+  return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), pngChunk("IHDR", Buffer.from([0, 0, 7, 128, 0, 0, 4, 56, 8, 6, 0, 0, 0])), pngChunk("IDAT", deflateSync(rows)), pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0); body.copy(chunk, 4); chunk.writeUInt32BE(crc32(body), 8 + data.length);
+  return chunk;
+}
+
+function crc32(value: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const FONT: Record<string, string[]> = {
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"], B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"], C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"], D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"], E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"], F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"], G: ["01111", "10000", "10000", "10111", "10001", "10001", "01111"], H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"], I: ["11111", "00100", "00100", "00100", "00100", "00100", "11111"], J: ["00111", "00010", "00010", "00010", "10010", "10010", "01100"], K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"], L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"], M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"], N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"], O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"], P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"], Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"], R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"], S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"], T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"], U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"], V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"], W: ["10001", "10001", "10001", "10101", "10101", "10101", "01010"], X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"], Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"], Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"], "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"], "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"], "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"], "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"], "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"], "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"], "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"], "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"], "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"], "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"], " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+};
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
