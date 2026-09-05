@@ -73,7 +73,11 @@ describe("capture safety boundary", () => {
     } catch (error) {
       failure = error as typeof failure;
     }
-    await expect(readFile(failure.runPath, "utf8")).resolves.toContain('"status": "failed"');
+    const run = JSON.parse(await readFile(failure.runPath, "utf8")) as Record<string, unknown>;
+    expect(run).toMatchObject({ attempt: 9, status: "failed" });
+    expect(run.startedAt).toEqual(expect.any(String));
+    expect(run.endedAt).toEqual(expect.any(String));
+    expect(Date.parse(String(run.endedAt))).toBeGreaterThanOrEqual(Date.parse(String(run.startedAt)));
     const event = JSON.parse((await readFile(failure.actionLogPath, "utf8")).trim()) as Record<string, unknown>;
     expect(event).toMatchObject({ stage: "preflight", attempt: 9, actionId: "open-release-page", outcome: "failed" });
   });
@@ -109,6 +113,8 @@ describe("capture safety boundary", () => {
       expect(evidence).toMatchObject({ actionId: "open-release-page", url: `${origin}/` });
       expect(evidence.domExcerpt).toEqual(expect.any(String));
       expect(String(evidence.domExcerpt).length).toBeLessThanOrEqual(4000);
+      expect(evidence.accessibilityExcerpt).toEqual(expect.any(String));
+      expect(String(evidence.accessibilityExcerpt).length).toBeLessThanOrEqual(4000);
       await expect(stat(failure.tracePath)).resolves.toMatchObject({ size: expect.any(Number) });
       const run = JSON.parse(await readFile(failure.runPath, "utf8")) as Record<string, unknown>;
       expect(run).toMatchObject({ attempt: 4, status: "failed", actionId: "open-release-page" });
