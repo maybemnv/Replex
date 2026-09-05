@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,12 +32,30 @@ describe("bounded inspection", () => {
     }
   });
 
-  it("uses fixed IDs and refuses paths, raw traces, and missing evidence", () => {
+  it("uses fixed IDs and refuses paths while requiring named evidence", async () => {
     const source = project();
     expect(inspectProject(source, "unused", { kind: "inspect_scene", sceneId: source.scenes[0].id })).toMatchObject({ ok: true });
     expect(inspectProject(source, "unused", { kind: "inspect_capture", captureId: "missing" })).toMatchObject({ ok: false, code: "NOT_FOUND" });
-    expect(inspectProject(source, "unused", { kind: "inspect_browser_trace" })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(inspectProject(source, "unused", { kind: "inspect_browser_trace" })).toMatchObject({ ok: false, code: "NOT_FOUND" });
     expect(inspectProject(source, "unused", { kind: "inspect_project", path: "../secrets" } as unknown as { kind: "inspect_project" })).toMatchObject({ ok: false, code: "INVALID_REQUEST" });
+  });
+
+  it("discloses only named trace, screenshot, and verification handles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-evidence-"));
+    try {
+      const source = project();
+      await mkdir(join(root, "traces"), { recursive: true });
+      await mkdir(join(root, "screenshots"), { recursive: true });
+      await mkdir(join(root, "verification"), { recursive: true });
+      await writeFile(join(root, "traces", "trace.zip"), "trace");
+      await writeFile(join(root, "screenshots", "open-demo-after.png"), "image");
+      await writeFile(join(root, "verification", "revision-0.json"), "{}");
+      expect(inspectProject(source, root, { kind: "inspect_browser_trace" })).toMatchObject({ ok: true, artifacts: [{ id: "trace:latest" }] });
+      expect(inspectProject(source, root, { kind: "inspect_screenshot", sceneId: source.scenes[0].id })).toMatchObject({ ok: true, artifacts: [{ id: `screenshot:${source.scenes[0].id}:after` }] });
+      expect(inspectProject(source, root, { kind: "inspect_verification_results" })).toMatchObject({ ok: true, artifacts: [{ id: "verification:revision-0" }] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("redacts secret-shaped text before it becomes inspection output", () => {
