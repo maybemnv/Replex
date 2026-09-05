@@ -57,7 +57,8 @@ export interface RenderOptions {
 }
 
 /** Builds the only renderable representation; callers never provide FFmpeg arguments. */
-export function buildRenderJob(project: Project, root: string, verificationId: string, outputPath = `renders/${project.currentRevisionId}.mp4`): RenderJob {
+export function buildRenderJob(project: Project, root: string, verification: { id: string; passed: boolean }, outputPath = `renders/${project.currentRevisionId}.mp4`): RenderJob {
+  if (!verification.passed) throw new Error("render requires a successful verification");
   const output = projectRelative(root, outputPath);
   if (!output.endsWith(".mp4")) throw new Error("render output must be an MP4");
   const scenes = [...project.scenes].sort((left, right) => left.order - right.order).map((scene) => sceneJob(project, scene));
@@ -69,7 +70,7 @@ export function buildRenderJob(project: Project, root: string, verificationId: s
   const withoutHash = {
     id: `render-${project.currentRevisionId}`,
     revisionId: project.currentRevisionId,
-    verificationId,
+    verificationId: verification.id,
     revisionSha256: project.revisions.at(-1)?.manifestSha256 ?? "",
     scenes,
     output: { path: output, width: 1920 as const, height: 1080 as const, fps: 30 as const, videoCodec: "libx264" as const, audioCodec: "aac" as const },
