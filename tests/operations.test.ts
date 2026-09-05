@@ -174,6 +174,7 @@ describe("operation reducer", () => {
     if (first.ok && second.ok) {
       expect(semanticHash(first.project)).toBe(semanticHash(second.project));
       expect(first.project.currentRevisionId).toBe(second.project.currentRevisionId);
+      expect(first.operationIds).toEqual(second.operationIds);
     }
   });
 
