@@ -166,11 +166,12 @@ describe("CLI", () => {
           brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 },
           environment: normalEnvironment(origin),
           flow: normalFlow(origin),
-          captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey) => ({
+          captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({
             id: `stale-${sceneKey}`,
             sceneKey,
             path: `captures/${sceneKey}.webm`,
             durationMs: 10000,
+            sha256: String(index + 1).repeat(64),
           })),
         });
         await writeRevision(root, initial);

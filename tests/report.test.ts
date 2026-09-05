@@ -15,7 +15,7 @@ describe("static evidence report", () => {
         brief: { audience: "Founders", message: "<script>alert(1)</script>", targetDurationMs: 30000 },
         environment: normalEnvironment("http://127.0.0.1:4173"),
         flow: normalFlow("http://127.0.0.1:4173"),
-        captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000 })),
+        captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000, sha256: String(index + 1).repeat(64) })),
       });
       const output = generateReport(project, root, {
         render: { path: "renders/revision-0.mp4", durationMs: 30000, verification: "passed" },
@@ -43,7 +43,7 @@ describe("static evidence report", () => {
         brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 },
         environment: normalEnvironment("http://127.0.0.1:4173"),
         flow: normalFlow("http://127.0.0.1:4173"),
-        captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000 })),
+        captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000, sha256: String(index + 1).repeat(64) })),
       });
       const output = { id: "render-output-revision-0", revisionId: source.currentRevisionId, renderJobSha256: "a".repeat(64), path: "renders/revision-0.mp4", ffprobe: { durationMs: 30000, width: 1920, height: 1080, fps: 30 as const, videoCodec: "h264", audioCodec: "aac" }, verificationId: "verification-revision-0" };
       const report = generateReport({ ...source, outputs: [output] }, root);

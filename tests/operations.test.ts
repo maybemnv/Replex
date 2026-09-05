@@ -17,9 +17,9 @@ function project(): Project {
     environment: normalEnvironment(origin),
     flow: normalFlow(origin),
     captures: [
-      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000 },
-      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000 },
-      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000 },
+      { id: "capture-open", sceneKey: "open-demo", sourcePath: "captures/open.webm", durationMs: 10000, sha256: "a".repeat(64) },
+      { id: "capture-filter", sceneKey: "open-filter", sourcePath: "captures/filter.webm", durationMs: 10000, sha256: "b".repeat(64) },
+      { id: "capture-apply", sceneKey: "apply-filter", sourcePath: "captures/apply.webm", durationMs: 10000, sha256: "c".repeat(64) },
     ],
   });
 }
@@ -80,7 +80,7 @@ describe("operation reducer", () => {
     const input = {
       ...source,
       captures: { ...source.captures, [newCapture.id]: newCapture },
-      flow: { ...source.flow, steps: [...source.flow.steps, { ...source.flow.steps[0], id: "new-step", sceneKey: "new-scene" }] },
+      flow: { ...source.flow, steps: [...source.flow.steps, { ...source.flow.steps[0], id: "new-step", sceneKey: "new-scene", order: source.flow.steps.length }] },
     };
     const result = applyOperations(input, input.currentRevisionId, [{ type: "create_scene", scene: { id: "new-scene-id", sceneKey: "new-scene", captureId: newCapture.id, actionIds: ["new-step"], checkpointActionId: "new-step", sourceInMs: 0, sourceOutMs: 1000, speed: 1, order: 3, transition: { type: "cut", durationMs: 0 } } }]);
 

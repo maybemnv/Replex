@@ -4,7 +4,7 @@ import { capturesFromRun } from "../src/project.js";
 describe("capture-to-project bridge", () => {
   it("retains immutable provenance while converting artifact paths to the project root", () => {
     const result = capturesFromRun({
-      run: { id: "run-1", attempt: 1, status: "passed" },
+      run: { id: "run-1", attempt: 1, startedAt: "2026-09-01T00:00:00.000Z", endedAt: "2026-09-01T00:00:01.000Z", status: "passed" },
       runPath: "C:/work/project/run-1/run.json",
       rawVideoPath: "C:/work/project/run-1/raw.webm",
       tracePath: "C:/work/project/run-1/traces/trace.zip",
