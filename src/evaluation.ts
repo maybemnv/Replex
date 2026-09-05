@@ -1,3 +1,6 @@
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 export type StageStatus = "passed" | "failed" | "not_run" | "not_applicable";
 export type AppId = "normal" | "dynamic" | "difficult";
 
@@ -25,6 +28,13 @@ export interface GateDecision {
   summary: { browserPassed: number; finalOutputs: number; recapturesPassed: number; usefulnessYes: number };
 }
 
+export interface EvaluationEvidence {
+  rowsPath: string;
+  summaryPath: string;
+  decisionPath: string;
+  decision: GateDecision;
+}
+
 /** Calls every app twice and records each attempt as evidence, including failures. */
 export async function runAdversarialEvaluation(
   apps: AppId[],
@@ -45,6 +55,11 @@ export function calculateDecision(rows: EvaluationRow[], input: { usefulnessRevi
   const finalOutputs = rows.filter((row) => row.render === "passed").length + rows.filter((row) => row.recapture === "passed").length;
   const recapturesPassed = rows.filter((row) => row.recapture === "passed").length;
   const usefulnessYes = input.usefulnessReviews.filter(Boolean).length;
+  for (const row of rows) {
+    for (const stage of ["browser", "capture", "edit", "model", "verify", "render"] as const) {
+      if (row[stage] === "not_run") missing.push(`${row.app} attempt ${row.attempt} ${stage} evidence`);
+    }
+  }
   if (browserPassed < 5) failed.push("browser completion < 5/6");
   if (finalOutputs < 9) failed.push("fewer than nine verified final outputs");
   if (recapturesPassed < 3) failed.push("selective recapture < 3/3");
@@ -58,8 +73,35 @@ export function calculateDecision(rows: EvaluationRow[], input: { usefulnessRevi
   return { decision, productionAuthorized: false, missing, failed, summary: { browserPassed, finalOutputs, recapturesPassed, usefulnessYes } };
 }
 
+/** Persists raw measured rows and a fixed-threshold decision without changing either. */
+export function writeEvaluation(root: string, rows: EvaluationRow[], input: { usefulnessReviews: boolean[] }): EvaluationEvidence {
+  const decision = calculateDecision(rows, input);
+  mkdirSync(root, { recursive: true });
+  const rowsPath = join(root, "rows.json");
+  const summaryPath = join(root, "summary.json");
+  const decisionPath = join(root, "decision.md");
+  writeJson(rowsPath, { rows });
+  writeJson(summaryPath, { decision, rows });
+  writeText(decisionPath, `# POC evaluation decision\n\nDecision: **${decision.decision}**\n\nProduction authorization: **no**\n\nMissing evidence:\n${list(decision.missing)}\n\nFailed gates:\n${list(decision.failed)}\n`);
+  return { rowsPath, summaryPath, decisionPath, decision };
+}
+
 function median(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function list(values: string[]): string {
+  return values.length ? values.map((value) => `- ${value}`).join("\n") : "- None";
+}
+
+function writeJson(path: string, value: unknown): void {
+  writeText(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeText(path: string, value: string): void {
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, value, "utf8");
+  renameSync(temporary, path);
 }
