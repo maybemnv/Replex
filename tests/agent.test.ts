@@ -78,8 +78,8 @@ describe("recorded bounded model loop", () => {
         { stopReason: "end_turn" as const, toolCalls: [] },
       ];
       const result = await runClaudeDraft(project, root, { createMessage: async () => responses.shift()! });
-      expect(result).toMatchObject({ ok: true, toolCalls: 3 });
-      if (result.ok) expect(result.project.overlays["title-live"].text).toBe("Filter releases");
+      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL", toolCalls: 3 });
+      expect(result.project.overlays["title-live"].text).toBe("Filter releases");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

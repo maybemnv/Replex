@@ -27,31 +27,35 @@ export type AgentResult =
 /** Replays real-shaped recorded calls through the same dispatcher used by the live client. */
 export function runRecordedAgentDraft(project: Project, root: string, calls: RecordedToolCall[]): AgentResult {
   if (calls.length > 20) return failure(project, 0, [], "BUDGET_EXHAUSTED", "agent exceeded 20 tool calls", root);
-  return dispatch({ project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [] }, root, calls);
+  return dispatch({ project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [] }, root, calls);
 }
 
 /** Runs the one configured provider seam; a missing key never falls back to recorded mode. */
 export async function runClaudeDraft(project: Project, root: string, client = createClaudeClient()): Promise<AgentResult> {
-  const controller = new AbortController();
-  const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [] };
+  const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [] };
   let request = initialClaudeRequest(project);
   for (;;) {
     let response: ClaudeResponse;
     try {
-      response = await client.createMessage(request, controller.signal);
+      response = await client.createMessage(request, AbortSignal.timeout(60_000));
     } catch (error) {
       try {
-        response = await client.createMessage(request, controller.signal);
+        response = await client.createMessage(request, AbortSignal.timeout(60_000));
       } catch (retryError) {
         return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", retryError instanceof Error ? retryError.message : String(error), root);
       }
     }
-    if (response.stopReason !== "tool_use") return { ok: true, project: state.project, toolCalls: state.toolCalls, events: state.events };
+    if (response.stopReason !== "tool_use") {
+      return state.editPasses && state.verified && state.renderCount
+        ? { ok: true, project: state.project, toolCalls: state.toolCalls, events: state.events }
+        : failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "agent ended before an edit, verification, and render completed", root);
+    }
     const result = dispatch(state, root, response.toolCalls);
     if (!result.ok) return result;
+    const outputs = state.outputs.splice(-response.toolCalls.length);
     request = {
       ...request,
-      messages: [...request.messages, { role: "assistant", content: response.assistantContent ?? [] }, { role: "user", content: response.toolCalls.map((call) => ({ type: "tool_result", tool_use_id: call.id ?? "missing-tool-id", content: JSON.stringify({ accepted: true }) })) }],
+      messages: [...request.messages, { role: "assistant", content: response.assistantContent ?? [] }, { role: "user", content: response.toolCalls.map((call, index) => ({ type: "tool_result", tool_use_id: call.id ?? "missing-tool-id", content: outputs[index] ?? JSON.stringify({ ok: false, detail: "tool produced no result" }) })) }],
     };
   }
 }
@@ -74,7 +78,7 @@ export function createClaudeClient(): ClaudeClient {
   };
 }
 
-interface DispatchState { project: Project; toolCalls: number; editPasses: number; renderCount: number; verified: boolean; events: string[] }
+interface DispatchState { project: Project; toolCalls: number; editPasses: number; renderCount: number; verified: boolean; events: string[]; outputs: string[] }
 
 function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[]): AgentResult {
   if (state.toolCalls + calls.length > 20) return failure(state.project, state.toolCalls, state.events, "BUDGET_EXHAUSTED", "agent exceeded 20 tool calls", root);
@@ -91,6 +95,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       const inspection = inspectProject(project, root, { kind: call.tool, ...(object(call.input) ?? {}) } as InspectionRequest);
       if (!inspection.ok) return fail(state.toolCalls + index + 1, "INVALID_CALL", inspection.detail);
       events.push(call.tool);
+      state.outputs.push(JSON.stringify(inspection));
       continue;
     }
     if (isEditTool(call.tool)) {
@@ -103,6 +108,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       project = mutation.project;
       editPasses += 1;
       events.push(call.tool);
+      state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, operationIds: mutation.operationIds }));
       continue;
     }
     if (call.tool === "verify_project") {
@@ -110,6 +116,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       if (!verification.passed) return fail(state.toolCalls + index + 1, "VERIFICATION_FAILED", verification.firstCause ?? "project verification failed");
       verified = true;
       events.push(call.tool);
+      state.outputs.push(JSON.stringify({ ok: true, verification }));
       continue;
     }
     if (call.tool === "render_draft") {
@@ -122,11 +129,13 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       }
       renderCount += 1;
       events.push(call.tool);
+      state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, rendered: true }));
       continue;
     }
     if (call.tool === "inspect_render_result") {
       if (!renderCount) return fail(state.toolCalls + index, "INVALID_CALL", "no render result is available");
       events.push(call.tool);
+      state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, rendered: true }));
     }
   }
   state.project = project;
@@ -142,9 +151,17 @@ function initialClaudeRequest(project: Project): ClaudeRequest {
   return {
     model: process.env.REPLEX_CLAUDE_MODEL ?? "claude-sonnet-4-20250514",
     system: "Use only the supplied typed tools. Never request browser access, shell, files, JavaScript, FFmpeg arguments, raw traces, secrets, or direct manifest writes. Cite stable evidence references for every edit.",
-    tools: AGENT_TOOL_NAMES.map((name) => ({ name, input_schema: { type: "object", additionalProperties: false } })),
+    tools: AGENT_TOOL_NAMES.map((name) => ({ name, input_schema: toolInputSchema(name) })),
     messages: [{ role: "user", content: `Create a bounded first draft for project ${project.projectId}. Inspect before editing.` }],
   };
+}
+
+function toolInputSchema(name: AgentTool): Record<string, unknown> {
+  const id = { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" };
+  if (name === "inspect_scene" || name === "inspect_screenshot") return { type: "object", properties: { sceneId: id }, required: ["sceneId"], additionalProperties: false };
+  if (name === "inspect_capture") return { type: "object", properties: { captureId: id }, required: ["captureId"], additionalProperties: false };
+  if (isEditTool(name)) return { type: "object", properties: { baseRevisionId: id, evidenceRefs: { type: "array", minItems: 1, items: { type: "string", pattern: "^(capture|screenshot|verification):[A-Za-z0-9._:-]+$" } } }, required: ["baseRevisionId", "evidenceRefs"], additionalProperties: true };
+  return { type: "object", properties: {}, additionalProperties: false };
 }
 
 function isInspectionTool(tool: string): tool is Extract<AgentTool, `inspect_${string}`> {
