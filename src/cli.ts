@@ -188,7 +188,7 @@ async function executeRenderCommand(
     return 1;
   }
   const job = buildRenderJob(project, root, verification, args.outputPath ?? `renders/${project.currentRevisionId}.mp4`);
-  const render = executeRenderJob(job, root, { ffmpegPath: toolPaths.ffmpeg, ffprobePath: toolPaths.ffprobe });
+  const render = executeRenderJob(job, root, { ffmpegPath: toolPaths.ffmpeg, ffprobePath: toolPaths.ffprobe, project });
   printJson(io, {
     command,
     status: "completed",

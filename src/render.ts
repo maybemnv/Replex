@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { deflateSync } from "node:zlib";
-import type { Focus, Overlay, Project, Scene, Transition } from "./schema.js";
+import { ProjectSchema, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
 import { loadVerificationResult } from "./verify.js";
 
 export interface RenderJobOverlay {
@@ -52,11 +52,13 @@ export interface RenderExecution {
   outputPath: string;
   probe: MediaProbe;
   argv: string[];
+  output: RenderOutput;
 }
 
 export interface RenderOptions {
   ffmpegPath?: string;
   ffprobePath?: string;
+  project?: Project;
 }
 
 /** Builds the only renderable representation; callers never provide FFmpeg arguments. */
@@ -104,7 +106,36 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   const decode = spawnSync(ffmpegPath, ["-v", "error", "-i", temporary, "-f", "null", "-"], { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   if (decode.status !== 0) throw new Error(`FFmpeg decode failed: ${(decode.stderr || "unknown error").trim()}`);
   renameSync(temporary, outputPath);
-  return { outputPath, probe, argv };
+  const output: RenderOutput = {
+    id: `render-output-${job.revisionId}`,
+    revisionId: job.revisionId,
+    renderJobSha256: job.sha256,
+    path: relative(resolve(root), outputPath).replace(/\\/g, "/"),
+    ffprobe: probe,
+    verificationId: job.verificationId,
+  };
+  persistRenderOutput(root, options.project, output);
+  return { outputPath, probe, argv, output };
+}
+
+/** Records the only successful render for a revision in the canonical project. */
+function persistRenderOutput(root: string, suppliedProject: Project | undefined, output: RenderOutput): void {
+  const projectPath = join(root, "project.json");
+  let project = suppliedProject;
+  if (!project) {
+    if (!existsSync(projectPath)) return;
+    project = ProjectSchema.parse(JSON.parse(readFileSync(projectPath, "utf8")));
+  }
+  const next = ProjectSchema.parse({
+    ...project,
+    outputs: [...project.outputs.filter((candidate) => candidate.revisionId !== output.revisionId), output],
+  });
+  if (suppliedProject) suppliedProject.outputs = next.outputs;
+  if (existsSync(projectPath)) {
+    const temporary = `${projectPath}.${output.renderJobSha256.slice(0, 12)}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    renameSync(temporary, projectPath);
+  }
 }
 
 export function probeMedia(path: string, ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe"): MediaProbe {

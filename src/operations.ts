@@ -350,13 +350,23 @@ function auditRejected(
     id: randomUUID(),
     baseRevisionId,
     actor,
-    operations,
+    operations: redactAuditValue(operations),
     accepted: false,
     error: failure,
     evidenceRefs: [],
     createdAt,
   };
   appendJsonLine(path, entry);
+}
+
+const SENSITIVE_KEY = /^(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)$/i;
+const SECRET_ASSIGNMENT = /((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)\s*[=:]\s*)(?:Bearer\s+)?[^\s,;}"']+/gi;
+
+function redactAuditValue(value: unknown): unknown {
+  if (typeof value === "string") return value.replace(SECRET_ASSIGNMENT, "$1[REDACTED]");
+  if (Array.isArray(value)) return value.map(redactAuditValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactAuditValue(item)]));
 }
 
 function persistAccepted(

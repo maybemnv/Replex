@@ -50,6 +50,9 @@ export async function runClaudeDraft(project: Project, root: string, client = cr
         ? { ok: true, project: state.project, toolCalls: state.toolCalls, events: state.events }
         : failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "agent ended before an edit, verification, and render completed", root);
     }
+    if (!Array.isArray(response.toolCalls) || response.toolCalls.length === 0) {
+      return failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "Claude declared tool use without a parsed tool call", root);
+    }
     const result = dispatch(state, root, response.toolCalls);
     if (!result.ok) return result;
     const outputs = state.outputs.splice(-response.toolCalls.length);
@@ -124,14 +127,15 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
     if (call.tool === "render_draft") {
       if (!verified) return fail(state.toolCalls + index, "VERIFICATION_FAILED", "render requires a successful verification");
       if (renderCount >= 2) return fail(state.toolCalls + index, "BUDGET_EXHAUSTED", "agent exceeded two renders");
+      let rendered: ReturnType<typeof executeRenderJob>;
       try {
-        executeRenderJob(buildRenderJob(project, root, latestVerification ?? { id: `verification-${project.currentRevisionId}`, passed: false }), root);
+        rendered = executeRenderJob(buildRenderJob(project, root, latestVerification ?? { id: `verification-${project.currentRevisionId}`, passed: false }), root, { project });
       } catch (error) {
         return fail(state.toolCalls + index + 1, "RENDER_FAILED", error instanceof Error ? error.message : String(error));
       }
       renderCount += 1;
       events.push(call.tool);
-      state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, rendered: true }));
+      state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, rendered: true, output: rendered.output }));
       continue;
     }
     if (call.tool === "inspect_render_result") {

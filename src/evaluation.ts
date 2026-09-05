@@ -46,7 +46,11 @@ export async function runAdversarialEvaluation(
   runner: (app: AppId, attempt: 1 | 2) => Promise<EvaluationRow>,
 ): Promise<EvaluationRow[]> {
   const rows: EvaluationRow[] = [];
-  for (const app of apps) for (const attempt of [1, 2] as const) rows.push(await runner(app, attempt));
+  for (const app of apps) for (const attempt of [1, 2] as const) {
+    const row = await runner(app, attempt);
+    if (row.app !== app || row.attempt !== attempt) throw new Error(`evaluation runner returned mismatched identity for ${app} attempt ${attempt}`);
+    rows.push(row);
+  }
   return rows;
 }
 
@@ -55,16 +59,34 @@ export function calculateDecision(rows: EvaluationRow[], input: EvaluationInput)
   const missing: string[] = [];
   const failed: string[] = [];
   const expected = ["normal", "dynamic", "difficult"] as const;
-  for (const app of expected) if (rows.filter((row) => row.app === app).length !== 2) missing.push(`${app} two-run evidence`);
+  for (const app of expected) {
+    const appRows = rows.filter((row) => row.app === app);
+    if (appRows.length !== 2) missing.push(`${app} two-run evidence`);
+    const attempts = new Set(appRows.map((row) => row.attempt));
+    if (appRows.length !== 2 || attempts.size !== 2 || !attempts.has(1) || !attempts.has(2)) missing.push(`${app} unique attempt IDs`);
+    const recaptureStatuses = appRows.map((row) => row.recapture);
+    if (recaptureStatuses.filter((status) => status !== "not_applicable").length !== 1 || recaptureStatuses.includes("not_run")) missing.push(`${app} exactly one recapture evidence`);
+  }
   const browserPassed = rows.filter((row) => row.browser === "passed").length;
   const finalOutputs = rows.filter((row) => row.render === "passed").length + rows.filter((row) => row.recapture === "passed").length;
   const recapturesPassed = rows.filter((row) => row.recapture === "passed").length;
   const usefulnessYes = input.usefulnessReviews.filter(Boolean).length;
   if (!hasRetainedArtifacts(input.evidenceRoot, rows)) missing.push("retained evaluation artifacts");
   for (const row of rows) {
-    for (const stage of ["browser", "capture", "edit", "model", "verify", "render"] as const) {
-      if (row[stage] === "not_run") missing.push(`${row.app} attempt ${row.attempt} ${stage} evidence`);
+    const stages = ["browser", "capture", "edit", "model", "verify", "render"] as const;
+    for (const stage of stages) {
+      if (row[stage] === "not_run" || row[stage] === "not_applicable") missing.push(`${row.app} attempt ${row.attempt} ${stage} evidence`);
+      if (!STAGE_STATUSES.includes(row[stage])) missing.push(`${row.app} attempt ${row.attempt} invalid ${stage} status`);
     }
+    let blocked = false;
+    for (const stage of stages) {
+      if (blocked && row[stage] !== "not_run" && row[stage] !== "not_applicable") {
+        missing.push(`${row.app} attempt ${row.attempt} contradictory stage statuses`);
+        break;
+      }
+      blocked ||= row[stage] !== "passed";
+    }
+    if (row.render !== "passed" && row.recapture === "passed") missing.push(`${row.app} attempt ${row.attempt} recapture passed without a rendered draft`);
   }
   if (browserPassed < 5) failed.push("browser completion < 5/6");
   if (finalOutputs < 9) failed.push("fewer than nine verified final outputs");
@@ -121,3 +143,5 @@ function hasRetainedArtifacts(root: string | undefined, rows: EvaluationRow[]): 
     return !relative(base, path).startsWith("..") && existsSync(path) && statSync(path).size > 0;
   }));
 }
+
+const STAGE_STATUSES: StageStatus[] = ["passed", "failed", "not_run", "not_applicable"];
