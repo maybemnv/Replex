@@ -1,9 +1,23 @@
 import { z } from "zod";
 
 const nonEmptyText = z.string().trim().min(1);
-const origin = z.string().url().refine((value) => /^https?:$/.test(new URL(value).protocol), {
-  message: "origin must use http or https",
-});
+const origin = z
+  .string()
+  .url()
+  .refine((value) => /^https?:$/.test(new URL(value).protocol), {
+    message: "origin must use http or https",
+  })
+  .refine(
+    (value) => {
+      const parsed = new URL(value);
+      return (
+        parsed.username === "" &&
+        parsed.password === "" &&
+        /^https?:\/\/[^/?#@]*\/?$/i.test(value)
+      );
+    },
+    { message: "origin must not include path, query, fragment, or userinfo" },
+  );
 
 export const MillisecondsSchema = z.number().int().finite().nonnegative();
 export const IdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "invalid stable ID");

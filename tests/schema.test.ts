@@ -30,4 +30,22 @@ describe("RuntimeConfigSchema", () => {
       }),
     ).toThrow();
   });
+
+  it.each([
+    ["path", "http://localhost:3000/dashboard"],
+    ["query", "http://localhost:3000/?mode=preview"],
+    ["fragment", "http://localhost:3000/#preview"],
+    ["userinfo", "http://operator:secret@localhost:3000"],
+    ["empty userinfo", "http://@localhost:3000"],
+  ])("rejects an origin with a %s", (_part, invalidOrigin) => {
+    expect(() =>
+      RuntimeConfigSchema.parse({ ...validConfig, appOrigin: invalidOrigin }),
+    ).toThrow();
+    expect(() =>
+      RuntimeConfigSchema.parse({
+        ...validConfig,
+        allowedOrigins: [validConfig.appOrigin, invalidOrigin],
+      }),
+    ).toThrow();
+  });
 });
