@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { calculateDecision, runAdversarialEvaluation, type EvaluationRow } from "../src/evaluation.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { calculateDecision, runAdversarialEvaluation, type EvaluationRow, writeEvaluation } from "../src/evaluation.js";
 
 const passingRows: EvaluationRow[] = (["normal", "dynamic", "difficult"] as const).flatMap((app) => ([1, 2] as const).map((attempt) => ({ app, attempt, browser: "passed", capture: "passed", edit: "passed", model: "passed", verify: "passed", render: "passed", recapture: attempt === 1 ? "passed" : "not_applicable", artifacts: ["run.json", "actions.jsonl", "render.mp4"], correctionMinutes: 5, safetyViolation: false, firstCause: null })));
 
@@ -19,5 +22,18 @@ describe("adversarial evaluation ledger", () => {
     const unsafe = passingRows.map((row, index) => index === 0 ? { ...row, safetyViolation: true } : row);
     const decision = calculateDecision(unsafe, { usefulnessReviews: [true, true, true] });
     expect(decision).toMatchObject({ decision: "FAIL", productionAuthorized: false });
+  });
+
+  it("persists raw rows with a decision and never lets not-run stages pass", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-evaluation-"));
+    try {
+      const result = writeEvaluation(root, passingRows, { usefulnessReviews: [true, true, false] });
+      expect(result.decision).toMatchObject({ decision: "PASS", productionAuthorized: false });
+      expect(await readFile(result.summaryPath, "utf8")).toContain('"decision": "PASS"');
+      expect(await readFile(result.decisionPath, "utf8")).toContain("Production authorization: **no**");
+      expect(calculateDecision([{ ...passingRows[0], model: "not_run" }, ...passingRows.slice(1)], { usefulnessReviews: [true, true, false] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["normal attempt 1 model evidence"]) });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
