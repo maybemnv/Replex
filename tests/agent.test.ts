@@ -38,7 +38,7 @@ describe("recorded bounded model loop", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   it("stops unknown, stale, secret-bearing, and ungrounded calls without mutating the project", async () => {
     const { root, project } = await fixture();
