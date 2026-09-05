@@ -2,7 +2,7 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-> Implementation status — 2026-09-05: POC-1 through POC-5 meet their local implementation and test criteria. POC-6 through POC-13 have substantive implementation and recorded/local evidence, but remain unchecked until their listed acceptance evidence is complete. POC-8, POC-9, and POC-12 specifically still require an operator-configured real Claude run; POC-10, POC-14, and POC-15 are still being completed. A checked item means the entire acceptance criterion is evidenced, not merely that code exists.
+> Implementation status — 2026-09-06: POC-1 through POC-5 meet their local implementation and test criteria. POC-6 through POC-13 have substantive implementation and recorded/local evidence, but remain unchecked until their listed acceptance evidence is complete. POC-13's dynamic and difficult browser-to-render paths passed with strict verification, a bounded recorded agent draft, selective recapture, and revised rendering; it remains unchecked because its declared POC-12 prerequisite still requires an operator-configured real Claude run. POC-8, POC-9, and POC-12 specifically still require that real Claude evidence; POC-10, POC-14, and POC-15 are still being completed. A checked item means the entire acceptance criterion is evidenced, not merely that code exists.
 
 - [x] POC-1: Establish the minimal local runtime
 
