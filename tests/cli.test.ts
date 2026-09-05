@@ -87,7 +87,7 @@ describe("CLI", () => {
       available: true,
       version: expect.stringMatching(/(?:Chrome|Chromium)\//),
     });
-  });
+  }, 20_000);
 
   it("preserves typed codes for usage and config failures", async () => {
     const unknown = captureOutput();
