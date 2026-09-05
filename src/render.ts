@@ -3,8 +3,10 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { chromium } from "@playwright/test";
 import type { Focus, Overlay, Project, Scene, Transition } from "./schema.js";
 import { loadVerificationResult } from "./verify.js";
+import { pathToFileURL } from "node:url";
 
 export interface RenderJobOverlay {
   id: string;
@@ -246,14 +248,25 @@ function writeOverlayAssets(job: RenderJob, root: string): void {
   for (const overlay of job.scenes.flatMap((scene) => scene.overlays)) {
     const path = resolveProjectPath(root, overlay.assetPath);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, overlaySvg(overlay), "utf8");
+    const svgPath = path.replace(/\.png$/, ".svg");
+    writeFileSync(svgPath, overlaySvg(overlay), "utf8");
+    const run = spawnSync(chromium.executablePath(), [
+      "--headless=new",
+      "--disable-gpu",
+      "--hide-scrollbars",
+      "--window-size=1920,1080",
+      "--default-background-color=00000000",
+      `--screenshot=${path}`,
+      pathToFileURL(svgPath).href,
+    ], { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+    if (run.status !== 0 || !existsSync(path)) throw new Error(`overlay asset generation failed: ${(run.stderr || run.error?.message || "Chromium screenshot failed").trim()}`);
   }
 }
 
 function overlayAssetPath(overlay: Pick<RenderJobOverlay, "id" | "kind" | "text" | "placement">): string {
   const id = overlay.id.replace(/[^A-Za-z0-9._-]/g, "_") || "overlay";
   const fingerprint = sha256(canonicalJson(overlay)).slice(0, 16);
-  return `render-assets/${id}-${fingerprint}.svg`;
+  return `render-assets/${id}-${fingerprint}.png`;
 }
 
 function overlaySvg(overlay: RenderJobOverlay): string {
