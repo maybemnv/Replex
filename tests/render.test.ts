@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { buildRenderJob, executeRenderJob, type RenderJob } from "../src/render.js";
-import { createProject, type Project, writeRevision } from "../src/project.js";
+import { createProject, semanticHash, type Project, writeRevision } from "../src/project.js";
 import { verifyProject } from "../src/verify.js";
 
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
@@ -79,11 +79,12 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       const base = project(root);
       await mkdir(join(root, "captures"), { recursive: true });
       for (const index of [1, 2, 3]) makeSource(join(root, "captures", `${index}.mp4`), index);
-      const source = {
+      const sourceCore = {
         ...base,
         captures: Object.fromEntries(await Promise.all(Object.entries(base.captures).map(async ([id, capture]) => [id, { ...capture, sha256: createHash("sha256").update(await readFile(join(root, capture.path))).digest("hex") }]))) as Project["captures"],
         scenes: [{ ...base.scenes[0], focus: { preset: "box" as const, bounds: { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }, startMs: 0, endMs: 3000 }, transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...base.scenes.slice(1)],
       };
+      const source = { ...sourceCore, revisions: [{ ...base.revisions[0], manifestSha256: semanticHash(sourceCore) }] };
       const verification = verifyProject(source, root);
       const job = buildRenderJob(source, root, verification);
       await writeRevision(root, source as Project);

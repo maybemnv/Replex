@@ -12,7 +12,7 @@ function project() {
     brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 },
     environment: normalEnvironment("http://127.0.0.1:4173"),
     flow: normalFlow("http://127.0.0.1:4173"),
-    captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000 })),
+    captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({ id: `capture-${index}`, sceneKey, path: `captures/${index}.mp4`, durationMs: 10000, sha256: String(index + 1).repeat(64) })),
   });
 }
 
