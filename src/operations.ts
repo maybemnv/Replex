@@ -167,7 +167,7 @@ function applyOperation(project: Project, operation: EditOperation, revisionId: 
           sceneId: scene.id,
           previousCaptureId: previous.id,
           replacementCaptureId: replacement.id,
-          changedStepIds: replacement.actionIds,
+          changedStepIds: operation.changedStepIds ?? replacement.actionIds,
           reason: operation.reason,
           revisionId,
         },

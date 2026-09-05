@@ -29,7 +29,7 @@ describe("selective recapture reconciliation", () => {
       expect(result.project.scenes[0]).toMatchObject({ id: project.scenes[0].id, captureId: "capture-0-new" });
       expect(result.project.scenes.slice(1)).toEqual(project.scenes.slice(1));
       expect(result.project.overlays["agent-title"]).toEqual(project.overlays["agent-title"]);
-      expect(result.project.recaptureLineage.at(-1)).toMatchObject({ previousCaptureId: "capture-0", replacementCaptureId: "capture-0-new" });
+      expect(result.project.recaptureLineage.at(-1)).toMatchObject({ previousCaptureId: "capture-0", replacementCaptureId: "capture-0-new", changedStepIds: [project.scenes[0].checkpointActionId] });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
