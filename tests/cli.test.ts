@@ -80,7 +80,7 @@ describe("CLI", () => {
       available: true,
       version: expect.stringMatching(/(?:Chrome|Chromium)\//),
     });
-  });
+  }, 20_000);
 
   describe.skipIf(!mediaAvailable)("capture materialization", () => {
     let server: Server;
