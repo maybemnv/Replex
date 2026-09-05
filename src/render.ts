@@ -164,7 +164,8 @@ function timelineFilters(scenes: RenderJobScene[]): string[] {
 }
 
 function sceneFilters(scene: RenderJobScene, index: number): string[] {
-  const filters = [`[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[base${index}]`];
+  const focus = focusFilters(scene.focus);
+  const filters = [`[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2${focus}[base${index}]`];
   let previous = `base${index}`;
   for (const [overlayIndex, overlay] of scene.overlays.entries()) {
     const next = `overlay${index}_${overlayIndex}`;
@@ -175,6 +176,17 @@ function sceneFilters(scene: RenderJobScene, index: number): string[] {
   }
   filters.push(`[${previous}]null[scene${index}]`);
   return filters;
+}
+
+function focusFilters(focus: Focus | undefined): string {
+  if (!focus || focus.preset === "none") return "";
+  const bounds = focus.bounds!;
+  const x = (bounds.x * 1920).toFixed(3);
+  const y = (bounds.y * 1080).toFixed(3);
+  const width = (bounds.width * 1920).toFixed(3);
+  const height = (bounds.height * 1080).toFixed(3);
+  if (focus.preset === "box") return `,drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=0xF5C56B@0.9:thickness=6`;
+  return `,crop=${width}:${height}:${x}:${y},scale=1920:1080`;
 }
 
 function assertRenderedMedia(probe: MediaProbe): void {
