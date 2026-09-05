@@ -49,6 +49,7 @@ describe("RenderJob", () => {
     });
     expect(job.scenes.map((scene) => scene.sourcePath)).toEqual(["captures/1.mp4", "captures/2.mp4", "captures/3.mp4"]);
     expect(job.scenes[0].overlays).toMatchObject([{ kind: "title", text: "Filter releases", startMs: 0, endMs: 3000 }]);
+    expect(job.scenes[0].overlays[0].assetPath).toMatch(/^render-assets\/[A-Za-z0-9._-]+\.svg$/);
     expect(job.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
