@@ -78,12 +78,13 @@ export function createClaudeClient(): ClaudeClient {
   };
 }
 
-interface DispatchState { project: Project; toolCalls: number; editPasses: number; renderCount: number; verified: boolean; events: string[]; outputs: string[] }
+interface DispatchState { project: Project; toolCalls: number; editPasses: number; renderCount: number; verified: boolean; verification?: { id: string; passed: boolean }; events: string[]; outputs: string[] }
 
 function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[]): AgentResult {
   if (state.toolCalls + calls.length > 20) return failure(state.project, state.toolCalls, state.events, "BUDGET_EXHAUSTED", "agent exceeded 20 tool calls", root);
   let project = state.project;
   let verified = state.verified;
+  let latestVerification = state.verification;
   let editPasses = state.editPasses;
   let renderCount = state.renderCount;
   const events = state.events;
@@ -115,6 +116,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       const verification = verifyProject(project, root);
       if (!verification.passed) return fail(state.toolCalls + index + 1, "VERIFICATION_FAILED", verification.firstCause ?? "project verification failed");
       verified = true;
+      latestVerification = verification;
       events.push(call.tool);
       state.outputs.push(JSON.stringify({ ok: true, verification }));
       continue;
@@ -123,7 +125,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       if (!verified) return fail(state.toolCalls + index, "VERIFICATION_FAILED", "render requires a successful verification");
       if (renderCount >= 2) return fail(state.toolCalls + index, "BUDGET_EXHAUSTED", "agent exceeded two renders");
       try {
-        executeRenderJob(buildRenderJob(project, root, `verification-${project.currentRevisionId}`), root);
+        executeRenderJob(buildRenderJob(project, root, latestVerification ?? { id: `verification-${project.currentRevisionId}`, passed: false }), root);
       } catch (error) {
         return fail(state.toolCalls + index + 1, "RENDER_FAILED", error instanceof Error ? error.message : String(error));
       }
@@ -143,6 +145,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
   state.editPasses = editPasses;
   state.renderCount = renderCount;
   state.verified = verified;
+  state.verification = latestVerification;
   audit(root, { toolCalls: state.toolCalls, events });
   return { ok: true, project, toolCalls: state.toolCalls, events };
 }
