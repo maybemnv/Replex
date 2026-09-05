@@ -63,7 +63,7 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
   it("renders a 27-second 1080p H.264/AAC MP4, probes it, decodes it, and writes an evidence report", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-render-"));
     try {
-      const source = project(root);
+      const source = { ...project(root), scenes: [{ ...project(root).scenes[0], transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...project(root).scenes.slice(1)] };
       await mkdir(join(root, "captures"), { recursive: true });
       for (const index of [1, 2, 3]) makeSource(join(root, "captures", `${index}.mp4`), index);
       const job = buildRenderJob(source, root, "verification-project");

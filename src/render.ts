@@ -129,17 +129,38 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
 
 function buildFfmpegArgv(job: RenderJob, root: string, temporary: string): string[] {
   const inputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
-  const totalSeconds = job.scenes.reduce((total, scene) => total + (scene.outMs - scene.inMs) / scene.speed / 1000, 0);
+  const totalSeconds = renderedDurationSeconds(job.scenes);
   const audioInput = job.scenes.length;
   const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index));
-  const videoLabels = job.scenes.map((_, index) => `[scene${index}]`).join("");
-  filters.push(`${videoLabels}concat=n=${job.scenes.length}:v=1:a=0[video]`);
+  filters.push(...timelineFilters(job.scenes));
   return [
     "-y", ...inputs,
     "-f", "lavfi", "-t", seconds(totalSeconds * 1000), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
     "-filter_complex", filters.join(";"),
     "-map", "[video]", "-map", `${audioInput}:a`, "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", temporary,
   ];
+}
+
+function timelineFilters(scenes: RenderJobScene[]): string[] {
+  if (scenes.length === 1) return ["[scene0]null[video]"];
+  const filters: string[] = [];
+  let previous = "scene0";
+  let duration = sceneDurationSeconds(scenes[0]);
+  for (let index = 1; index < scenes.length; index += 1) {
+    const scene = scenes[index];
+    const next = `timeline${index}`;
+    if (scenes[index - 1].transition.type === "crossfade") {
+      const transitionSeconds = scenes[index - 1].transition.durationMs / 1000;
+      filters.push(`[${previous}][scene${index}]xfade=transition=fade:duration=${transitionSeconds.toFixed(3)}:offset=${(duration - transitionSeconds).toFixed(3)}[${next}]`);
+      duration += sceneDurationSeconds(scene) - transitionSeconds;
+    } else {
+      filters.push(`[${previous}][scene${index}]concat=n=2:v=1:a=0[${next}]`);
+      duration += sceneDurationSeconds(scene);
+    }
+    previous = next;
+  }
+  filters.push(`[${previous}]null[video]`);
+  return filters;
 }
 
 function sceneFilters(scene: RenderJobScene, index: number): string[] {
@@ -181,6 +202,14 @@ function parseRate(value: string | undefined): number {
 
 function seconds(value: number): string {
   return (value / 1000).toFixed(3).replace(/\.000$/, "");
+}
+
+function sceneDurationSeconds(scene: RenderJobScene): number {
+  return (scene.outMs - scene.inMs) / scene.speed / 1000;
+}
+
+function renderedDurationSeconds(scenes: RenderJobScene[]): number {
+  return scenes.reduce((total, scene, index) => total + sceneDurationSeconds(scene) - (index && scenes[index - 1].transition.type === "crossfade" ? scenes[index - 1].transition.durationMs / 1000 : 0), 0);
 }
 
 function escapeDrawText(value: string): string {
