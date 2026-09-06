@@ -63,6 +63,13 @@ describe("CLI", () => {
   });
 
   it("records the version reported by an executable", () => {
+    const probe = checkStartupTools({ ffmpeg: "C:/missing/ffmpeg.exe", ffprobe: "C:/missing/ffprobe.exe", chromium: process.env.REPLEX_CHROMIUM_PATH });
+    const chromiumTool = probe.tools.find((tool) => tool.name === "chromium");
+    if (!chromiumTool?.available) {
+      console.warn("skipping Chromium version probe: bundled Chromium is not installed (run `npx playwright install chromium`)");
+      return;
+    }
+
     const result = checkStartupTools({ ffmpeg: "C:/missing/ffmpeg.exe", ffprobe: "C:/missing/ffprobe.exe" });
 
     expect(result.tools.find((tool) => tool.name === "chromium")).toMatchObject({

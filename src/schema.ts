@@ -1,15 +1,34 @@
 import { z } from "zod";
 
 const nonEmptyText = z.string().trim().min(1);
+
+function tryParseUrl(value: string): URL | undefined {
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
+}
+
+export function normalizeOrigin(value: string): string {
+  const parsed = tryParseUrl(value);
+  if (!parsed) return value.trim().replace(/\/+$/, "");
+  return parsed.origin;
+}
+
 const origin = z
   .string()
   .url()
-  .refine((value) => /^https?:$/.test(new URL(value).protocol), {
+  .refine((value) => {
+    const parsed = tryParseUrl(value);
+    return !!parsed && /^https?:$/.test(parsed.protocol);
+  }, {
     message: "origin must use http or https",
   })
   .refine(
     (value) => {
-      const parsed = new URL(value);
+      const parsed = tryParseUrl(value);
+      if (!parsed) return false;
       return (
         parsed.username === "" &&
         parsed.password === "" &&
@@ -51,7 +70,8 @@ export const EnvironmentSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (!value.allowedOrigins.includes(value.appOrigin)) {
+    const normalized = normalizeOrigin(value.appOrigin);
+    if (!value.allowedOrigins.some((origin) => normalizeOrigin(origin) === normalized)) {
       context.addIssue({
         code: "custom",
         path: ["allowedOrigins"],
@@ -88,7 +108,15 @@ export const BrowserStepSchema = z
     checkpoint: checkpointSchema,
     sceneKey: IdSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.action === "goto" && value.target?.kind !== "url") {
+      context.addIssue({ code: "custom", path: ["target"], message: "goto steps require a url target" });
+    }
+    if ((value.action === "fill" || value.action === "select" || value.action === "upload") && !value.valueRef) {
+      context.addIssue({ code: "custom", path: ["valueRef"], message: `${value.action} steps require a valueRef` });
+    }
+  });
 
 export const FlowSchema = z
   .object({
@@ -97,7 +125,15 @@ export const FlowSchema = z
     prohibitedActions: z.array(nonEmptyText),
     steps: z.array(BrowserStepSchema).min(1),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const ids = new Set<string>();
+    for (const [index, step] of value.steps.entries()) {
+      if (ids.has(step.id)) context.addIssue({ code: "custom", path: ["steps", index, "id"], message: "flow action IDs must be unique" });
+      if (step.order !== index) context.addIssue({ code: "custom", path: ["steps", index, "order"], message: "flow step order must match its declared position" });
+      ids.add(step.id);
+    }
+  });
 
 export const RuntimeConfigSchema = z
   .object({
@@ -109,7 +145,8 @@ export const RuntimeConfigSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (!value.allowedOrigins.includes(value.appOrigin)) {
+    const normalized = normalizeOrigin(value.appOrigin);
+    if (!value.allowedOrigins.some((origin) => normalizeOrigin(origin) === normalized)) {
       context.addIssue({
         code: "custom",
         path: ["allowedOrigins"],

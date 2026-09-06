@@ -70,7 +70,11 @@ function executableStatus(name: ToolName, path: string): StartupToolStatus {
     timeout: 15_000,
   });
   if (result.error) return { name, path, available: false, detail: result.error.message };
-  if (result.status !== 0) return { name, path, available: false, detail: `exited with status ${result.status}` };
+  if (result.status !== 0) {
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(0, 500);
+    const signal = result.signal ? ` signal ${result.signal}` : "";
+    return { name, path, available: false, detail: `exited with status ${result.status}${signal}${output ? `: ${output}` : ""}` };
+  }
   const output = `${result.stdout}${result.stderr}`.trim();
   const version = name === "chromium"
     ? output.match(/(?:Chrome|Chromium)\/[^\s<]+/)?.[0] ?? output.split(/\r?\n/, 1)[0]
@@ -78,12 +82,26 @@ function executableStatus(name: ToolName, path: string): StartupToolStatus {
   return { name, path, available: true, version };
 }
 
-export function checkStartupTools(paths: ToolPaths = {}): StartupCheckResult {
-  const resolved: Record<ToolName, string> = {
-    chromium: paths.chromium ?? process.env.REPLEX_CHROMIUM_PATH ?? chromium.executablePath(),
+function resolveToolPaths(paths: ToolPaths = {}): Record<ToolName, string> {
+  let chromiumPath: string;
+  try {
+    chromiumPath = paths.chromium ?? process.env.REPLEX_CHROMIUM_PATH ?? chromium.executablePath();
+  } catch (error) {
+    throw new StartupCheckError({
+      ok: false,
+      tools: [{ name: "chromium", path: paths.chromium ?? process.env.REPLEX_CHROMIUM_PATH ?? "<unresolved>", available: false, detail: error instanceof Error ? error.message : String(error) }],
+      missing: ["chromium"],
+    });
+  }
+  return {
+    chromium: chromiumPath,
     ffmpeg: paths.ffmpeg ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg",
     ffprobe: paths.ffprobe ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe",
   };
+}
+
+export function checkStartupTools(paths: ToolPaths = {}): StartupCheckResult {
+  const resolved = resolveToolPaths(paths);
   const tools = (Object.entries(resolved) as [ToolName, string][]).map(([name, path]) => executableStatus(name, path));
   const missing = tools.filter((tool) => !tool.available).map((tool) => tool.name);
   return { ok: missing.length === 0, tools, missing };
@@ -136,7 +154,7 @@ async function validateConfig(path: string): Promise<void> {
 export async function runCli(argv: string[], options: RunCliOptions = {}): Promise<number> {
   const io = options.io ?? defaultIO;
   try {
-    if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+    if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
       io.stdout(HELP_TEXT);
       return 0;
     }
@@ -146,10 +164,16 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
 
     let configPath: string | undefined;
     for (let index = 1; index < argv.length; index += 1) {
-      if (argv[index] === "--config") {
-        configPath = argv[index + 1];
-        if (!configPath || configPath.startsWith("-")) throw usageError("--config requires a path");
-        index += 1;
+      const arg = argv[index];
+      if (arg === "--config" || arg.startsWith("--config=")) {
+        if (configPath !== undefined) throw usageError("--config specified more than once");
+        const inline = arg.startsWith("--config=") ? arg.slice("--config=".length) : undefined;
+        configPath = inline ?? argv[index + 1];
+        if (inline === "") throw usageError("--config requires a path");
+        if (!inline) {
+          if (!configPath || configPath.startsWith("-")) throw usageError("--config requires a path");
+          index += 1;
+        }
       } else {
         throw usageError(`unknown option: ${argv[index]}`);
       }
@@ -171,5 +195,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   runCli(process.argv.slice(2)).then((exitCode) => {
     process.exitCode = exitCode;
+  }).catch((error) => {
+    process.stderr.write(JSON.stringify({ error: { code: "CLI_ERROR", message: error instanceof Error ? error.message : String(error) } }) + "\n");
+    process.exitCode = 1;
   });
 }
