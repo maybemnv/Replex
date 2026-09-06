@@ -42,6 +42,19 @@ describe("adversarial evaluation ledger", () => {
     expect(calculateDecision(contradictory, { usefulnessReviews: [true, true, true] })).toMatchObject({ decision: "REWORK", missing: expect.arrayContaining(["normal attempt 1 contradictory stage statuses"]) });
   });
 
+  it("honors a caller-supplied evidence root instead of the output dir", async () => {
+    const evidence = await mkdtemp(join(tmpdir(), "replex-evaluation-evidence-"));
+    const output = await mkdtemp(join(tmpdir(), "replex-evaluation-output-"));
+    try {
+      await Promise.all(["run.json", "actions.jsonl", "render.mp4"].map((path) => writeFile(join(evidence, path), "evidence")));
+      const result = writeEvaluation(output, passingRows, { usefulnessReviews: [true, true, false], evidenceRoot: evidence });
+      expect(result.decision).toMatchObject({ decision: "PASS" });
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+      await rm(output, { recursive: true, force: true });
+    }
+  });
+
   it("persists raw rows with a decision and never lets not-run stages pass", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-evaluation-"));
     try {

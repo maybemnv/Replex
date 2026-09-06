@@ -103,7 +103,7 @@ export function calculateDecision(rows: EvaluationRow[], input: EvaluationInput)
 
 /** Persists raw measured rows and a fixed-threshold decision without changing either. */
 export function writeEvaluation(root: string, rows: EvaluationRow[], input: EvaluationInput): EvaluationEvidence {
-  const decision = calculateDecision(rows, { ...input, evidenceRoot: root });
+  const decision = calculateDecision(rows, { ...input, evidenceRoot: input.evidenceRoot ?? root });
   mkdirSync(root, { recursive: true });
   const rowsPath = join(root, "rows.json");
   const summaryPath = join(root, "summary.json");

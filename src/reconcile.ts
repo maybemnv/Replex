@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { probeVideo } from "./capture.js";
 import type { Capture, Project } from "./schema.js";
@@ -27,7 +27,7 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   const previous = project.captures[target.captureId];
   if (!previous || input.id === previous.id || input.durationMs <= 0 || !input.changedStepIds.length) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture metadata is incomplete" };
   const sourcePath = safePath(root, input.path);
-  if (!sourcePath || !existsSync(sourcePath) || createHash("sha256").update(readFileSync(sourcePath)).digest("hex") !== input.sha256) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture is missing or does not match its SHA-256" };
+  if (!sourcePath || !existsSync(sourcePath) || hashFileSync(sourcePath) !== input.sha256) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture is missing or does not match its SHA-256" };
   let media: ReturnType<typeof probeVideo>;
   try {
     media = probeVideo(input.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe", sourcePath);
@@ -77,6 +77,31 @@ function safePath(root: string, value: string): string | undefined {
   if (isAbsolute(value) || value.includes("..")) return undefined;
   const resolved = resolve(root, value);
   return relative(resolve(root), resolved).startsWith("..") ? undefined : resolved;
+}
+
+function hashFileSync(path: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(1024 * 1024);
+    for (;;) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return hash.digest("hex");
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close errors; hash result (or undefined) already determined
+      }
+    }
+  }
 }
 
 function unaffectedProjection(project: Project, targetSceneId: string, operations: unknown[]): string {

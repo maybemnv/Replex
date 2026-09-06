@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, dirname, join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { renderDynamicFixture, type DynamicFixtureState } from "../../fixtures/apps/dynamic/app.js";
@@ -177,8 +177,4 @@ async function normalizeCaptures(root: string, captures: Array<Pick<ProjectCaptu
       fps: 30 as const,
     };
   }));
-}
-
-function dirname(path: string): string {
-  return path.slice(0, path.lastIndexOf("\\"));
 }

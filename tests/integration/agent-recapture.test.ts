@@ -21,7 +21,7 @@ describe.skipIf(!mediaAvailable)("agent edits across selective recapture", () =>
       for (const index of [0, 1, 2]) source(join(root, "captures", `${index}.mp4`), index);
       const captures = ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => capture(root, index, sceneKey));
       const base = createProject({ projectId: "agent-recapture-project", brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 }, environment: normalEnvironment("http://127.0.0.1:4173"), flow: normalFlow("http://127.0.0.1:4173"), captures });
-      const agent = runRecordedAgentDraft(base, root, [{ tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-1"], overlay: { id: "agent-title", sceneId: base.scenes[1].id, kind: "title", text: "Results update", placement: "top", startMs: 0, endMs: 2500 } } }]);
+      const agent = runRecordedAgentDraft(base, root, [{ tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-1"], overlay: { id: "agent-title", sceneId: base.scenes[1].id, kind: "title", text: "Results update", placement: "top", startMs: 0, endMs: 2500 } } }], { requireCompletion: false });
       if (!agent.ok) throw new Error(agent.detail);
       source(join(root, "captures", "0-new.mp4"), 3);
       const replacement = { ...capture(root, 0, "open-demo", "0-new"), changedStepIds: [agent.project.scenes[0].checkpointActionId], reason: "controlled App A change" };
