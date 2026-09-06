@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse as parsePath } from "node:path";
+import { dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
 import {
   BriefSchema,
   EnvironmentSchema,
@@ -18,10 +18,12 @@ export type SourceCapture = ProjectCaptureInput;
 export type { Overlay, Project, RecaptureLineage, RenderOutput, Revision, Scene } from "./schema.js";
 
 export type ProjectCaptureInput = {
-  id: string;
+  id?: string;
   sceneKey: string;
   sourcePath?: string;
   path?: string;
+  /** Project root used to relativize absolute capture-layer outputs. */
+  root?: string;
   runId?: string;
   actionIds?: string[];
   checkpointActionId?: string;
@@ -155,14 +157,15 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
   if (actionIds.length !== expectedActionIds.length || actionIds.some((id, index) => id !== expectedActionIds[index])) throw new Error(`capture actions do not match approved flow: ${input.sceneKey}`);
   const checkpointActionId = input.checkpointActionId ?? expectedActionIds.at(-1);
   if (!checkpointActionId || checkpointActionId !== expectedActionIds.at(-1)) throw new Error(`capture checkpoint does not match approved flow: ${input.sceneKey}`);
-  const path = input.path ?? input.sourcePath ?? `captures/${input.id}.webm`;
-  if (isAbsolute(path) || path.split(/[\\/]+/).includes("..")) throw new Error("capture path must be project-relative");
-  const runId = input.runId ?? `run-${input.id}`;
-  const capturedAt = input.capturedAt ?? DEFAULT_CAPTURED_AT;
   if (!input.sha256) throw new Error(`capture SHA-256 is required: ${input.sceneKey}`);
   const sha256 = input.sha256;
+  const runId = input.runId ?? (input.id ? `run-${input.id}` : undefined) ?? `run-${deriveCaptureId(input.sceneKey, "run", sha256)}`;
+  const id = input.id ?? deriveCaptureId(input.sceneKey, runId, sha256);
+  const rawPath = input.path ?? input.sourcePath ?? `captures/${id}.webm`;
+  const path = input.root ? normalizeCapturePath(input.root, rawPath) : requireProjectRelativePath(rawPath);
+  const capturedAt = input.capturedAt ?? DEFAULT_CAPTURED_AT;
   return {
-    id: input.id,
+    id,
     sceneKey: input.sceneKey,
     runId,
     actionIds,
@@ -175,6 +178,71 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     fps: input.fps ?? 30,
     capturedAt,
     ...(input.predecessorId ? { predecessorId: input.predecessorId } : {}),
+  };
+}
+
+/** Binds a capture identity to its immutable media instead of trusting caller invention. */
+export function deriveCaptureId(sceneKey: string, runId: string, sha256: string): string {
+  const digest = createHash("sha256").update(`${sceneKey}|${runId}|${sha256}`, "utf8").digest("hex");
+  return `capture-${sceneKey}-${digest.slice(0, 12)}`;
+}
+
+/** Relativizes an absolute capture-layer output against the project root. */
+export function normalizeCapturePath(root: string, inputPath: string): string {
+  if (isAbsolute(inputPath)) {
+    const base = resolve(root);
+    const resolved = resolve(inputPath);
+    const relation = relative(base, resolved);
+    if (!relation || relation.startsWith("..") || isAbsolute(relation)) {
+      throw new Error("capture path escapes the project root");
+    }
+    return relation.replace(/\\/g, "/");
+  }
+  return requireProjectRelativePath(inputPath);
+}
+
+function requireProjectRelativePath(inputPath: string): string {
+  if (isAbsolute(inputPath) || inputPath.split(/[\\/]+/).includes("..")) {
+    throw new Error("capture path must be project-relative");
+  }
+  return inputPath.replace(/\\/g, "/");
+}
+
+/** Minimal immutable capture-run shape needed to build project inputs. */
+export interface CaptureRunSummary {
+  runPath: string;
+  captures: Array<{
+    sceneKey: string;
+    sourcePath: string;
+    sha256: string;
+    runId: string;
+    actionIds: string[];
+    checkpointActionId: string;
+    durationMs: number;
+    width: number;
+    height: number;
+  }>;
+}
+
+/** Adapts one immutable browser attempt into content-bound, project-relative capture inputs. */
+export function captureInputFromResult(root: string, run: CaptureRunSummary): { root: string; captures: ProjectCaptureInput[] } {
+  const runRoot = dirname(run.runPath);
+  return {
+    root: runRoot,
+    captures: run.captures.map((capture) => ({
+      id: deriveCaptureId(capture.sceneKey, capture.runId, capture.sha256),
+      sceneKey: capture.sceneKey,
+      path: normalizeCapturePath(root, isAbsolute(capture.sourcePath) ? capture.sourcePath : resolve(runRoot, capture.sourcePath)),
+      root,
+      runId: capture.runId,
+      actionIds: capture.actionIds,
+      checkpointActionId: capture.checkpointActionId,
+      sha256: capture.sha256,
+      durationMs: capture.durationMs,
+      width: capture.width,
+      height: capture.height,
+      fps: 30 as const,
+    })),
   };
 }
 
