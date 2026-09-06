@@ -5,7 +5,7 @@ const validConfig = {
   appOrigin: "http://localhost:3000",
   allowedOrigins: ["http://localhost:3000"],
   locale: "en-US",
-  timezone: "Asia/Calcutta",
+  timezone: "Asia/Kolkata",
   brief: {
     audience: "SaaS founders",
     message: "Show the new filter",
