@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RuntimeConfigSchema } from "../src/schema.js";
+import { RuntimeConfigSchema, transitionAdjustedDurationMs } from "../src/schema.js";
 
 const validConfig = {
   appOrigin: "http://localhost:3000",
@@ -49,3 +49,20 @@ describe("RuntimeConfigSchema", () => {
     ).toThrow();
   });
 });
+
+describe("transitionAdjustedDurationMs", () => {
+  it("sums speed-adjusted scene durations", () => {
+    expect(transitionAdjustedDurationMs([
+      { durationMs: 9000, speed: 1, transition: { type: "cut", durationMs: 0 } },
+      { durationMs: 9000, speed: 1, transition: { type: "cut", durationMs: 0 } },
+    ])).toBe(18000);
+  });
+
+  it("subtracts crossfade overlap once per transition", () => {
+    expect(transitionAdjustedDurationMs([
+      { durationMs: 9000, speed: 1, transition: { type: "crossfade", durationMs: 500 } },
+      { durationMs: 9000, speed: 1, transition: { type: "cut", durationMs: 0 } },
+    ])).toBe(17500);
+  });
+});
+

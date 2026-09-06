@@ -1,9 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { chromium } from "@playwright/test";
+import { runClaudeDraft } from "./agent.js";
+import { runCapture } from "./capture.js";
+import { capturesFromRun, loadProject, materializeCaptureRun, writeRevision } from "./project.js";
+import { reconcileCapture } from "./reconcile.js";
+import { buildRenderJob, executeRenderJob } from "./render.js";
+import { generateReport } from "./report.js";
 import { ConfigValidationError, parseRuntimeConfig } from "./schema.js";
+import { verifyProject } from "./verify.js";
 
 export const COMMANDS = ["capture", "baseline", "agent-draft", "verify", "render", "recapture", "report"] as const;
 export type Command = (typeof COMMANDS)[number];
@@ -52,12 +59,24 @@ export interface RunCliOptions {
   toolPaths?: ToolPaths;
 }
 
+interface ParsedArgs {
+  configPath?: string;
+  projectRoot?: string;
+  artifactRoot?: string;
+  outputPath?: string;
+  storageStatePath?: string;
+  uploadRoots: string[];
+  inputPath?: string;
+  valuesPath?: string;
+  valuesInline?: string;
+}
+
 const defaultIO: CliIO = {
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
 };
 
-export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [--config <path>]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --help           Show this help\n`;
+export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [options]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --project <path>  Project directory containing project.json\n  --artifact-root <path>  Capture artifact directory (defaults to project/work/captures)\n  --output <path>  Project-relative render output path\n  --storage-state <path>  Auth state outside the project artifacts\n  --upload-root <path>  Approved upload root (repeatable)\n  --input <path>  Recapture JSON input (required by recapture)\n  --values <json|@path>  Flow values for fill/select/upload steps (required by dynamic/difficult fixtures)\n  --help           Show this help\n`;
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
   const args = name === "chromium"
@@ -138,6 +157,133 @@ function usageError(message: string): Error & { code: string } {
   return error;
 }
 
+function commandUnavailable(command: Command, detail: string): Error & { code: string } {
+  const error = new Error(`${command}: ${detail}`) as Error & { code: string };
+  error.code = "CLI_COMMAND_UNAVAILABLE";
+  return error;
+}
+
+function requiredPath(value: string | undefined, flag: string): string {
+  if (!value) throw usageError(`${flag} requires a path`);
+  return resolve(value);
+}
+
+async function readFlowValues(args: ParsedArgs): Promise<Record<string, string> | undefined> {
+  const raw = args.valuesInline ?? (args.valuesPath ? await readFile(resolve(args.valuesPath), "utf8").catch((error: unknown) => {
+    throw usageError(`unable to read --values file: ${error instanceof Error ? error.message : String(error)}`);
+  }) : undefined);
+  if (raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw usageError(`--values is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== "string")) {
+    throw usageError("--values must be a JSON object mapping value names to strings");
+  }
+  return parsed as Record<string, string>;
+}
+
+async function loadProjectForCommand(args: ParsedArgs) {
+  const root = requiredPath(args.projectRoot, "--project");
+  return { root, project: await loadProject(root) };
+}
+
+function printJson(io: CliIO, value: unknown): void {
+  io.stdout(`${JSON.stringify(value)}\n`);
+}
+
+async function executeRenderCommand(
+  command: "baseline" | "render",
+  args: ParsedArgs,
+  toolPaths: ToolPaths,
+  io: CliIO,
+): Promise<number> {
+  const { root, project } = await loadProjectForCommand(args);
+  const verification = verifyProject(project, root);
+  if (!verification.passed) {
+    printJson(io, { command, status: "blocked", verification });
+    return 1;
+  }
+  const job = buildRenderJob(project, root, verification, args.outputPath ?? `renders/${project.currentRevisionId}.mp4`);
+  const render = executeRenderJob(job, root, { ffmpegPath: toolPaths.ffmpeg, ffprobePath: toolPaths.ffprobe, project });
+  printJson(io, {
+    command,
+    status: "completed",
+    verification,
+    render: { ...render, outputPath: relative(root, render.outputPath).replace(/\\/g, "/") },
+  });
+  return 0;
+}
+
+async function executeCommand(command: Command, args: ParsedArgs, options: RunCliOptions, io: CliIO): Promise<number> {
+  const toolPaths = options.toolPaths ?? {};
+  if (command === "capture") {
+    const { root, project } = await loadProjectForCommand(args);
+    const artifactRoot = resolve(args.artifactRoot ?? join(root, "work", "captures"));
+    const values = await readFlowValues(args);
+    const run = await runCapture(project.flow, project.environment, {
+      artifactRoot,
+      values,
+      ffmpegPath: toolPaths.ffmpeg,
+      ffprobePath: toolPaths.ffprobe,
+      storageStatePath: args.storageStatePath,
+      uploadRoots: args.uploadRoots,
+    });
+    const materialized = materializeCaptureRun(root, project, run, {
+      ffmpegPath: toolPaths.ffmpeg,
+      ffprobePath: toolPaths.ffprobe,
+      targetTotalSeconds: project.brief.targetDurationMs / 1000,
+    });
+    await writeRevision(root, materialized);
+    const captures = Object.values(materialized.captures).map((capture) => ({
+      id: capture.id,
+      sceneKey: capture.sceneKey,
+      path: capture.path,
+      runId: capture.runId,
+      durationMs: capture.durationMs,
+      sha256: capture.sha256,
+    }));
+    printJson(io, { command, status: "completed", run: run.run, revisionId: materialized.currentRevisionId, runPath: relative(root, run.runPath).replace(/\\/g, "/"), captures });
+    return 0;
+  }
+  if (command === "verify") {
+    const { root, project } = await loadProjectForCommand(args);
+    const verification = verifyProject(project, root);
+    printJson(io, { command, status: verification.passed ? "passed" : "failed", verification });
+    return verification.passed ? 0 : 1;
+  }
+  if (command === "report") {
+    const { root, project } = await loadProjectForCommand(args);
+    const verification = verifyProject(project, root);
+    const reportPath = generateReport(project, root, { checks: verification.checks });
+    printJson(io, { command, status: "completed", reportPath: relative(root, reportPath).replace(/\\/g, "/"), verification });
+    return 0;
+  }
+  if (command === "baseline" || command === "render") return executeRenderCommand(command, args, toolPaths, io);
+  if (command === "agent-draft") {
+    const { root, project } = await loadProjectForCommand(args);
+    const result = await runClaudeDraft(project, root);
+    printJson(io, { command, status: result.ok ? "completed" : "failed", result });
+    return result.ok ? 0 : 1;
+  }
+  if (command === "recapture") {
+    const { root, project } = await loadProjectForCommand(args);
+    const inputPath = requiredPath(args.inputPath, "--input");
+    let input: unknown;
+    try {
+      input = JSON.parse(await readFile(inputPath, "utf8"));
+    } catch (error) {
+      throw commandUnavailable(command, `unable to read JSON input: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const result = reconcileCapture(project, root, input as Parameters<typeof reconcileCapture>[2]);
+    printJson(io, { command, status: result.ok ? "completed" : "failed", result });
+    return result.ok ? 0 : 1;
+  }
+  throw commandUnavailable(command, "no execution path is registered");
+}
+
 async function validateConfig(path: string): Promise<void> {
   let text: string;
   try {
@@ -171,16 +317,56 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     const command = argv[0];
     if (!COMMANDS.includes(command as Command)) throw usageError(`unknown command: ${command}`);
 
-    let configPath: string | undefined;
+    const args: ParsedArgs = { uploadRoots: [] };
     for (let index = 1; index < argv.length; index += 1) {
       const arg = argv[index];
-      if (arg === "--config" || arg.startsWith("--config=")) {
-        if (configPath !== undefined) throw usageError("--config specified more than once");
-        const inline = arg.startsWith("--config=") ? arg.slice("--config=".length) : undefined;
-        configPath = inline ?? argv[index + 1];
-        if (inline === "") throw usageError("--config requires a path");
-        if (!inline) {
-          if (!configPath || configPath.startsWith("-")) throw usageError("--config requires a path");
+      const configInline = arg.startsWith("--config=") ? arg.slice("--config=".length) : undefined;
+      if (arg === "--config" || configInline !== undefined) {
+        if (args.configPath !== undefined) throw usageError("--config specified more than once");
+        if (configInline !== undefined) {
+          if (!configInline) throw usageError("--config requires a path");
+          args.configPath = configInline;
+        } else {
+          args.configPath = argv[index + 1];
+          if (!args.configPath || args.configPath.startsWith("-")) throw usageError("--config requires a path");
+          index += 1;
+        }
+      } else if (arg === "--project" || arg.startsWith("--project=")) {
+        args.projectRoot = argv[index + 1];
+        if (!args.projectRoot || args.projectRoot.startsWith("-")) throw usageError("--project requires a path");
+        index += 1;
+      } else if (argv[index] === "--artifact-root") {
+        args.artifactRoot = argv[index + 1];
+        if (!args.artifactRoot || args.artifactRoot.startsWith("-")) throw usageError("--artifact-root requires a path");
+        index += 1;
+      } else if (argv[index] === "--output") {
+        args.outputPath = argv[index + 1];
+        if (!args.outputPath || args.outputPath.startsWith("-")) throw usageError("--output requires a path");
+        index += 1;
+      } else if (argv[index] === "--storage-state") {
+        args.storageStatePath = argv[index + 1];
+        if (!args.storageStatePath || args.storageStatePath.startsWith("-")) throw usageError("--storage-state requires a path");
+        index += 1;
+      } else if (argv[index] === "--upload-root") {
+        const root = argv[index + 1];
+        if (!root || root.startsWith("-")) throw usageError("--upload-root requires a path");
+        args.uploadRoots.push(resolve(root));
+        index += 1;
+      } else if (argv[index] === "--input") {
+        args.inputPath = argv[index + 1];
+        if (!args.inputPath || args.inputPath.startsWith("-")) throw usageError("--input requires a path");
+        index += 1;
+      } else if (arg === "--values" || arg.startsWith("--values=")) {
+        const inline = arg.startsWith("--values=") ? arg.slice("--values=".length) : undefined;
+        if (inline !== undefined) {
+          if (!inline) throw usageError("--values requires JSON or @path");
+          if (inline.startsWith("@")) args.valuesPath = inline.slice(1);
+          else args.valuesInline = inline;
+        } else {
+          const value = argv[index + 1];
+          if (!value) throw usageError("--values requires JSON or @path");
+          if (value.startsWith("@")) args.valuesPath = value.slice(1);
+          else args.valuesInline = value;
           index += 1;
         }
       } else {
@@ -188,12 +374,13 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       }
     }
 
-    if (configPath) await validateConfig(configPath);
+    if (args.configPath) await validateConfig(args.configPath);
     const startup = checkStartupTools(options.toolPaths);
     if (!startup.ok) throw new StartupCheckError(startup);
 
-    io.stdout(JSON.stringify({ command, status: "accepted", tools: startup.tools }) + "\n");
-    return 0;
+    const exitCode = await executeCommand(command as Command, args, options, io);
+    if (exitCode === 0) printJson(io, { command, status: "ready", tools: startup.tools });
+    return exitCode;
   } catch (error) {
     const payload = errorPayload(error);
     io.stderr(JSON.stringify({ error: payload }) + "\n");

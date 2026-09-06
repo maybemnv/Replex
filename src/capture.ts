@@ -99,6 +99,13 @@ export interface CaptureResult {
   artifacts: Array<{ sceneKey: string; boundary: "before" | "after"; path: string }>;
 }
 
+export interface VideoProbe {
+  width: number;
+  height: number;
+  durationSeconds: number;
+  fps: number;
+}
+
 export function fingerprintCapture(
   bytes: Buffer,
   provenance: { runId: string; actionIds: string[]; checkpointActionId: string },
@@ -595,7 +602,7 @@ async function splitSourceCaptures(
     await mkdir(dirname(temporaryPath), { recursive: true });
     const result = spawnSync(
       ffmpeg,
-      ["-hide_banner", "-loglevel", "error", "-ss", scene.startSeconds.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", temporaryPath],
+      ["-hide_banner", "-loglevel", "error", "-ss", scene.startSeconds.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", "-r", "30", temporaryPath],
       { encoding: "utf8", windowsHide: true, shell: false, timeout: 60_000 },
     );
     if (result.error || result.status !== 0) {
@@ -610,7 +617,7 @@ async function splitSourceCaptures(
     captures.push({
       sceneKey: scene.sceneKey,
       sourcePath,
-      sha256: fingerprintCapture(bytes, provenance),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
       width: probe.width,
       height: probe.height,
       durationMs: Math.max(1, Math.round(probe.durationSeconds * 1000)),
@@ -620,18 +627,25 @@ async function splitSourceCaptures(
   return captures;
 }
 
-export function probeVideo(ffprobe: string, path: string): { width: number; height: number; durationSeconds: number } {
+export function probeVideo(ffprobe: string, path: string): VideoProbe {
   const result = spawnSync(
     ffprobe,
-    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration", "-of", "json", path],
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate:format=duration", "-of", "json", path],
     { encoding: "utf8", windowsHide: true, shell: false, timeout: 30_000 },
   );
   if (result.error || result.status !== 0) throw new Error(`ffprobe failed: ${result.error?.message ?? result.stderr.trim()}`);
-  const parsed = JSON.parse(result.stdout) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
+  const parsed = JSON.parse(result.stdout) as { streams?: Array<{ width?: number; height?: number; avg_frame_rate?: string }>; format?: { duration?: string } };
   const stream = parsed.streams?.[0];
   const durationSeconds = Number(parsed.format?.duration);
-  if (!stream?.width || !stream.height || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+  const fps = parseFrameRate(stream?.avg_frame_rate);
+  if (!stream?.width || !stream.height || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || !Number.isFinite(fps) || fps <= 0) {
     throw new Error("ffprobe returned invalid video metadata");
   }
-  return { width: stream.width, height: stream.height, durationSeconds };
+  return { width: stream.width, height: stream.height, durationSeconds, fps };
+}
+
+function parseFrameRate(value: string | undefined): number {
+  if (!value) return 0;
+  const [numerator, denominator] = value.split("/").map(Number);
+  return denominator ? numerator / denominator : numerator;
 }

@@ -2,7 +2,9 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-- [ ] POC-1: Establish the minimal local runtime
+> Implementation status — 2026-09-06: POC-1 through POC-5 meet their local implementation and test criteria. POC-6 through POC-13 have substantive implementation and recorded/local evidence, but remain unchecked until their listed acceptance evidence is complete. POC-13's dynamic and difficult browser-to-render paths passed with strict verification, a bounded recorded agent draft, selective recapture, and revised rendering; it remains unchecked because its declared POC-12 prerequisite still requires an operator-configured real Claude run. POC-8, POC-9, and POC-12 specifically still require that real Claude evidence; POC-10, POC-14, and POC-15 are still being completed. A checked item means the entire acceptance criterion is evidenced, not merely that code exists.
+
+- [x] POC-1: Establish the minimal local runtime
 
   - Goal: Make one TypeScript CLI executable with schema validation, tests, and startup checks for Chromium, FFmpeg, and ffprobe.
   - Depends on: None.
@@ -12,7 +14,7 @@
   - Tests: Schema rejects unknown fields/mixed units; CLI smoke test returns success for help and a typed failure for missing tools.
   - Out of scope: Installer, desktop shell, web server, database, monorepo, CI, accounts.
 
-- [ ] POC-2: Run one approved Playwright flow safely
+- [x] POC-2: Run one approved Playwright flow safely
 
   - Goal: Execute one hard-coded App A flow only within approved actions and origins.
   - Depends on: POC-1.
@@ -22,7 +24,7 @@
   - Tests: Playwright success run, checkpoint mismatch, denied origin, denied action, expired-auth simulation.
   - Out of scope: Autonomous exploration, selector healing, multiple browsers, cloud execution.
 
-- [ ] POC-3: Capture traceable immutable source scenes
+- [x] POC-3: Capture traceable immutable source scenes
 
   - Goal: Convert the App A run into 3-5 immutable scene captures with complete action provenance.
   - Depends on: POC-2.
@@ -32,7 +34,7 @@
   - Tests: Complete capture fixture, interrupted action fixture, immutable-file/hash assertion, no-empty-capture check.
   - Out of scope: Live streaming, custom recorder, production retention.
 
-- [ ] POC-4: Materialize stable project and scene identity
+- [x] POC-4: Materialize stable project and scene identity
 
   - Goal: Persist the minimum canonical manifest and initial revision without deriving narrative identity from volatile media or selectors.
   - Depends on: POC-3.
@@ -42,7 +44,7 @@
   - Tests: Schema round-trip, stable-ID rerun, semantic-hash golden, simulated atomic-write interruption.
   - Out of scope: Database, migrations beyond schema version 1, universal edit graph.
 
-- [ ] POC-5: Implement the deterministic operation reducer
+- [x] POC-5: Implement the deterministic operation reducer
 
   - Goal: Provide the sole mutation boundary shared by baseline controls and the model.
   - Depends on: POC-4.

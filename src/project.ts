@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
+import type { CaptureResult } from "./capture.js";
+import { probeVideo } from "./capture.js";
 import {
   BriefSchema,
   EnvironmentSchema,
@@ -42,6 +46,105 @@ export interface ProjectInput {
   environment: Environment;
   flow: Flow;
   captures: ProjectCaptureInput[] | Record<string, ProjectCaptureInput>;
+}
+
+/** Converts one immutable browser attempt into project-relative capture inputs. */
+export function capturesFromRun(run: CaptureResult): { root: string; captures: ProjectCaptureInput[] } {
+  const root = dirname(run.runPath);
+  return {
+    root,
+    captures: run.captures.map((capture) => ({
+      id: `capture-${capture.sceneKey}-${capture.runId}`,
+      sceneKey: capture.sceneKey,
+      path: relative(root, capture.sourcePath).replace(/\\/g, "/"),
+      runId: capture.runId,
+      actionIds: capture.actionIds,
+      checkpointActionId: capture.checkpointActionId,
+      sha256: capture.sha256,
+      durationMs: capture.durationMs,
+      width: capture.width,
+      height: capture.height,
+      fps: 30,
+    })),
+  };
+}
+
+/** Builds the next canonical baseline from one completed immutable capture run. */
+export function materializeCaptureRun(root: string, project: Project, run: CaptureResult, media?: NormalizeMediaOptions): Project {
+  const captured = capturesFromRun(run);
+  let captures: Array<ProjectCaptureInput & { path: string }> = captured.captures.map((capture) => {
+    if (!capture.path) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
+    return { ...capture, path: projectRelativePath(root, captured.root, capture.path) };
+  });
+  if (media?.targetTotalSeconds) {
+    captures = normalizeRunMedia(root, captures, {
+      ffmpegPath: media.ffmpegPath,
+      ffprobePath: media.ffprobePath,
+      targetTotalSeconds: media.targetTotalSeconds,
+    });
+  }
+  const baseline = createProject({
+    projectId: project.projectId,
+    brief: project.brief,
+    environment: project.environment,
+    flow: project.flow,
+    captures,
+  });
+  const revisionId = `revision-capture-${run.run.id}`;
+  return ProjectSchema.parse({
+    ...baseline,
+    currentRevisionId: revisionId,
+    revisions: [
+      ...project.revisions,
+      {
+        id: revisionId,
+        parentId: project.currentRevisionId,
+        actor: "baseline",
+        operationIds: [],
+        manifestSha256: semanticHash(baseline),
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  });
+}
+
+export interface NormalizeMediaOptions {
+  ffmpegPath?: string;
+  ffprobePath?: string;
+  /** Deterministic total across scenes; each scene is looped to an equal share. */
+  targetTotalSeconds: number;
+}
+
+/**
+ * Production equivalent of the integration-fixture normalization: every scene
+ * clip is looped to an equal share of the duration target at 1920x1080 30fps,
+ * so a fresh browser capture can meet the 25–35s project contract.
+ */
+export function normalizeRunMedia(root: string, captures: Array<ProjectCaptureInput & { path: string }>, options: NormalizeMediaOptions): Array<ProjectCaptureInput & { path: string }> {
+  if (!captures.length) return captures;
+  const ffmpeg = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
+  const ffprobe = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
+  const targetSeconds = options.targetTotalSeconds / captures.length;
+  if (!Number.isFinite(targetSeconds) || targetSeconds <= 0) throw new Error("media normalization target must be positive");
+  return captures.map((capture) => {
+    const rawPath = capture.path ?? capture.sourcePath;
+    if (!rawPath) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
+    const inputPath = resolve(root, rawPath);
+    const outputPath = join(root, "captures", `normalized-${capture.sceneKey}.mp4`);
+    mkdirSync(dirname(outputPath), { recursive: true });
+    const run = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i", inputPath, "-t", String(targetSeconds), "-an", "-vf", "fps=30,scale=1920:1080", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", outputPath], { encoding: "utf8", windowsHide: true, shell: false, timeout: 300_000 });
+    if (run.status !== 0) throw new Error(`capture media normalization failed: ${(run.stderr || run.error?.message || "ffmpeg failed").trim()}`);
+    const probe = probeVideo(ffprobe, outputPath);
+    return {
+      ...capture,
+      path: relative(resolve(root), outputPath).replace(/\\/g, "/"),
+      sha256: createHash("sha256").update(readFileSync(outputPath)).digest("hex"),
+      durationMs: Math.max(1, Math.round(probe.durationSeconds * 1000)),
+      width: probe.width,
+      height: probe.height,
+      fps: 30 as const,
+    };
+  });
 }
 
 const DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
@@ -192,6 +295,15 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     capturedAt,
     ...(input.predecessorId ? { predecessorId: input.predecessorId } : {}),
   };
+}
+
+function projectRelativePath(projectRoot: string, artifactRoot: string, path: string): string {
+  const resolved = resolve(artifactRoot, path);
+  const relativePath = relative(resolve(projectRoot), resolved).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || relativePath.startsWith("/")) {
+    throw new Error("captured media must be stored inside the project root");
+  }
+  return relativePath;
 }
 
 /** Binds a capture identity to its immutable media instead of trusting caller invention. */
