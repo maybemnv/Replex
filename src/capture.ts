@@ -384,7 +384,6 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
-  const startedAtMs = performance.now();
   const consoleEvents: Array<{ attempt: number; atMs: number; type: string; message: string }> = [];
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
@@ -410,6 +409,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     page = activePage;
     activePage.setDefaultTimeout(5_000);
     const video = activePage.video();
+    const startedAtMs = performance.now();
     activePage.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
     activePage.on("pageerror", (error) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
     await activeContext.route("**/*", async (route) => {
