@@ -140,14 +140,27 @@ export async function writeRevision(
   const revisionsRoot = join(root, "revisions");
   await mkdir(revisionsRoot, { recursive: true });
   const revisionPath = join(revisionsRoot, `${canonicalProject.currentRevisionId}.json`);
-  if (await exists(revisionPath)) throw new Error(`revision already exists: ${canonicalProject.currentRevisionId}`);
-  await writeDurable(revisionPath, serialized);
+  if (await exists(revisionPath)) {
+    const staged = await readFile(revisionPath, "utf8");
+    if (staged !== serialized) throw new Error(`revision already exists: ${canonicalProject.currentRevisionId}`);
+  } else {
+    await writeDurable(revisionPath, serialized);
+  }
   if (options.interruptBeforeCommit) throw new Error("simulated interruption");
   await writeDurable(join(root, "project.json"), serialized);
 }
 
 export async function loadProject(root: string): Promise<Project> {
-  return ProjectSchema.parse(JSON.parse(await readFile(join(root, "project.json"), "utf8")));
+  const project = ProjectSchema.parse(JSON.parse(await readFile(join(root, "project.json"), "utf8")));
+  verifyProject(project);
+  return project;
+}
+
+export function verifyProject(project: Project): void {
+  const currentRevision = project.revisions.find((revision) => revision.id === project.currentRevisionId);
+  if (!currentRevision || currentRevision.manifestSha256 !== semanticHash(project)) {
+    throw new Error("project manifest hash does not match its current revision");
+  }
 }
 
 function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: Environment): Capture {
@@ -283,7 +296,7 @@ function canonicalJson(value: unknown): string {
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
       .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
       .join(",")}}`;
   }

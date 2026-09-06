@@ -117,6 +117,23 @@ describe("project persistence", () => {
       await expect(writeRevision(root, next, { interruptBeforeCommit: true })).rejects.toThrow("simulated interruption");
       await expect(loadProject(root)).resolves.toEqual(first);
       await expect(readFile(join(root, "project.json"), "utf8")).resolves.toContain('"demo-project"');
+      await expect(writeRevision(root, next)).resolves.toBeUndefined();
+      await expect(loadProject(root)).resolves.toEqual(next);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a tampered project whose manifest hash no longer matches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-project-"));
+    const first = project();
+
+    try {
+      await writeRevision(root, first);
+      const tampered = { ...first, brief: { ...first.brief, message: "Tampered" } };
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(join(root, "project.json"), JSON.stringify(tampered, null, 2) + "\n");
+      await expect(loadProject(root)).rejects.toThrow("manifest hash");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

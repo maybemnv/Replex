@@ -302,13 +302,27 @@ export const ProjectSchema = z
     for (const [index, scene] of value.scenes.entries()) {
       if (!captureIds.has(scene.captureId)) context.addIssue({ code: "custom", path: ["scenes", index, "captureId"], message: "scene capture does not exist" });
       else if (value.captures[scene.captureId].sceneKey !== scene.sceneKey) context.addIssue({ code: "custom", path: ["scenes", index, "sceneKey"], message: "scene key does not match capture" });
+      const steps = value.flow.steps.filter((step) => step.sceneKey === scene.sceneKey);
+      if (steps.length !== scene.actionIds.length || steps.some((step, actionIndex) => step.id !== scene.actionIds[actionIndex])) context.addIssue({ code: "custom", path: ["scenes", index, "actionIds"], message: "scene actions must match the approved scene flow" });
+      if (scene.checkpointActionId !== steps.at(-1)?.id) context.addIssue({ code: "custom", path: ["scenes", index, "checkpointActionId"], message: "scene checkpoint must match the approved scene flow" });
+      if (scene.order !== index) context.addIssue({ code: "custom", path: ["scenes", index, "order"], message: "scene order must match its declared position" });
+      const capture = value.captures[scene.captureId];
+      if (capture && scene.sourceOutMs > capture.durationMs) context.addIssue({ code: "custom", path: ["scenes", index, "sourceOutMs"], message: "scene range exceeds its capture duration" });
     }
+    const sceneOrders = new Set(value.scenes.map((scene) => scene.order));
+    if (sceneOrders.size !== value.scenes.length) context.addIssue({ code: "custom", path: ["scenes"], message: "scene orders must be unique" });
     for (const [key, overlay] of Object.entries(value.overlays)) {
       if (key !== overlay.id) context.addIssue({ code: "custom", path: ["overlays", key], message: "overlay key must equal overlay id" });
       if (!sceneIds.has(overlay.sceneId)) context.addIssue({ code: "custom", path: ["overlays", key, "sceneId"], message: "overlay scene does not exist" });
     }
     for (const [index, output] of value.outputs.entries()) {
       if (!revisionIds.has(output.revisionId)) context.addIssue({ code: "custom", path: ["outputs", index, "revisionId"], message: "output revision does not exist" });
+    }
+    for (const [index, lineage] of value.recaptureLineage.entries()) {
+      if (!sceneIds.has(lineage.sceneId)) context.addIssue({ code: "custom", path: ["recaptureLineage", index, "sceneId"], message: "recapture scene does not exist" });
+      if (!captureIds.has(lineage.previousCaptureId)) context.addIssue({ code: "custom", path: ["recaptureLineage", index, "previousCaptureId"], message: "previous capture does not exist" });
+      if (!captureIds.has(lineage.replacementCaptureId)) context.addIssue({ code: "custom", path: ["recaptureLineage", index, "replacementCaptureId"], message: "replacement capture does not exist" });
+      if (!revisionIds.has(lineage.revisionId)) context.addIssue({ code: "custom", path: ["recaptureLineage", index, "revisionId"], message: "recapture revision does not exist" });
     }
   });
 
