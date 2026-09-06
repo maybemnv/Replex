@@ -58,7 +58,7 @@ export function normalFlow(origin: string): Flow {
         approved: true,
         checkpoint: {
           kind: "visible",
-          target: { kind: "label", value: "Filter value" },
+          target: { kind: "testId", value: "filter-panel" },
           expected: "Filter value",
         },
         sceneKey: "apply-filter",
