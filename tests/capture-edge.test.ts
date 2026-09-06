@@ -28,11 +28,24 @@ describe("capture safety boundary", () => {
     );
   });
 
+  it("rejects a prohibited action even when marked non-consequential", () => {
+    const flow = normalFlow("http://127.0.0.1:4173");
+    flow.steps[1] = {
+      ...flow.steps[1],
+      consequential: false,
+      target: { kind: "role", value: "button", name: "Delete release" },
+    };
+
+    expect(() => validateCapturePlan(flow, normalEnvironment("http://127.0.0.1:4173"))).toThrowError(
+      expect.objectContaining({ code: "ACTION_NOT_APPROVED", actionId: "open-filter" }),
+    );
+  });
+
   it("exposes fixed context settings", () => {
     expect(browserContextOptions(normalEnvironment("http://127.0.0.1:4173"))).toMatchObject({
       viewport: { width: 1920, height: 1080 },
       locale: "en-US",
-      timezoneId: "Asia/Calcutta",
+      timezoneId: "Asia/Kolkata",
       reducedMotion: "reduce",
       colorScheme: "light",
       serviceWorkers: "block",

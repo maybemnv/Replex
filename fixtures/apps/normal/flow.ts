@@ -6,7 +6,7 @@ export function normalEnvironment(origin: string): Environment {
     allowedOrigins: [origin],
     viewport: { width: 1920, height: 1080 },
     locale: "en-US",
-    timezone: "Asia/Calcutta",
+    timezone: "Asia/Kolkata",
     browserVersion: "bundled-chromium",
     reducedMotion: "reduce",
     colorScheme: "light",
