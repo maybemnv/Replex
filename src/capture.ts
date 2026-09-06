@@ -1,11 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { open, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, expect as playwrightExpect, type Locator, type Page } from "@playwright/test";
-import type { BrowserStep, Environment, Flow } from "./schema.js";
+import { EnvironmentSchema, FlowSchema, IdSchema, type BrowserStep, type Environment, type Flow } from "./schema.js";
+
+const MAX_CONSOLE_EVENTS = 1000;
+
+function assertSceneKey(sceneKey: string, actionId: string): void {
+  if (!IdSchema.safeParse(sceneKey).success) {
+    throw new CapturePlanError("FLOW_INVALID", actionId, `scene key is not a safe stable ID: ${sceneKey}`);
+  }
+}
+
+function trackConsoleEvent(events: Array<{ attempt: number; atMs: number; type: string; message: string }>, event: { attempt: number; atMs: number; type: string; message: string }): void {
+  events.push(event);
+  if (events.length > MAX_CONSOLE_EVENTS) events.splice(0, events.length - MAX_CONSOLE_EVENTS);
+}
 
 export class CapturePlanError extends Error {
   constructor(
@@ -148,7 +161,24 @@ export function redactEvidenceText(value: string): string {
 }
 
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
+  try {
+    FlowSchema.parse(flow);
+  } catch (error) {
+    const issues = (error as { issues?: Array<{ path?: Array<string | number>; message?: string }> }).issues ?? [];
+    const stepIssue = issues.find((issue) => typeof issue.path?.[1] === "number");
+    const stepIndex = typeof stepIssue?.path?.[1] === "number" ? stepIssue.path[1] as number : 0;
+    const actionId = flow.steps[stepIndex]?.id ?? flow.id ?? "unknown";
+    throw new CapturePlanError("FLOW_INVALID", actionId, stepIssue?.message ?? "flow structure is invalid");
+  }
+  try {
+    EnvironmentSchema.parse(environment);
+  } catch {
+    throw new CapturePlanError("ORIGIN_NOT_ALLOWED", flow.id, "environment is invalid");
+  }
   validateFlowStructure(flow);
+  for (const step of flow.steps) {
+    if (step.sceneKey) assertSceneKey(step.sceneKey, step.id);
+  }
   if (!environment.allowedOrigins.includes(environment.appOrigin)) {
     throw new CapturePlanError("ORIGIN_NOT_ALLOWED", flow.id, "app origin is not allowed");
   }
@@ -164,8 +194,8 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
       }
     }
     const targetText = `${step.target?.value ?? ""} ${step.target?.name ?? ""}`.toLowerCase();
-    if (step.consequential && flow.prohibitedActions.some((action) => targetText.includes(action.toLowerCase()))) {
-      throw new CapturePlanError("ACTION_NOT_APPROVED", step.id, "consequential action is prohibited");
+    if (flow.prohibitedActions.some((action) => targetText.includes(action.toLowerCase()))) {
+      throw new CapturePlanError("ACTION_NOT_APPROVED", step.id, "action matches a prohibited action");
     }
   }
 }
@@ -228,7 +258,9 @@ function locatorFor(page: Page, step: BrowserStep): Locator {
   if (target.kind === "role") return page.getByRole(target.value as Parameters<Page["getByRole"]>[0], target.name ? { name: target.name } : undefined);
   if (target.kind === "label") return page.getByLabel(target.value);
   if (target.kind === "testId") return page.getByTestId(target.value);
-  return page.locator(`a[href="${target.value}"]`);
+  if (target.kind === "url") throw new CaptureRunError("CHECKPOINT_MISMATCH", step.id, "url targets cannot be used as element locators");
+  const escaped = target.value.replace(/"/g, '\\"');
+  return page.locator(`a[href="${escaped}"]`);
 }
 
 async function checkCheckpoint(page: Page, step: BrowserStep): Promise<void> {
@@ -266,11 +298,18 @@ async function executeStep(page: Page, step: BrowserStep, values: Record<string,
   } else if (step.action === "click") {
     await locatorFor(page, step).click();
   } else if (step.action === "fill") {
-    await locatorFor(page, step).fill(values[step.valueRef ?? ""] ?? "");
+    if (!step.valueRef || !(step.valueRef in values)) throw new CaptureRunError("ACTION_FAILED", step.id, `missing value for valueRef: ${step.valueRef ?? "(none)"}`);
+    await locatorFor(page, step).fill(values[step.valueRef] ?? "");
   } else if (step.action === "select") {
-    await locatorFor(page, step).selectOption(values[step.valueRef ?? ""] ?? "");
+    if (!step.valueRef || !(step.valueRef in values)) throw new CaptureRunError("ACTION_FAILED", step.id, `missing value for valueRef: ${step.valueRef ?? "(none)"}`);
+    await locatorFor(page, step).selectOption(values[step.valueRef] ?? "");
   } else if (step.action === "upload") {
-    await locatorFor(page, step).setInputFiles(await resolveUploadPath(values[step.valueRef ?? ""], uploadRoots));
+    if (!step.valueRef || !(step.valueRef in values)) throw new CaptureRunError("ACTION_FAILED", step.id, `missing value for valueRef: ${step.valueRef ?? "(none)"}`);
+    await locatorFor(page, step).setInputFiles(await resolveUploadPath(values[step.valueRef], uploadRoots));
+  } else if (step.action === "waitFor") {
+    return;
+  } else {
+    throw new CaptureRunError("ACTION_FAILED", step.id, `unsupported action: ${(step as { action: string }).action}`);
   }
 }
 
@@ -288,10 +327,12 @@ export function deriveSceneBoundaries(
 ): Array<ScenePlan & { startSeconds: number; endSeconds: number }> {
   const eventTimes = new Map(events.map((event) => [event.actionId, event.atMs]));
   let startSeconds = 0;
+  const EPSILON = 0.25;
   return scenes.map((scene, index) => {
     const checkpointMs = eventTimes.get(scene.checkpointActionId);
     if (checkpointMs === undefined) throw new Error(`missing scene checkpoint event: ${scene.checkpointActionId}`);
-    const endSeconds = index === scenes.length - 1 ? videoDurationSeconds : checkpointMs / 1000;
+    let endSeconds = index === scenes.length - 1 ? videoDurationSeconds : checkpointMs / 1000;
+    if (endSeconds > videoDurationSeconds && endSeconds <= videoDurationSeconds + EPSILON) endSeconds = videoDurationSeconds;
     if (endSeconds <= startSeconds || endSeconds > videoDurationSeconds) throw new Error(`invalid scene boundary: ${scene.sceneKey}`);
     const boundary = { ...scene, startSeconds, endSeconds };
     startSeconds = endSeconds;
@@ -339,8 +380,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const video = page.video();
   const startedAtMs = performance.now();
   const consoleEvents: Array<{ attempt: number; atMs: number; type: string; message: string }> = [];
-  page.on("console", (message) => consoleEvents.push({ attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
-  page.on("pageerror", (error) => consoleEvents.push({ attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
+  page.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
+  page.on("pageerror", (error) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const tracePath = join(runRoot, "traces", "trace.zip");
@@ -459,7 +500,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         Buffer.from(JSON.stringify({
           actionId: failure.actionId,
           code: failure.code,
-          message: failure.message,
+          message: redactEvidenceText(failure.message),
           url: redactEvidenceText(page.url()),
           bodyText: redactEvidenceText(bodyText),
           domExcerpt: redactEvidenceText(domExcerpt),
@@ -472,6 +513,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       failure.evidencePath = evidencePath;
       failure.tracePath = tracePath;
       failure.runPath = runPath;
+    } else if (existsSync(tracePath)) {
+      failure.tracePath = tracePath;
     }
     if (!logsWritten) {
       await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
@@ -508,6 +551,7 @@ async function splitSourceCaptures(
   const captures: CaptureResult["captures"] = [];
 
   for (const scene of deriveSceneBoundaries(scenes, events, rawProbe.durationSeconds)) {
+    assertSceneKey(scene.sceneKey, scene.checkpointActionId);
     const durationSeconds = Math.max(0.05, scene.endSeconds - scene.startSeconds);
     const sourcePath = join(runRoot, "captures", `${scene.sceneKey}.webm`);
     const temporaryPath = join(runRoot, "captures", `${scene.sceneKey}.${randomUUID()}.tmp.webm`);
@@ -515,7 +559,7 @@ async function splitSourceCaptures(
     const result = spawnSync(
       ffmpeg,
       ["-hide_banner", "-loglevel", "error", "-ss", scene.startSeconds.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", temporaryPath],
-      { encoding: "utf8", windowsHide: true, shell: false },
+      { encoding: "utf8", windowsHide: true, shell: false, timeout: 60_000 },
     );
     if (result.error || result.status !== 0) {
       throw new Error(`ffmpeg scene split failed: ${result.error?.message ?? result.stderr.trim()}`);
@@ -539,11 +583,11 @@ async function splitSourceCaptures(
   return captures;
 }
 
-function probeVideo(ffprobe: string, path: string): { width: number; height: number; durationSeconds: number } {
+export function probeVideo(ffprobe: string, path: string): { width: number; height: number; durationSeconds: number } {
   const result = spawnSync(
     ffprobe,
     ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration", "-of", "json", path],
-    { encoding: "utf8", windowsHide: true, shell: false },
+    { encoding: "utf8", windowsHide: true, shell: false, timeout: 30_000 },
   );
   if (result.error || result.status !== 0) throw new Error(`ffprobe failed: ${result.error?.message ?? result.stderr.trim()}`);
   const parsed = JSON.parse(result.stdout) as { streams?: Array<{ width?: number; height?: number }>; format?: { duration?: string } };
