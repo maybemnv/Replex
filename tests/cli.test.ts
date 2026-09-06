@@ -77,4 +77,37 @@ describe("CLI", () => {
       version: expect.stringMatching(/(?:Chrome|Chromium)\//),
     });
   });
+
+  it("preserves typed codes for usage and config failures", async () => {
+    const unknown = captureOutput();
+    expect(await runCli(["bogus-command"], { io: unknown.io })).toBe(1);
+    expect(unknown.output.stderr).toContain('"code":"CLI_USAGE_ERROR"');
+
+    const unreadable = captureOutput();
+    expect(await runCli(["capture", "--config", "C:/missing/runtime-config.json"], { io: unreadable.io })).toBe(1);
+    expect(unreadable.output.stderr).toContain('"code":"CONFIG_READ_FAILED"');
+  });
+
+  it("rejects an exit-0 executable without the expected tool signature", () => {
+    const cross = checkStartupTools({
+      chromium: "C:/missing/chromium.exe",
+      ffmpeg: "C:/missing/ffmpeg.exe",
+      ffprobe: process.env.REPLEX_FFPROBE_PATH ?? "ffprobe",
+    });
+    if (!cross.tools.find((tool) => tool.name === "ffprobe")?.available) {
+      console.warn("skipping signature test: ffprobe is not installed");
+      return;
+    }
+    const result = checkStartupTools({
+      chromium: "C:/missing/chromium.exe",
+      ffmpeg: process.env.REPLEX_FFPROBE_PATH ?? "ffprobe",
+      ffprobe: "C:/missing/ffprobe.exe",
+    });
+
+    expect(result.missing).toContain("ffmpeg");
+    expect(result.tools.find((tool) => tool.name === "ffmpeg")).toMatchObject({
+      available: false,
+      detail: expect.stringContaining("version signature"),
+    });
+  });
 });

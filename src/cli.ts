@@ -76,10 +76,15 @@ function executableStatus(name: ToolName, path: string): StartupToolStatus {
     return { name, path, available: false, detail: `exited with status ${result.status}${signal}${output ? `: ${output}` : ""}` };
   }
   const output = `${result.stdout}${result.stderr}`.trim();
-  const version = name === "chromium"
-    ? output.match(/(?:Chrome|Chromium)\/[^\s<]+/)?.[0] ?? output.split(/\r?\n/, 1)[0]
-    : output.split(/\r?\n/, 1)[0];
-  return { name, path, available: true, version };
+  if (name === "chromium") {
+    const version = output.match(/(?:Chrome|Chromium)\/[^\s<]+/)?.[0];
+    if (!version) return { name, path, available: false, detail: "probe output did not contain a Chromium version signature" };
+    return { name, path, available: true, version };
+  }
+  const firstLine = output.split(/\r?\n/, 1)[0] ?? "";
+  const expected = name === "ffmpeg" ? /ffmpeg version/i : /ffprobe version/i;
+  if (!expected.test(firstLine)) return { name, path, available: false, detail: `probe output did not contain an ${name} version signature` };
+  return { name, path, available: true, version: firstLine };
 }
 
 function resolveToolPaths(paths: ToolPaths = {}): Record<ToolName, string> {
@@ -119,7 +124,11 @@ function errorPayload(error: unknown) {
   if (error instanceof ConfigValidationError) {
     return { code: error.code, message: error.message, issues: error.issues };
   }
-  if (error instanceof Error) return { code: "CLI_ERROR", message: error.message };
+  if (error instanceof Error) {
+    const attached = (error as { code?: unknown }).code;
+    if (typeof attached === "string" && attached.length > 0) return { code: attached, message: error.message };
+    return { code: "CLI_ERROR", message: error.message };
+  }
   return { code: "CLI_ERROR", message: String(error) };
 }
 
