@@ -37,14 +37,24 @@ npm run cli -- --help
 
 ## Local operator flow
 
-Keep every project under the ignored `work/` directory. Keep Playwright storage state outside the project and repository, for example `work/auth/operator-state.json`; never commit it or pass its contents to the model.
+Keep every project under the ignored `work/` directory. Keep Playwright storage state outside the project and outside the repository checkout, for example `$env:TEMP\replex-auth\operator-state.json` (or `%LOCALAPPDATA%\Replex\auth\operator-state.json`); never commit it or pass its contents to the model. `work/` is git-ignored, but it still lives inside the checkout, so credential material must not go there.
 
 `capture` is not an initializer: it needs an existing canonical `work/<project-id>/project.json` containing the approved environment and flow. Bootstrap that manifest once through the programmatic `createProject(...)` and `writeRevision(...)` APIs using only an approved fixture flow and immutable capture metadata. There is deliberately no CLI `init` command, because it must not invent an environment, browser flow, or source-capture identity.
 
 ```powershell
 # Startup checks run before every command.
 # Browser capture materializes a new canonical capture revision.
-npm run cli -- capture --project work/<project-id> --artifact-root work/<project-id>/captures
+# Flows with fill/select/upload steps need --values; difficult uploads also need --upload-root.
+npm run cli -- capture --project work/<project-id> --artifact-root work/<project-id>/captures --values '{"filterValue":"release"}'
+
+# Dynamic fixture (disposable credentials only, never production secrets):
+npm run cli -- capture --project work/dynamic --values '{"dynamicEmail":"demo@example.test","dynamicPassword":"fixture-password","dynamicPlan":"priority"}'
+
+# Difficult fixture (upload asset must live under the approved root):
+npm run cli -- capture --project work/difficult --upload-root work/difficult/uploads --values "@work/difficult/values.json"
+
+# Authenticated runs reuse operator-owned storage kept outside the checkout:
+npm run cli -- capture --project work/<project-id> --storage-state $env:TEMP\replex-auth\operator-state.json --values '{"filterValue":"release"}'
 
 # Verify, render the deterministic baseline, then write the report with its authoritative video.
 npm run cli -- verify --project work/<project-id>
