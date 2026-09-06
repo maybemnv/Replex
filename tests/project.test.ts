@@ -1,10 +1,10 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { ProjectSchema } from "../src/schema.js";
-import { createProject, loadProject, semanticHash, stableSceneId, writeRevision, type ProjectInput } from "../src/project.js";
+import { captureInputFromResult, createProject, deriveCaptureId, loadProject, normalizeCapturePath, semanticHash, stableSceneId, writeRevision, type ProjectInput } from "../src/project.js";
 
 const origin = "http://127.0.0.1:4173";
 
@@ -120,6 +120,37 @@ describe("project persistence", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("relativizes absolute capture outputs under the project root", () => {
+    const root = join(tmpdir(), "replex-project-root");
+    expect(normalizeCapturePath(root, join(root, "captures", "open.webm"))).toBe("captures/open.webm");
+    expect(() => normalizeCapturePath(root, join(tmpdir(), "elsewhere", "open.webm"))).toThrow("escapes the project root");
+    expect(() => normalizeCapturePath(root, "../outside.webm")).toThrow("project-relative");
+  });
+
+  it("binds derived capture IDs to immutable media", () => {
+    const first = deriveCaptureId("open-demo", "run-one", "a".repeat(64));
+    expect(deriveCaptureId("open-demo", "run-one", "a".repeat(64))).toBe(first);
+    expect(deriveCaptureId("open-demo", "run-one", "b".repeat(64))).not.toBe(first);
+    expect(deriveCaptureId("open-demo", "run-two", "a".repeat(64))).not.toBe(first);
+
+    const adapted = captureInputFromResult(resolve(tmpdir(), "replex-project-root"), {
+      runPath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "run.json"),
+      captures: [{
+        sceneKey: "open-demo",
+        sourcePath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "captures", "open-demo.webm"),
+        sha256: "a".repeat(64),
+        width: 1920,
+        height: 1080,
+        durationMs: 10000,
+        runId: "run-one",
+        actionIds: ["open-release-page"],
+        checkpointActionId: "open-release-page",
+      }],
+    });
+    expect(adapted.captures[0].id).toBe(deriveCaptureId("open-demo", "run-one", "a".repeat(64)));
+    expect(adapted.captures[0].path).toBe("run-id/captures/open-demo.webm");
   });
 });
 
