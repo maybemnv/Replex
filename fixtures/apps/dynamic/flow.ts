@@ -47,7 +47,7 @@ export function dynamicFlow(origin: string, options: DynamicFlowOptions = {}): F
         valueRef: "dynamicEmail",
         consequential: false,
         approved: true,
-        checkpoint: { kind: "visible", target: { kind: "label", value: "Email" }, expected: "Email" },
+        checkpoint: { kind: "visible", target: { kind: "testId", value: "auth-page" }, expected: "Email" },
         sceneKey: "authenticate",
       },
       {
@@ -58,7 +58,7 @@ export function dynamicFlow(origin: string, options: DynamicFlowOptions = {}): F
         valueRef: "dynamicPassword",
         consequential: false,
         approved: true,
-        checkpoint: { kind: "visible", target: { kind: "label", value: "Password" }, expected: "Password" },
+        checkpoint: { kind: "visible", target: { kind: "testId", value: "auth-page" }, expected: "Password" },
         sceneKey: "authenticate",
       },
       {

@@ -61,7 +61,7 @@ export function difficultFlow(origin: string, options: DifficultFlowOptions = {}
         valueRef: "difficultProjectName",
         consequential: false,
         approved: true,
-        checkpoint: { kind: "visible", target: { kind: "label", value: "Project name" }, expected: "Project name" },
+        checkpoint: { kind: "visible", target: { kind: "testId", value: "step-two" }, expected: "Project name" },
         sceneKey: "upload-asset",
       },
       {

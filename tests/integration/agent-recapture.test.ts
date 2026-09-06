@@ -11,10 +11,7 @@ import { createProject } from "../../src/project.js";
 import { reconcileCapture } from "../../src/reconcile.js";
 import { buildRenderJob, executeRenderJob } from "../../src/render.js";
 import { verifyProject } from "../../src/verify.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "../media.js";
 
 describe.skipIf(!mediaAvailable)("agent edits across selective recapture", () => {
   it("keeps unrelated agent edits and renders the reconciled revision", async () => {
@@ -34,7 +31,7 @@ describe.skipIf(!mediaAvailable)("agent edits across selective recapture", () =>
       expect(reconciled.project.overlays["agent-title"]).toEqual(agent.project.overlays["agent-title"]);
       const verification = verifyProject(reconciled.project, root);
       expect(verification.passed).toBe(true);
-      const rendered = executeRenderJob(buildRenderJob(reconciled.project, root, verification), root, { ffmpegPath, ffprobePath });
+      const rendered = executeRenderJob(buildRenderJob(reconciled.project, root, verification), root, { ffmpegPath, ffprobePath, project: reconciled.project });
       expect(rendered.probe.durationMs).toBeGreaterThanOrEqual(25000);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -48,7 +45,6 @@ function capture(root: string, index: number, sceneKey: string, suffix = String(
 }
 
 function source(path: string, index: number): void {
-  const color = ["0x243447", "0x355c7d", "0x5c3d2e", "0x6c4b5e"][index];
-  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${color}:s=1920x1080:r=30:d=9`, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
+  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:r=30:d=9", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
   if (run.status !== 0) throw new Error(run.stderr);
 }

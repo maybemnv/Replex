@@ -6,6 +6,7 @@ import {
   OperationBatchSchema,
   OperationRecordSchema,
   ProjectSchema,
+  transitionAdjustedDurationMs,
   type EditOperation,
   type OperationRecord,
   type Project,
@@ -308,7 +309,11 @@ function sceneDurationMs(scene: Scene): number {
 }
 
 function totalDurationWithinTarget(project: Project): boolean {
-  const total = project.scenes.reduce((sum, scene) => sum + sceneDurationMs(scene) / scene.speed, 0);
+  const total = transitionAdjustedDurationMs(project.scenes.map((scene) => ({
+    durationMs: sceneDurationMs(scene),
+    speed: scene.speed,
+    transition: scene.transition,
+  })));
   return total >= 25000 && total <= 35000;
 }
 
@@ -325,7 +330,7 @@ function canonicalJson(value: unknown): string {
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
       .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
       .join(",")}}`;
   }
@@ -380,6 +385,21 @@ function persistAccepted(
   createdAt: string,
 ): void {
   const root = options.root ?? options.artifactRoot;
+  const records: OperationRecord[] = operations.map((input, index) => ({
+    id: operationIds[index],
+    baseRevisionId,
+    resultRevisionId: revisionId,
+    actor,
+    input,
+    accepted: true,
+    evidenceRefs: options.evidenceRefs ?? [],
+    createdAt,
+  }));
+  for (const record of records) OperationRecordSchema.parse(record);
+  const path = options.operationsPath ?? (root ? join(root, "operations.jsonl") : undefined);
+  if (path) {
+    for (const record of records) appendJsonLine(path, record);
+  }
   if (root) {
     const serialized = `${JSON.stringify(project, null, 2)}\n`;
     const revisionPath = join(root, "revisions", `${revisionId}.json`);
@@ -387,23 +407,6 @@ function persistAccepted(
     if (!existsSync(revisionPath)) atomicWrite(revisionPath, serialized);
     else if (readFileSync(revisionPath, "utf8") !== serialized) throw new Error(`revision already exists: ${revisionId}`);
     atomicWrite(join(root, "project.json"), serialized);
-  }
-  const path = options.operationsPath ?? (root ? join(root, "operations.jsonl") : undefined);
-  if (path) {
-    for (const [index, input] of operations.entries()) {
-      const record: OperationRecord = {
-        id: operationIds[index],
-        baseRevisionId,
-        resultRevisionId: revisionId,
-        actor,
-        input,
-        accepted: true,
-        evidenceRefs: options.evidenceRefs ?? [],
-        createdAt,
-      };
-      OperationRecordSchema.parse(record);
-      appendJsonLine(path, record);
-    }
   }
 }
 

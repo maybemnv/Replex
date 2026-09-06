@@ -9,10 +9,7 @@ import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { applyOperations } from "../src/operations.js";
 import { createProject } from "../src/project.js";
 import { reconcileCapture } from "../src/reconcile.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "replex-reconcile-"));

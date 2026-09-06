@@ -8,10 +8,7 @@ import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../../fixtures/apps/normal/flow.js";
 import { runRecordedAgentDraft } from "../../src/agent.js";
 import { createProject, semanticHash } from "../../src/project.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "../media.js";
 
 describe.skipIf(!mediaAvailable)("recorded agent draft integration", () => {
   it("replays a grounded model draft through verification and a valid MP4 render", async () => {
@@ -40,6 +37,6 @@ describe.skipIf(!mediaAvailable)("recorded agent draft integration", () => {
 });
 
 function source(path: string, index: number): void {
-  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${["0x243447", "0x355c7d", "0x5c3d2e"][index]}:s=1920x1080:r=30:d=9`, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
+  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:r=30:d=9", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
   if (run.status !== 0) throw new Error(run.stderr);
 }

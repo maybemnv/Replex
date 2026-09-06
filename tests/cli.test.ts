@@ -8,10 +8,7 @@ import { join } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { checkStartupTools, runCli } from "../src/cli.js";
 import { createProject, loadProject, writeRevision } from "../src/project.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 
 function captureOutput() {
   const output = { stdout: "", stderr: "" };
@@ -177,7 +174,7 @@ describe("CLI", () => {
         await writeRevision(root, initial);
 
         const output = { stdout: "", stderr: "" };
-        const exitCode = await runCli(["capture", "--project", root], {
+        const exitCode = await runCli(["capture", "--project", root, "--values", JSON.stringify({ filterValue: "replay" })], {
           io: {
             stdout: (value) => { output.stdout += value; },
             stderr: (value) => { output.stderr += value; },
@@ -203,6 +200,39 @@ describe("CLI", () => {
         expect(response[0].revisionId).toBe(materialized.currentRevisionId);
         expect(new Set((response[0].captures as Array<{ path: string }>).map(({ path }) => path)))
           .toEqual(new Set(Object.values(materialized.captures).map((capture) => capture.path)));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }, 60_000);
+
+    it("rejects malformed flow values before launching the browser", async () => {
+      const root = await mkdtemp(join(tmpdir(), "replex-cli-values-"));
+      try {
+        const initial = createProject({
+          projectId: "cli-values-project",
+          brief: { audience: "Founders", message: "Show filtering", targetDurationMs: 30000 },
+          environment: normalEnvironment(origin),
+          flow: normalFlow(origin),
+          captures: ["open-demo", "open-filter", "apply-filter"].map((sceneKey, index) => ({
+            id: `stale-${sceneKey}`,
+            sceneKey,
+            path: `captures/${sceneKey}.webm`,
+            durationMs: 10000,
+            sha256: String(index + 1).repeat(64),
+          })),
+        });
+        await writeRevision(root, initial);
+        const output = { stdout: "", stderr: "" };
+        const io = {
+          stdout: (value: string) => { output.stdout += value; },
+          stderr: (value: string) => { output.stderr += value; },
+        };
+        const exitCode = await runCli(["capture", "--project", root, "--values", "not-json"], {
+          io,
+          toolPaths: { ffmpeg: ffmpegPath, ffprobe: ffprobePath },
+        });
+        expect(exitCode).toBe(1);
+        expect(output.stderr).toContain('"code":"CLI_USAGE_ERROR"');
       } finally {
         await rm(root, { recursive: true, force: true });
       }

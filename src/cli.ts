@@ -67,6 +67,8 @@ interface ParsedArgs {
   storageStatePath?: string;
   uploadRoots: string[];
   inputPath?: string;
+  valuesPath?: string;
+  valuesInline?: string;
 }
 
 const defaultIO: CliIO = {
@@ -74,7 +76,7 @@ const defaultIO: CliIO = {
   stderr: (text) => process.stderr.write(text),
 };
 
-export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [options]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --project <path>  Project directory containing project.json\n  --artifact-root <path>  Capture artifact directory (defaults to project/work/captures)\n  --output <path>  Project-relative render output path\n  --storage-state <path>  Auth state outside the project artifacts\n  --upload-root <path>  Approved upload root (repeatable)\n  --input <path>  Recapture JSON input (required by recapture)\n  --help           Show this help\n`;
+export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [options]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --project <path>  Project directory containing project.json\n  --artifact-root <path>  Capture artifact directory (defaults to project/work/captures)\n  --output <path>  Project-relative render output path\n  --storage-state <path>  Auth state outside the project artifacts\n  --upload-root <path>  Approved upload root (repeatable)\n  --input <path>  Recapture JSON input (required by recapture)\n  --values <json|@path>  Flow values for fill/select/upload steps (required by dynamic/difficult fixtures)\n  --help           Show this help\n`;
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
   const args = name === "chromium"
@@ -166,6 +168,23 @@ function requiredPath(value: string | undefined, flag: string): string {
   return resolve(value);
 }
 
+async function readFlowValues(args: ParsedArgs): Promise<Record<string, string> | undefined> {
+  const raw = args.valuesInline ?? (args.valuesPath ? await readFile(resolve(args.valuesPath), "utf8").catch((error: unknown) => {
+    throw usageError(`unable to read --values file: ${error instanceof Error ? error.message : String(error)}`);
+  }) : undefined);
+  if (raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw usageError(`--values is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== "string")) {
+    throw usageError("--values must be a JSON object mapping value names to strings");
+  }
+  return parsed as Record<string, string>;
+}
+
 async function loadProjectForCommand(args: ParsedArgs) {
   const root = requiredPath(args.projectRoot, "--project");
   return { root, project: await loadProject(root) };
@@ -203,19 +222,28 @@ async function executeCommand(command: Command, args: ParsedArgs, options: RunCl
   if (command === "capture") {
     const { root, project } = await loadProjectForCommand(args);
     const artifactRoot = resolve(args.artifactRoot ?? join(root, "work", "captures"));
+    const values = await readFlowValues(args);
     const run = await runCapture(project.flow, project.environment, {
       artifactRoot,
+      values,
       ffmpegPath: toolPaths.ffmpeg,
       ffprobePath: toolPaths.ffprobe,
       storageStatePath: args.storageStatePath,
       uploadRoots: args.uploadRoots,
     });
-    const materialized = materializeCaptureRun(root, project, run);
+    const materialized = materializeCaptureRun(root, project, run, {
+      ffmpegPath: toolPaths.ffmpeg,
+      ffprobePath: toolPaths.ffprobe,
+      targetTotalSeconds: project.brief.targetDurationMs / 1000,
+    });
     await writeRevision(root, materialized);
-    const captureRoot = capturesFromRun(run).root;
-    const captures = capturesFromRun(run).captures.map((capture) => ({
-      ...capture,
-      path: relative(root, resolve(captureRoot, capture.path ?? "")).replace(/\\/g, "/"),
+    const captures = Object.values(materialized.captures).map((capture) => ({
+      id: capture.id,
+      sceneKey: capture.sceneKey,
+      path: capture.path,
+      runId: capture.runId,
+      durationMs: capture.durationMs,
+      sha256: capture.sha256,
     }));
     printJson(io, { command, status: "completed", run: run.run, revisionId: materialized.currentRevisionId, runPath: relative(root, run.runPath).replace(/\\/g, "/"), captures });
     return 0;
@@ -328,6 +356,19 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
         args.inputPath = argv[index + 1];
         if (!args.inputPath || args.inputPath.startsWith("-")) throw usageError("--input requires a path");
         index += 1;
+      } else if (arg === "--values" || arg.startsWith("--values=")) {
+        const inline = arg.startsWith("--values=") ? arg.slice("--values=".length) : undefined;
+        if (inline !== undefined) {
+          if (!inline) throw usageError("--values requires JSON or @path");
+          if (inline.startsWith("@")) args.valuesPath = inline.slice(1);
+          else args.valuesInline = inline;
+        } else {
+          const value = argv[index + 1];
+          if (!value) throw usageError("--values requires JSON or @path");
+          if (value.startsWith("@")) args.valuesPath = value.slice(1);
+          else args.valuesInline = value;
+          index += 1;
+        }
       } else {
         throw usageError(`unknown option: ${argv[index]}`);
       }

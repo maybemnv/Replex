@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { deflateSync } from "node:zlib";
-import { ProjectSchema, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
+import { ProjectSchema, transitionAdjustedDurationMs, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
+import { semanticHash } from "./project.js";
 import { loadVerificationResult } from "./verify.js";
 
 export interface RenderJobOverlay {
@@ -87,6 +88,15 @@ export function buildRenderJob(project: Project, root: string, verification: { i
 export function executeRenderJob(job: RenderJob, root: string, options: RenderOptions = {}): RenderExecution {
   const verification = loadVerificationResult(root, job.revisionId);
   if (!verification || !verification.passed || verification.id !== job.verificationId) throw new Error("render requires persisted successful verification for the current revision");
+  const { sha256: _jobSha256, ...unsignedJob } = job;
+  if (sha256(canonicalJson(unsignedJob)) !== job.sha256) throw new Error("render job hash does not match its declared plan");
+  const project = options.project ?? readProjectForRender(root);
+  if (project.currentRevisionId !== job.revisionId) throw new Error("render job revision is not the current project revision");
+  if (job.revisionSha256 !== semanticHash(project)) throw new Error("render job is stale for the current revision manifest");
+  for (const scene of job.scenes) {
+    const sourcePath = resolveProjectPath(root, scene.sourcePath);
+    if (sha256File(sourcePath) !== scene.sourceSha256) throw new Error(`render source changed since verification: ${scene.sceneId}`);
+  }
   const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
   const outputPath = resolveProjectPath(root, job.output.path);
@@ -235,8 +245,10 @@ function focusFilters(focus: Focus | undefined): string {
   const y = (bounds.y * 1080).toFixed(3);
   const width = (bounds.width * 1920).toFixed(3);
   const height = (bounds.height * 1080).toFixed(3);
-  if (focus.preset === "box") return `,drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=0xF5C56B@0.9:thickness=6`;
-  return `,crop=${width}:${height}:${x}:${y},scale=1920:1080`;
+  const start = (focus.startMs / 1000).toFixed(3);
+  const end = (focus.endMs / 1000).toFixed(3);
+  if (focus.preset === "box") return `,drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=0xF5C56B@0.9:thickness=6:enable='between(t,${start},${end})'`;
+  return `,crop=${width}:${height}:${x}:${y}:enable='between(t,${start},${end})',scale=1920:1080`;
 }
 
 function assertRenderedMedia(probe: MediaProbe): void {
@@ -271,7 +283,11 @@ function sceneDurationSeconds(scene: RenderJobScene): number {
 }
 
 function renderedDurationSeconds(scenes: RenderJobScene[]): number {
-  return scenes.reduce((total, scene, index) => total + sceneDurationSeconds(scene) - (index && scenes[index - 1].transition.type === "crossfade" ? scenes[index - 1].transition.durationMs / 1000 : 0), 0);
+  return transitionAdjustedDurationMs(scenes.map((scene) => ({
+    durationMs: scene.outMs - scene.inMs,
+    speed: scene.speed,
+    transition: scene.transition,
+  }))) / 1000;
 }
 
 function writeOverlayAssets(job: RenderJob, root: string): void {
@@ -350,8 +366,20 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function readProjectForRender(root: string): Project {
+  try {
+    return ProjectSchema.parse(JSON.parse(readFileSync(join(root, "project.json"), "utf8")));
+  } catch {
+    throw new Error("render requires the current project for hash binding: pass options.project or persist project.json first");
+  }
+}
+
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }

@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
 import { join } from "node:path";
 import type { Project } from "./schema.js";
+import { transitionAdjustedDurationMs } from "./schema.js";
 
 export type VerificationPhase = "browser" | "scene" | "recapture" | "render";
 export type FirstCause = "browser_automation" | "checkpoint_state" | "capture" | "scene_mapping" | "operation" | "recapture" | "model_decision" | "verification" | "rendering";
@@ -76,8 +77,12 @@ export function verifyProject(project: Project, root: string, options: Verificat
     const duration = scene ? (scene.sourceOutMs - scene.sourceInMs) / scene.speed : 0;
     check("OVERLAY_RANGE", Boolean(scene) && overlay.startMs >= 0 && overlay.endMs > overlay.startMs && overlay.endMs <= duration, `Overlay ${overlay.id} fits its scene and safe operation range.`, "scene_mapping");
   }
-  const duration = project.scenes.reduce((sum, scene) => sum + (scene.sourceOutMs - scene.sourceInMs) / scene.speed, 0);
-  check("TOTAL_DURATION", duration >= 25000 && duration <= 35000, `Derived duration is ${Math.round(duration)}ms.`, "scene_mapping");
+  const duration = transitionAdjustedDurationMs(project.scenes.map((scene) => ({
+    durationMs: scene.sourceOutMs - scene.sourceInMs,
+    speed: scene.speed,
+    transition: scene.transition,
+  })));
+  check("TOTAL_DURATION", duration >= 25000 && duration <= 35000, `Derived transition-adjusted duration is ${Math.round(duration)}ms.`, "scene_mapping");
   let result: VerificationResult = { id: `verification-${project.currentRevisionId}`, phase: "scene", passed: !firstCause, checks, ...(firstCause ? { firstCause } : {}) };
   if (options.persist !== false) {
     try {
@@ -149,7 +154,13 @@ function probeCapture(path: string, capture: Project["captures"][string], ffprob
 function scanCapture(path: string, ffmpegPath: string): { passed: boolean; detail: string } {
   const run = spawnSync(ffmpegPath, ["-hide_banner", "-i", path, "-vf", "blackdetect=d=1:pix_th=0.10,freezedetect=n=0.003:d=1", "-an", "-f", "null", "-"], { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
   if (run.status !== 0) return { passed: false, detail: `Capture visual scan failed: ${(run.stderr || run.error?.message || "ffmpeg failed").trim()}` };
-  const intervals = [...(run.stderr || "").matchAll(/(?:black_duration|freeze_duration):([0-9.]+)/g)].map((match) => Number(match[1]));
+  const stderr = run.stderr || "";
+  const intervals = [...stderr.matchAll(/(?:black_duration|freeze_duration):([0-9.]+)/g)].map((match) => Number(match[1]));
+  const freezeStarts = [...stderr.matchAll(/freeze_start:([0-9.]+)/g)].length;
+  const freezeEnds = [...stderr.matchAll(/freeze_end:([0-9.]+)/g)].length;
+  if (freezeStarts > freezeEnds) {
+    return { passed: false, detail: "Capture contains a frozen interval that continues through the end of the media." };
+  }
   const longInterval = intervals.find((duration) => duration >= 1);
   return longInterval === undefined
     ? { passed: true, detail: "Capture has no detected black or frozen interval lasting at least one second." }

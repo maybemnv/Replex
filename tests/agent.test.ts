@@ -57,6 +57,33 @@ describe("recorded bounded model loop", () => {
     }
   });
 
+  it("rejects an incomplete recorded draft that never renders", async () => {
+    const { root, project } = await fixture();
+    try {
+      const result = runRecordedAgentDraft(project, root, [
+        { tool: "inspect_project", input: {} },
+        { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-1", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 2000 } } },
+      ]);
+      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects evidence references that were never disclosed", async () => {
+    const { root, project } = await fixture();
+    try {
+      const result = runRecordedAgentDraft(project, root, [
+        { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:does-not-exist"], overlay: { id: "title-1", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 2000 } } },
+      ]);
+      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL" });
+      if (!result.ok) expect(result.detail).toContain("never disclosed");
+      expect(project.currentRevisionId).toBe("revision-0");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("enforces the fixed tool-call budget", async () => {
     const { root, project } = await fixture();
     try {

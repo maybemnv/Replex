@@ -20,10 +20,7 @@ import { capturesFromRun, createProject, type ProjectCaptureInput } from "../../
 import { reconcileCapture } from "../../src/reconcile.js";
 import { buildRenderJob, executeRenderJob } from "../../src/render.js";
 import { verifyProject } from "../../src/verify.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "../media.js";
 
 describe.skipIf(!mediaAvailable)("dynamic and difficult POC-13 end-to-end paths", () => {
   for (const kind of ["dynamic", "difficult"] as const) {
@@ -61,7 +58,7 @@ describe.skipIf(!mediaAvailable)("dynamic and difficult POC-13 end-to-end paths"
         const baselineRender = executeRenderJob(
           buildRenderJob(project, materialized.root, verification),
           materialized.root,
-          { ffmpegPath, ffprobePath },
+          { ffmpegPath, ffprobePath, project },
         );
         expect(baselineRender.probe.durationMs).toBeGreaterThanOrEqual(25000);
 
@@ -111,7 +108,7 @@ describe.skipIf(!mediaAvailable)("dynamic and difficult POC-13 end-to-end paths"
         const revisedRender = executeRenderJob(
           buildRenderJob(replacement.project, materialized.root, revisedVerification),
           materialized.root,
-          { ffmpegPath, ffprobePath },
+          { ffmpegPath, ffprobePath, project: replacement.project },
         );
         expect(revisedRender.probe.durationMs).toBeGreaterThanOrEqual(25000);
       } finally {

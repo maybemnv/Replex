@@ -135,6 +135,19 @@ export const FlowSchema = z
     }
   });
 
+export interface TransitionTimedRange {
+  durationMs: number;
+  speed: number;
+  transition: { type: string; durationMs: number };
+}
+
+/** Single transition-adjusted duration shared by verification, operations, and rendering. */
+export function transitionAdjustedDurationMs(scenes: TransitionTimedRange[]): number {
+  return scenes.reduce((total, scene, index) => (
+    total + scene.durationMs / scene.speed - (index > 0 && scenes[index - 1].transition.type === "crossfade" ? scenes[index - 1].transition.durationMs : 0)
+  ), 0);
+}
+
 export const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 hex digest");
 
 export const FocusSchema = z

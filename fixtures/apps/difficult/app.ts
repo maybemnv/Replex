@@ -7,8 +7,10 @@ export function renderDifficultFixture(state: DifficultFixtureState): string {
   const validation = state.changed ? "Validation passed for updated plan" : "Validation passed for baseline plan";
   const failureActionId = JSON.stringify(state.failureActionId ?? "");
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Release plan wizard</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>Release plan wizard</title>
+<style>@keyframes replex-live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } } [data-testid="live-indicator"] { animation: replex-live-pulse 1s linear infinite; font-size: 28px; }</style></head>
 <body>
+  <span data-testid="live-indicator" aria-hidden="true">●</span>
   <main data-testid="wizard-page"><h1>Release plan wizard</h1>
     <section data-testid="step-one"><h2>Choose a release</h2><p>Step 1 of 3</p><button type="button" id="next">Next step</button></section>
     <section data-testid="step-two" hidden><h2>Configure release</h2>

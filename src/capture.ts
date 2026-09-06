@@ -602,7 +602,7 @@ async function splitSourceCaptures(
     await mkdir(dirname(temporaryPath), { recursive: true });
     const result = spawnSync(
       ffmpeg,
-      ["-hide_banner", "-loglevel", "error", "-ss", scene.startSeconds.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", temporaryPath],
+      ["-hide_banner", "-loglevel", "error", "-ss", scene.startSeconds.toFixed(3), "-i", rawVideoPath, "-t", durationSeconds.toFixed(3), "-an", "-c:v", "libvpx-vp9", "-r", "30", temporaryPath],
       { encoding: "utf8", windowsHide: true, shell: false, timeout: 60_000 },
     );
     if (result.error || result.status !== 0) {

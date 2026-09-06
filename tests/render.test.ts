@@ -9,10 +9,7 @@ import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { buildRenderJob, executeRenderJob, type RenderJob } from "../src/render.js";
 import { createProject, semanticHash, type Project, writeRevision } from "../src/project.js";
 import { verifyProject } from "../src/verify.js";
-
-const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaAvailable = existsSync(ffmpegPath) && existsSync(ffprobePath);
+import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 
 function project(root: string): Project {
   const value = createProject({
@@ -70,6 +67,38 @@ describe("RenderJob", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("refuses a job whose plan hash no longer matches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-render-tamper-"));
+    try {
+      const base = project(root);
+      const source = { ...base, revisions: [{ ...base.revisions[0], manifestSha256: semanticHash(base) }] };
+      await writeRevision(root, source as Project);
+      const { writeVerificationResult } = await import("../src/verify.js");
+      writeVerificationResult(root, { id: "verification-revision-0", phase: "scene", passed: true, checks: [] });
+      const job = buildRenderJob(source, root, { id: "verification-revision-0", passed: true });
+      const tampered = { ...job, sha256: "0".repeat(64) };
+      expect(() => executeRenderJob(tampered, root, { ffmpegPath: "missing-ffmpeg", ffprobePath: "missing-ffprobe", project: source })).toThrow("job hash");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a job that is stale for the current revision manifest", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-render-stale-"));
+    try {
+      const base = project(root);
+      const source = { ...base, revisions: [{ ...base.revisions[0], manifestSha256: semanticHash(base) }] };
+      await writeRevision(root, source as Project);
+      const { writeVerificationResult } = await import("../src/verify.js");
+      writeVerificationResult(root, { id: "verification-revision-0", phase: "scene", passed: true, checks: [] });
+      const job = buildRenderJob(source, root, { id: "verification-revision-0", passed: true });
+      const drifted = { ...source, brief: { ...source.brief, message: "Drifted message" } };
+      expect(() => executeRenderJob(job, root, { ffmpegPath: "missing-ffmpeg", ffprobePath: "missing-ffprobe", project: drifted })).toThrow("stale");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
@@ -88,7 +117,7 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       const verification = verifyProject(source, root);
       const job = buildRenderJob(source, root, verification);
       await writeRevision(root, source as Project);
-      const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath });
+      const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath, project: source as Project });
 
       expect(result.outputPath).toBe(join(root, "renders", "revision-0.mp4"));
       expect(result.probe).toMatchObject({ width: 1920, height: 1080, fps: 30, videoCodec: "h264", audioCodec: "aac" });
@@ -98,6 +127,7 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       expect((JSON.parse(await readFile(join(root, "project.json"), "utf8")) as Project).outputs).toEqual([result.output]);
       expect(await readFile(join(root, "renders", "revision-0.render-job.json"), "utf8")).toContain(job.sha256);
       expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("-filter_complex");
+      expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("between(t,0.000,3.000)");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -105,7 +135,7 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
 });
 
 function makeSource(path: string, index: number): void {
-  const colors = ["0x243447", "0x355c7d", "0x5c3d2e"];
-  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${colors[index - 1]}:s=1920x1080:r=30:d=9`, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
+  void index;
+  const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:r=30:d=9", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
   if (run.status !== 0) throw new Error(run.stderr || "could not create render fixture");
 }

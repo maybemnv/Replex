@@ -7,8 +7,10 @@ export function renderDynamicFixture(state: DynamicFixtureState): string {
   const records = state.changed ? 84 : 42;
   const failureActionId = JSON.stringify(state.failureActionId ?? "");
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Dynamic Workspace</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>Dynamic Workspace</title>
+<style>@keyframes replex-live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } } [data-testid="live-indicator"] { animation: replex-live-pulse 1s linear infinite; font-size: 28px; }</style></head>
 <body>
+  <span data-testid="live-indicator" aria-hidden="true">●</span>
   <main data-testid="auth-page">
     <h1>Dynamic Workspace</h1>
     <form id="login-form">
