@@ -4,8 +4,8 @@ import { existsSync, realpathSync } from "node:fs";
 import { open, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { chromium, expect as playwrightExpect, type Locator, type Page } from "@playwright/test";
-import { EnvironmentSchema, FlowSchema, IdSchema, type BrowserStep, type Environment, type Flow } from "./schema.js";
+import { chromium, expect as playwrightExpect, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { EnvironmentSchema, FlowSchema, IdSchema, normalizeOrigin, type BrowserStep, type Environment, type Flow } from "./schema.js";
 
 const MAX_CONSOLE_EVENTS = 1000;
 
@@ -160,6 +160,11 @@ export function redactEvidenceText(value: string): string {
     .replace(/(["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[_-]?key|password|secret|authorization|cookie)["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^"',}\s<]+/gi, "$1[REDACTED]");
 }
 
+function isAllowedOrigin(allowedOrigins: string[], origin: string): boolean {
+  const normalized = normalizeOrigin(origin);
+  return allowedOrigins.some((allowed) => normalizeOrigin(allowed) === normalized);
+}
+
 export function validateCapturePlan(flow: Flow, environment: Environment): void {
   try {
     FlowSchema.parse(flow);
@@ -179,7 +184,7 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
   for (const step of flow.steps) {
     if (step.sceneKey) assertSceneKey(step.sceneKey, step.id);
   }
-  if (!environment.allowedOrigins.includes(environment.appOrigin)) {
+  if (!isAllowedOrigin(environment.allowedOrigins, environment.appOrigin)) {
     throw new CapturePlanError("ORIGIN_NOT_ALLOWED", flow.id, "app origin is not allowed");
   }
 
@@ -189,7 +194,7 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
     }
     if (step.target?.kind === "url") {
       const origin = new URL(step.target.value).origin;
-      if (!environment.allowedOrigins.includes(origin)) {
+      if (!isAllowedOrigin(environment.allowedOrigins, origin)) {
         throw new CapturePlanError("ORIGIN_NOT_ALLOWED", step.id, `origin is not allowed: ${origin}`);
       }
     }
@@ -202,6 +207,7 @@ export function validateCapturePlan(flow: Flow, environment: Environment): void 
 
 export function validateFlowStructure(flow: Flow): void {
   const actionIds = new Set<string>();
+  const sceneLastIndex = new Map<string, number>();
   for (const [index, step] of flow.steps.entries()) {
     if (actionIds.has(step.id)) {
       throw new CapturePlanError("FLOW_INVALID", step.id, "flow action IDs must be unique");
@@ -210,6 +216,13 @@ export function validateFlowStructure(flow: Flow): void {
       throw new CapturePlanError("FLOW_INVALID", step.id, `flow step order must match its declared position (${index})`);
     }
     actionIds.add(step.id);
+    if (step.sceneKey) {
+      const lastIndex = sceneLastIndex.get(step.sceneKey);
+      if (lastIndex !== undefined && lastIndex !== index - 1) {
+        throw new CapturePlanError("FLOW_INVALID", step.id, `scene key must form one contiguous block: ${step.sceneKey}`);
+      }
+      sceneLastIndex.set(step.sceneKey, index);
+    }
   }
 }
 
@@ -242,12 +255,14 @@ function jsonLines(values: unknown[]): Buffer {
 
 function assertMediaTools(options: CaptureOptions): void {
   const tools = [
-    ["ffmpeg", options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg"],
-    ["ffprobe", options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe"],
+    ["ffmpeg", options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg", /ffmpeg version/i],
+    ["ffprobe", options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe", /ffprobe version/i],
   ] as const;
-  const missing = tools.flatMap(([name, path]) => {
+  const missing = tools.flatMap(([name, path, signature]) => {
     const result = spawnSync(path, ["-version"], { encoding: "utf8", windowsHide: true, shell: false, timeout: 10_000 });
-    return result.error || result.status !== 0 ? [name] : [];
+    if (result.error || result.status !== 0) return [name];
+    const firstLine = `${result.stdout ?? ""}${result.stderr ?? ""}`.split(/\r?\n/, 1)[0] ?? "";
+    return signature.test(firstLine) ? [] : [name];
   });
   if (missing.length) throw new CaptureStartupError(missing);
 }
@@ -280,7 +295,7 @@ async function checkCheckpoint(page: Page, step: BrowserStep): Promise<void> {
       await playwrightExpect(locator).toHaveAttribute(name, expected);
     } else {
       await playwrightExpect(locator).toBeVisible();
-      const observed = [await locator.textContent(), await locator.getAttribute("aria-label"), step.checkpoint.target?.name, step.checkpoint.target?.value]
+      const observed = [await locator.textContent(), await locator.getAttribute("aria-label")]
         .filter(Boolean)
         .join(" ");
       if (!observed.includes(step.checkpoint.expected)) throw new Error("visible state did not match expected value");
@@ -315,7 +330,7 @@ async function executeStep(page: Page, step: BrowserStep, values: Record<string,
 
 function assertRuntimeOrigin(page: Page, environment: Environment, actionId: string): void {
   const origin = new URL(page.url()).origin;
-  if (!environment.allowedOrigins.includes(origin)) {
+  if (!isAllowedOrigin(environment.allowedOrigins, origin)) {
     throw new CaptureRunError("ORIGIN_NOT_ALLOWED", actionId, `origin is not allowed: ${origin}`);
   }
 }
@@ -366,22 +381,11 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   }
   const rawVideoRoot = join(runRoot, "raw-video");
   await mkdir(rawVideoRoot, { recursive: true });
-  const browser = await chromium.launch();
-  const context = await browser.newContext({
-    ...browserContextOptions(environment),
-    recordVideo: { dir: rawVideoRoot, size: environment.viewport },
-    storageState: options.storageStatePath
-      ? resolveStorageStatePath(options.artifactRoot, options.storageStatePath)
-      : undefined,
-  });
-  await context.tracing.start({ screenshots: true, snapshots: true });
-  const page = await context.newPage();
-  page.setDefaultTimeout(5_000);
-  const video = page.video();
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
   const startedAtMs = performance.now();
   const consoleEvents: Array<{ attempt: number; atMs: number; type: string; message: string }> = [];
-  page.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
-  page.on("pageerror", (error) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const tracePath = join(runRoot, "traces", "trace.zip");
@@ -390,48 +394,65 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   let logsWritten = false;
   let currentActionId = flow.id;
   let runtimeOriginError: CaptureRunError | undefined;
-  await context.route("**/*", async (route) => {
-    const request = route.request();
-    const url = request.url();
-    const parsed = new URL(url);
-    if (!request.isNavigationRequest() && !["http:", "https:"].includes(parsed.protocol)) return route.continue();
-    if (environment.allowedOrigins.includes(parsed.origin)) return route.continue();
-    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${parsed.origin}`);
-    await route.abort("blockedbyclient");
-  });
-  await context.routeWebSocket(/wss?:\/\//, (route) => {
-    const url = new URL(route.url());
-    const origin = `${url.protocol === "wss:" ? "https:" : "http:"}//${url.host}`;
-    if (environment.allowedOrigins.includes(origin)) return route.connectToServer();
-    runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
-    route.close({ code: 1008, reason: "origin is not allowed" });
-  });
-  const observePage = (observedPage: Page) => observedPage.on("framenavigated", (frame) => {
-    const url = frame.url();
-    if (url === "about:blank") return;
-    const origin = new URL(url).origin;
-    if (!environment.allowedOrigins.includes(origin)) {
-      runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
-    }
-  });
-  context.on("page", observePage);
-  observePage(page);
 
   try {
+    browser = await chromium.launch();
+    const activeContext = await browser.newContext({
+      ...browserContextOptions(environment),
+      recordVideo: { dir: rawVideoRoot, size: environment.viewport },
+      storageState: options.storageStatePath
+        ? resolveStorageStatePath(options.artifactRoot, options.storageStatePath)
+        : undefined,
+    });
+    context = activeContext;
+    await activeContext.tracing.start({ screenshots: true, snapshots: true });
+    const activePage = await activeContext.newPage();
+    page = activePage;
+    activePage.setDefaultTimeout(5_000);
+    const video = activePage.video();
+    activePage.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
+    activePage.on("pageerror", (error) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: "pageerror", message: error.message }));
+    await activeContext.route("**/*", async (route) => {
+      const request = route.request();
+      const url = request.url();
+      const parsed = new URL(url);
+      if (!request.isNavigationRequest() && !["http:", "https:"].includes(parsed.protocol)) return route.continue();
+      if (isAllowedOrigin(environment.allowedOrigins, parsed.origin)) return route.continue();
+      runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${parsed.origin}`);
+      await route.abort("blockedbyclient");
+    });
+    await activeContext.routeWebSocket(/wss?:\/\//, (route) => {
+      const url = new URL(route.url());
+      const origin = `${url.protocol === "wss:" ? "https:" : "http:"}//${url.host}`;
+      if (isAllowedOrigin(environment.allowedOrigins, origin)) return route.connectToServer();
+      runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+      route.close({ code: 1008, reason: "origin is not allowed" });
+    });
+    const observePage = (observedPage: Page) => observedPage.on("framenavigated", (frame) => {
+      const url = frame.url();
+      if (url === "about:blank") return;
+      const origin = new URL(url).origin;
+      if (!isAllowedOrigin(environment.allowedOrigins, origin)) {
+        runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${origin}`);
+      }
+    });
+    activeContext.on("page", observePage);
+    observePage(activePage);
+
     const startedScenes = new Set<string>();
     for (const step of flow.steps) {
       currentActionId = step.id;
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
         const path = join(runRoot, "screenshots", `${step.sceneKey}-before.png`);
-        await writeImmutableArtifact(path, await page.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot());
         artifacts.push({ sceneKey: step.sceneKey, boundary: "before", path });
         startedScenes.add(step.sceneKey);
       }
       try {
-        await executeStep(page, step, options.values ?? {}, options.uploadRoots ?? []);
+        await executeStep(activePage, step, options.values ?? {}, options.uploadRoots ?? []);
         if (runtimeOriginError) throw runtimeOriginError;
-        assertRuntimeOrigin(page, environment, step.id);
-        await checkCheckpoint(page, step);
+        assertRuntimeOrigin(activePage, environment, step.id);
+        await checkCheckpoint(activePage, step);
       } catch (error) {
         const failure = runtimeOriginError ?? (error instanceof CaptureRunError
           ? error
@@ -457,13 +478,13 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       const scene = scenePlan.find((candidate) => candidate.checkpointActionId === step.id);
       if (scene) {
         const path = join(runRoot, "screenshots", `${scene.sceneKey}-after.png`);
-        await writeImmutableArtifact(path, await page.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot());
         artifacts.push({ sceneKey: scene.sceneKey, boundary: "after", path });
       }
     }
     if (runtimeOriginError) throw runtimeOriginError;
-    await context.tracing.stop({ path: tracePath });
-    await context.close();
+    await activeContext.tracing.stop({ path: tracePath });
+    await activeContext.close();
     contextClosed = true;
     await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
     await writeImmutableArtifact(consoleLogPath, jsonLines(consoleEvents.map((event) => ({ ...event, message: redactEvidenceText(event.message) }))));
@@ -487,31 +508,47 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     const failure = error instanceof CaptureRunError
       ? error
       : new CaptureRunError("ACTION_FAILED", currentActionId, error instanceof Error ? error.message : String(error));
-    if (!contextClosed) {
+    if (page && context && !contextClosed) {
       const failureRoot = join(runRoot, "failure");
       const screenshotPath = join(failureRoot, "screenshot.png");
       const evidencePath = join(failureRoot, "evidence.json");
-      await writeImmutableArtifact(screenshotPath, await page.screenshot());
-      const bodyText = (await page.locator("body").innerText().catch(() => "")).slice(0, 4000);
-      const domExcerpt = (await page.locator("body").evaluate((element) => element.outerHTML).catch(() => "")).slice(0, 4000);
-      const accessibilityExcerpt = (await page.locator("body").ariaSnapshot().catch(() => "")).slice(0, 4000);
+      let screenshotError: string | undefined;
+      try {
+        await writeImmutableArtifact(screenshotPath, await page.screenshot());
+      } catch (screenshotFailure) {
+        screenshotError = screenshotFailure instanceof Error ? screenshotFailure.message : String(screenshotFailure);
+      }
+      const bodyText = await page.locator("body").innerText().catch(() => "").then((text) => text.slice(0, 4000));
+      const domExcerpt = await page.locator("body").evaluate((element) => element.outerHTML).catch(() => "").then((html) => html.slice(0, 4000));
+      const accessibilityExcerpt = await page.locator("body").ariaSnapshot().catch(() => "").then((snapshot) => snapshot.slice(0, 4000));
+      let pageUrl = "";
+      try {
+        pageUrl = page.url();
+      } catch {
+        pageUrl = "";
+      }
       await writeImmutableArtifact(
         evidencePath,
         Buffer.from(JSON.stringify({
           actionId: failure.actionId,
           code: failure.code,
           message: redactEvidenceText(failure.message),
-          url: redactEvidenceText(page.url()),
+          url: redactEvidenceText(pageUrl),
           bodyText: redactEvidenceText(bodyText),
           domExcerpt: redactEvidenceText(domExcerpt),
           accessibilityExcerpt: redactEvidenceText(accessibilityExcerpt),
           consoleEvents: consoleEvents.slice(-50).map((event) => ({ ...event, message: redactEvidenceText(event.message) })),
           screenshotPath,
+          ...(screenshotError ? { screenshotError } : {}),
         }, null, 2)),
       );
-      await context.tracing.stop({ path: tracePath });
+      try {
+        await context.tracing.stop({ path: tracePath });
+        failure.tracePath = tracePath;
+      } catch {
+        if (existsSync(tracePath)) failure.tracePath = tracePath;
+      }
       failure.evidencePath = evidencePath;
-      failure.tracePath = tracePath;
       failure.runPath = runPath;
     } else if (existsSync(tracePath)) {
       failure.tracePath = tracePath;
@@ -532,8 +569,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     failure.runPath = runPath;
     throw failure;
   } finally {
-    if (!contextClosed) await context.close();
-    await browser.close();
+    if (context && !contextClosed) await context.close().catch(() => undefined);
+    if (browser) await browser.close().catch(() => undefined);
   }
 }
 

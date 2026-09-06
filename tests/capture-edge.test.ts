@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import {
   browserContextOptions,
+  buildScenePlan,
   deriveSceneBoundaries,
   redactEvidenceText,
   resolveStorageStatePath,
@@ -224,6 +225,39 @@ describe("capture safety boundary", () => {
       await expect(runCapture(attributeFlow, normalEnvironment(server.origin), {
         artifactRoot: join(tmpdir(), "replex-edge-attribute"),
       })).resolves.toMatchObject({ run: { status: "passed" } });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it("rejects noncontiguous reuse of a scene key before execution", () => {
+    const flow = normalFlow("http://127.0.0.1:4173");
+    flow.steps = [
+      { ...flow.steps[0], sceneKey: "scene-a" },
+      { ...flow.steps[1], sceneKey: "scene-b" },
+      { ...flow.steps[2], sceneKey: "scene-a" },
+      { ...flow.steps[3], sceneKey: "scene-b" },
+    ];
+
+    expect(() => validateCapturePlan(flow, normalEnvironment("http://127.0.0.1:4173"))).toThrowError(
+      expect.objectContaining({ code: "FLOW_INVALID" }),
+    );
+    expect(() => buildScenePlan(flow)).toThrowError("contiguous block");
+  });
+
+  it("does not satisfy a visible checkpoint from declared target metadata", async () => {
+    const server = await listen((_, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end('<main data-testid="status">something else entirely</main>');
+    });
+    const flow = normalFlow(server.origin);
+    flow.steps = [{
+      ...flow.steps[0],
+      checkpoint: { kind: "visible", target: { kind: "testId", value: "status" }, expected: "status" },
+    }];
+    try {
+      await expect(runCapture(flow, normalEnvironment(server.origin), {
+        artifactRoot: join(tmpdir(), "replex-edge-self-satisfy"),
+      })).rejects.toMatchObject({ code: "CHECKPOINT_MISMATCH", actionId: "open-release-page" });
     } finally {
       await server.close();
     }
