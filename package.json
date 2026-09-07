@@ -14,6 +14,7 @@
     "fixtures": "tsx fixtures/operator.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "@playwright/test": "^1.55.0",
     "zod": "^4.1.5"
   },

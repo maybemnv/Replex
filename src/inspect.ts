@@ -26,7 +26,7 @@ export interface InspectionDetails {
 }
 
 export type InspectionResult =
-  | { ok: true; tool: InspectionRequest["kind"]; summary: string; artifacts: ArtifactReference[]; truncated: boolean; details?: InspectionDetails }
+  | { ok: true; tool: InspectionRequest["kind"]; summary?: string; artifacts: ArtifactReference[]; truncated: boolean; details?: InspectionDetails }
   | { ok: false; code: "INVALID_REQUEST" | "NOT_FOUND" | "FORBIDDEN"; detail: string };
 
 const MAX_SUMMARY_CHARS = 1000;
@@ -106,7 +106,7 @@ export function inspectProject(project: Project, root: string, request: Inspecti
     }
   }
   const redacted = redact(summary);
-  const result: InspectionResult = { ok: true, tool: request.kind, summary: cap(redacted), artifacts, truncated: redacted.length > MAX_SUMMARY_CHARS || (request.kind === "inspect_project" && (project.scenes.length > 12 || Object.keys(project.captures).length > 20)) || (request.kind === "inspect_flow" && project.flow.steps.length > 20), ...(details ? { details } : {}) };
+  const result: InspectionResult = { ok: true, tool: request.kind, ...(details ? { details } : { summary: cap(redacted) }), artifacts, truncated: redacted.length > MAX_SUMMARY_CHARS || (request.kind === "inspect_project" && (project.scenes.length > 12 || Object.keys(project.captures).length > 20)) || (request.kind === "inspect_flow" && project.flow.steps.length > 20) };
   auditDisclosure(root, result);
   return result;
 }

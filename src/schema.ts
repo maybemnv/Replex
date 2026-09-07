@@ -238,33 +238,39 @@ export const OverlaySchema = z
 
 const OperationReasonSchema = nonEmptyText.max(500);
 
-export const EditOperationSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("create_scene"), scene: SceneSchema }).strict(),
-  z.object({
+export const EditOperationSchemas = {
+  create_scene: z.object({ type: z.literal("create_scene"), scene: SceneSchema }).strict(),
+  trim_scene: z.object({
     type: z.literal("trim_scene"),
     sceneId: IdSchema,
     sourceInMs: MillisecondsSchema,
     sourceOutMs: MillisecondsSchema,
   }).strict(),
-  z.object({ type: z.literal("reorder_scene"), sceneIds: z.array(IdSchema).min(1) }).strict(),
-  z.object({
+  reorder_scene: z.object({ type: z.literal("reorder_scene"), sceneIds: z.array(IdSchema).min(1) }).strict(),
+  replace_capture: z.object({
     type: z.literal("replace_capture"),
     sceneId: IdSchema,
     captureId: IdSchema,
     changedStepIds: z.array(IdSchema).min(1).optional(),
     reason: OperationReasonSchema,
   }).strict(),
-  z.object({ type: z.literal("set_speed"), sceneId: IdSchema, speed: SceneSchema.shape.speed }).strict(),
-  z.object({ type: z.literal("set_focus"), sceneId: IdSchema, focus: FocusSchema }).strict(),
-  z.object({
+  set_speed: z.object({ type: z.literal("set_speed"), sceneId: IdSchema, speed: SceneSchema.shape.speed }).strict(),
+  set_focus: z.object({ type: z.literal("set_focus"), sceneId: IdSchema, focus: FocusSchema }).strict(),
+  set_title: z.object({
     type: z.literal("set_title"),
     overlay: OverlaySchema.and(z.object({ kind: z.literal("title") }).strict()),
   }).strict(),
-  z.object({
+  set_callout: z.object({
     type: z.literal("set_callout"),
     overlay: OverlaySchema.and(z.object({ kind: z.literal("callout") }).strict()),
   }).strict(),
-  z.object({ type: z.literal("set_transition"), sceneId: IdSchema, transition: TransitionSchema }).strict(),
+  set_transition: z.object({ type: z.literal("set_transition"), sceneId: IdSchema, transition: TransitionSchema }).strict(),
+} as const;
+
+export const EditOperationSchema = z.discriminatedUnion("type", [
+  EditOperationSchemas.create_scene, EditOperationSchemas.trim_scene, EditOperationSchemas.reorder_scene,
+  EditOperationSchemas.replace_capture, EditOperationSchemas.set_speed, EditOperationSchemas.set_focus,
+  EditOperationSchemas.set_title, EditOperationSchemas.set_callout, EditOperationSchemas.set_transition,
 ]);
 
 export const OperationBatchSchema = z.array(EditOperationSchema).min(1);

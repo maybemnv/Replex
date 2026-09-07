@@ -1,9 +1,11 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import { inspectProject, type InspectionRequest } from "./inspect.js";
 import { applyOperations } from "./operations.js";
 import { buildRenderJob, executeRenderJob } from "./render.js";
-import type { Project } from "./schema.js";
+import { EditOperationSchemas, IdSchema, type Project } from "./schema.js";
 import { verifyProject } from "./verify.js";
 
 export const AGENT_TOOL_NAMES = [
@@ -27,7 +29,7 @@ export type AgentResult =
 /** Replays real-shaped recorded calls through the same dispatcher used by the live client. */
 export function runRecordedAgentDraft(project: Project, root: string, calls: RecordedToolCall[], options: { requireCompletion?: boolean } = {}): AgentResult {
   if (calls.length > 20) return failure(project, 0, [], "BUDGET_EXHAUSTED", "agent exceeded 20 tool calls", root);
-  const result = dispatch({ project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: readDisclosures(root) }, root, calls);
+  const result = dispatch({ project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: new Set() }, root, calls);
   if (result.ok && options.requireCompletion !== false) {
     const hasEdit = result.events.some((event) => ["create_scene", "trim_scene", "reorder_scene", "replace_capture", "set_speed", "set_focus", "set_title", "set_callout", "set_transition"].includes(event));
     const hasVerify = result.events.includes("verify_project");
@@ -41,7 +43,7 @@ export function runRecordedAgentDraft(project: Project, root: string, calls: Rec
 
 /** Runs the one configured provider seam; a missing key never falls back to recorded mode. */
 export async function runClaudeDraft(project: Project, root: string, client = createClaudeClient()): Promise<AgentResult> {
-  const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: readDisclosures(root) };
+  const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: new Set() };
   let request = initialClaudeRequest(project);
   for (;;) {
     let response: ClaudeResponse;
@@ -75,17 +77,17 @@ export async function runClaudeDraft(project: Project, root: string, client = cr
 export function createClaudeClient(): ClaudeClient {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY is required for real Claude runs");
+  const anthropic = new Anthropic({ apiKey: key });
   return {
     async createMessage(request, signal) {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        signal,
-        headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: request.model, max_tokens: 1200, system: request.system, tools: request.tools, messages: request.messages }),
-      });
-      if (!response.ok) throw new Error(`Claude request failed: ${response.status}`);
-      const body = await response.json() as { stop_reason?: string; content?: Array<{ type?: string; id?: string; name?: string; input?: unknown }> };
-      return { stopReason: body.stop_reason === "tool_use" ? "tool_use" : "end_turn", assistantContent: body.content ?? [], toolCalls: (body.content ?? []).filter((item) => item.type === "tool_use").map((item) => ({ id: item.id, tool: item.name ?? "", input: item.input })) };
+      const response = await anthropic.messages.create({
+        model: request.model, max_tokens: 1200, system: request.system,
+        tools: request.tools as Anthropic.Messages.Tool[],
+        messages: request.messages as Anthropic.Messages.MessageParam[],
+      }, { signal });
+      const toolCalls = response.content.filter((item): item is Anthropic.Messages.ToolUseBlock => item.type === "tool_use")
+        .map((item) => ({ id: item.id, tool: item.name, input: item.input }));
+      return { stopReason: response.stop_reason === "tool_use" ? "tool_use" : "end_turn", assistantContent: response.content, toolCalls };
     },
   };
 }
@@ -117,7 +119,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       const input = object(call.input);
       if (!input || typeof input.baseRevisionId !== "string" || !validEvidence(input.evidenceRefs)) return fail(state.toolCalls + index, "INVALID_CALL", "edits require current baseRevisionId and non-empty stable evidence references");
       const evidenceRefs = input.evidenceRefs as string[];
-      const undisclosed = evidenceRefs.find((ref) => !isGroundedEvidenceRef(project, root, state.disclosed, ref));
+      const undisclosed = evidenceRefs.find((ref) => !state.disclosed.has(ref));
       if (undisclosed) return fail(state.toolCalls + index, "INVALID_CALL", `evidence reference was never disclosed for this run: ${undisclosed}`);
       const { baseRevisionId, evidenceRefs: _evidenceRefs, ...operationInput } = input;
       const mutation = applyOperations(project, baseRevisionId, [{ ...operationInput, type: call.tool }], { actor: "model", root, evidenceRefs });
@@ -182,14 +184,13 @@ function toolInputSchema(name: AgentTool): Record<string, unknown> {
   const base = { baseRevisionId: id, evidenceRefs };
   if (name === "inspect_scene" || name === "inspect_screenshot") return { type: "object", properties: { sceneId: id }, required: ["sceneId"], additionalProperties: false };
   if (name === "inspect_capture") return { type: "object", properties: { captureId: id }, required: ["captureId"], additionalProperties: false };
-  if (name === "create_scene") return { type: "object", properties: { ...base, scene: { type: "object", description: "Full scene record: id, sceneKey, captureId, actionIds, checkpointActionId, sourceInMs, sourceOutMs, speed, order, transition." } }, required: ["baseRevisionId", "evidenceRefs", "scene"], additionalProperties: false };
-  if (name === "trim_scene") return { type: "object", properties: { ...base, sceneId: id, sourceInMs: { type: "integer", minimum: 0 }, sourceOutMs: { type: "integer", minimum: 1 } }, required: ["baseRevisionId", "evidenceRefs", "sceneId", "sourceInMs", "sourceOutMs"], additionalProperties: false };
-  if (name === "reorder_scene") return { type: "object", properties: { ...base, sceneIds: { type: "array", minItems: 1, items: id, description: "Every scene ID exactly once, in the new order." } }, required: ["baseRevisionId", "evidenceRefs", "sceneIds"], additionalProperties: false };
-  if (name === "replace_capture") return { type: "object", properties: { ...base, sceneId: id, captureId: id, changedStepIds: { type: "array", items: id }, reason: { type: "string", minLength: 1, maxLength: 500 } }, required: ["baseRevisionId", "evidenceRefs", "sceneId", "captureId", "reason"], additionalProperties: false };
-  if (name === "set_speed") return { type: "object", properties: { ...base, sceneId: id, speed: { type: "number", enum: [0.75, 1, 1.25, 1.5, 2] } }, required: ["baseRevisionId", "evidenceRefs", "sceneId", "speed"], additionalProperties: false };
-  if (name === "set_focus") return { type: "object", properties: { ...base, sceneId: id, focus: { type: "object", description: "Focus record: preset none/box/zoom, bounds, startMs, endMs." } }, required: ["baseRevisionId", "evidenceRefs", "sceneId", "focus"], additionalProperties: false };
-  if (name === "set_title" || name === "set_callout") return { type: "object", properties: { ...base, overlay: { type: "object", description: "Overlay record: id, sceneId, kind, text, placement, startMs, endMs." } }, required: ["baseRevisionId", "evidenceRefs", "overlay"], additionalProperties: false };
-  if (name === "set_transition") return { type: "object", properties: { ...base, sceneId: id, transition: { type: "object", description: "Transition record: type cut/crossfade, durationMs 0/250/500." } }, required: ["baseRevisionId", "evidenceRefs", "sceneId", "transition"], additionalProperties: false };
+  if (isEditTool(name)) {
+    const schema = z.toJSONSchema(EditOperationSchemas[name]) as Record<string, any>;
+    delete schema.properties.type;
+    schema.required = ["baseRevisionId", "evidenceRefs", ...(schema.required as string[]).filter((field) => field !== "type")];
+    schema.properties = { ...base, ...schema.properties };
+    return schema;
+  }
   return { type: "object", properties: {}, additionalProperties: false };
 }
 
@@ -207,46 +208,6 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function validEvidence(value: unknown): value is string[] {
   return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && /^(capture|screenshot|verification):[A-Za-z0-9._:-]+$/.test(item));
-}
-
-/** Handles disclosed by prior inspections in logs/disclosures.jsonl (best effort). */
-function readDisclosures(root: string): Set<string> {
-  const disclosed = new Set<string>();
-  if (!root) return disclosed;
-  let lines: string[];
-  try {
-    lines = readFileSync(join(root, "logs", "disclosures.jsonl"), "utf8").split(/\r?\n/);
-  } catch {
-    return disclosed;
-  }
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const record = JSON.parse(line) as { artifactIds?: unknown };
-      if (Array.isArray(record.artifactIds)) {
-        for (const id of record.artifactIds) if (typeof id === "string") disclosed.add(id);
-      }
-    } catch {
-      continue;
-    }
-  }
-  return disclosed;
-}
-
-/** Rejects fabricated handles: every edit reference must have been disclosed or resolve to real evidence. */
-function isGroundedEvidenceRef(project: Project, root: string, disclosed: Set<string>, ref: string): boolean {
-  if (disclosed.has(ref)) return true;
-  if (ref.startsWith("capture:")) return project.captures[ref.slice("capture:".length)] !== undefined;
-  if (ref.startsWith("verification:")) {
-    return existsSync(join(root, "verification", `${ref.slice("verification:".length)}.json`));
-  }
-  if (ref.startsWith("screenshot:")) {
-    const sceneId = ref.slice("screenshot:".length).split(":")[0];
-    const scene = project.scenes.find((candidate) => candidate.id === sceneId);
-    if (!scene) return false;
-    return existsSync(join(root, "screenshots", `${scene.sceneKey}-before.png`)) || existsSync(join(root, "screenshots", `${scene.sceneKey}-after.png`));
-  }
-  return false;
 }
 
 function containsSecret(value: unknown): boolean {

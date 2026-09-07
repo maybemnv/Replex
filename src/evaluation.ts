@@ -109,7 +109,7 @@ export function writeEvaluation(root: string, rows: EvaluationRow[], input: Eval
   const summaryPath = join(root, "summary.json");
   const decisionPath = join(root, "decision.md");
   writeJson(rowsPath, { rows });
-  writeJson(summaryPath, { decision, rows });
+  writeJson(summaryPath, { decision, rowsPath: "rows.json" });
   writeText(decisionPath, `# POC evaluation decision\n\nDecision: **${decision.decision}**\n\nProduction authorization: **no**\n\nMissing evidence:\n${list(decision.missing)}\n\nFailed gates:\n${list(decision.failed)}\n`);
   return { rowsPath, summaryPath, decisionPath, decision };
 }

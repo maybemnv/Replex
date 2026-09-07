@@ -75,7 +75,7 @@ export interface CaptureResult {
   run: { id: string; attempt: number; startedAt: string; endedAt: string; status: "passed" };
   runPath: string;
   rawVideoPath: string;
-  tracePath: string;
+  tracePath?: string;
   logs: { actionsPath: string; consolePath: string };
   actionEvents: Array<{
     actionId: string;
@@ -115,6 +115,10 @@ export function fingerprintCapture(
     .update(bytes)
     .update(JSON.stringify(provenance))
     .digest("hex");
+}
+
+export function artifactSceneKey(sceneKey: string): string {
+  return Buffer.from(sceneKey, "utf8").toString("hex");
 }
 
 export function browserContextOptions(environment: Environment) {
@@ -395,6 +399,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   const actionEvents: CaptureResult["actionEvents"] = [];
   const scenePlan = buildScenePlan(flow);
   const tracePath = join(runRoot, "traces", "trace.zip");
+  const retainTrace = !options.storageStatePath;
   const artifacts: CaptureResult["artifacts"] = [];
   let contextClosed = false;
   let logsWritten = false;
@@ -411,7 +416,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
         : undefined,
     });
     context = activeContext;
-    await activeContext.tracing.start({ screenshots: true, snapshots: true });
+    if (retainTrace) await activeContext.tracing.start({ screenshots: true, snapshots: true });
     const activePage = await activeContext.newPage();
     page = activePage;
     activePage.setDefaultTimeout(5_000);
@@ -450,7 +455,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     for (const step of flow.steps) {
       currentActionId = step.id;
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
-        const path = join(runRoot, "screenshots", `${step.sceneKey}-before.png`);
+        const path = join(runRoot, "screenshots", `${artifactSceneKey(step.sceneKey)}-before.png`);
         await writeImmutableArtifact(path, await activePage.screenshot());
         artifacts.push({ sceneKey: step.sceneKey, boundary: "before", path });
         startedScenes.add(step.sceneKey);
@@ -484,13 +489,13 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       });
       const scene = scenePlan.find((candidate) => candidate.checkpointActionId === step.id);
       if (scene) {
-        const path = join(runRoot, "screenshots", `${scene.sceneKey}-after.png`);
+        const path = join(runRoot, "screenshots", `${artifactSceneKey(scene.sceneKey)}-after.png`);
         await writeImmutableArtifact(path, await activePage.screenshot());
         artifacts.push({ sceneKey: scene.sceneKey, boundary: "after", path });
       }
     }
     if (runtimeOriginError) throw runtimeOriginError;
-    await activeContext.tracing.stop({ path: tracePath });
+    if (retainTrace) await activeContext.tracing.stop({ path: tracePath });
     await activeContext.close();
     contextClosed = true;
     await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
@@ -505,7 +510,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       run: { id: runId, attempt, startedAt, endedAt, status: "passed" },
       runPath,
       rawVideoPath,
-      tracePath,
+      ...(retainTrace ? { tracePath } : {}),
       logs: { actionsPath: actionLogPath, consolePath: consoleLogPath },
       actionEvents,
       captures,
@@ -549,15 +554,17 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
           ...(screenshotError ? { screenshotError } : {}),
         }, null, 2)),
       );
-      try {
-        await context.tracing.stop({ path: tracePath });
-        failure.tracePath = tracePath;
-      } catch {
-        if (existsSync(tracePath)) failure.tracePath = tracePath;
+      if (retainTrace) {
+        try {
+          await context.tracing.stop({ path: tracePath });
+          failure.tracePath = tracePath;
+        } catch {
+          if (existsSync(tracePath)) failure.tracePath = tracePath;
+        }
       }
       failure.evidencePath = evidencePath;
       failure.runPath = runPath;
-    } else if (existsSync(tracePath)) {
+    } else if (retainTrace && existsSync(tracePath)) {
       failure.tracePath = tracePath;
     }
     if (!logsWritten) {
@@ -597,8 +604,9 @@ async function splitSourceCaptures(
   for (const scene of deriveSceneBoundaries(scenes, events, rawProbe.durationSeconds)) {
     assertSceneKey(scene.sceneKey, scene.checkpointActionId);
     const durationSeconds = Math.max(0.05, scene.endSeconds - scene.startSeconds);
-    const sourcePath = join(runRoot, "captures", `${scene.sceneKey}.webm`);
-    const temporaryPath = join(runRoot, "captures", `${scene.sceneKey}.${randomUUID()}.tmp.webm`);
+    const fileKey = artifactSceneKey(scene.sceneKey);
+    const sourcePath = join(runRoot, "captures", `${fileKey}.webm`);
+    const temporaryPath = join(runRoot, "captures", `${fileKey}.${randomUUID()}.tmp.webm`);
     await mkdir(dirname(temporaryPath), { recursive: true });
     const result = spawnSync(
       ffmpeg,
