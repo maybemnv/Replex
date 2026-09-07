@@ -61,7 +61,7 @@ export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> 
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
   const args = name === "chromium"
-    ? ["--headless=new", "--no-sandbox", "--disable-gpu", "--dump-dom", "data:text/html,<script>document.write(navigator.userAgent)</script>"]
+    ? ["--headless=new", "--disable-gpu", "--dump-dom", "data:text/html,<script>document.write(navigator.userAgent)</script>"]
     : ["-version"];
   const result = spawnSync(path, args, {
     encoding: "utf8",
