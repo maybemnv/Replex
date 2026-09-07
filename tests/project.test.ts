@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -144,6 +144,20 @@ describe("project persistence", () => {
     expect(normalizeCapturePath(root, join(root, "captures", "open.webm"))).toBe("captures/open.webm");
     expect(() => normalizeCapturePath(root, join(tmpdir(), "elsewhere", "open.webm"))).toThrow("escapes the project root");
     expect(() => normalizeCapturePath(root, "../outside.webm")).toThrow("project-relative");
+  });
+
+  it("rejects capture paths that escape through a junction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-project-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "replex-project-outside-"));
+    try {
+      await mkdir(join(root, "captures"));
+      await writeFile(join(outside, "outside.webm"), "outside");
+      await symlink(outside, join(root, "captures", "link"), "junction");
+      expect(() => normalizeCapturePath(root, join(root, "captures", "link", "outside.webm"))).toThrow("escapes the project root");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("binds derived capture IDs to immutable media", () => {
