@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
+import { artifactSceneKey } from "../src/capture.js";
 import { inspectProject } from "../src/inspect.js";
 import { createProject } from "../src/project.js";
 
@@ -49,13 +50,15 @@ describe("bounded inspection", () => {
     try {
       const source = project();
       await mkdir(join(root, "traces"), { recursive: true });
-      await mkdir(join(root, "screenshots"), { recursive: true });
+      const screenshotPath = `capture-runs/run-0/screenshots/${artifactSceneKey("open-demo")}-after.png`;
+      await mkdir(join(root, "capture-runs", "run-0", "screenshots"), { recursive: true });
       await mkdir(join(root, "verification"), { recursive: true });
       await writeFile(join(root, "traces", "trace.zip"), "trace");
-      await writeFile(join(root, "screenshots", "open-demo-after.png"), "image");
+      await writeFile(join(root, screenshotPath), "image");
+      source.captures[source.scenes[0].captureId].screenshotPath = screenshotPath;
       await writeFile(join(root, "verification", "revision-0.json"), "{}");
       expect(inspectProject(source, root, { kind: "inspect_browser_trace" })).toMatchObject({ ok: true, artifacts: [{ id: "trace:latest" }] });
-      expect(inspectProject(source, root, { kind: "inspect_screenshot", sceneId: source.scenes[0].id })).toMatchObject({ ok: true, artifacts: [{ id: `screenshot:${source.scenes[0].id}:after` }] });
+      expect(inspectProject(source, root, { kind: "inspect_screenshot", sceneId: source.scenes[0].id })).toMatchObject({ ok: true, artifacts: [{ id: `screenshot:${source.scenes[0].id}:after`, path: screenshotPath }] });
       expect(inspectProject(source, root, { kind: "inspect_verification_results" })).toMatchObject({ ok: true, artifacts: [{ id: "verification:revision-0" }] });
     } finally {
       await rm(root, { recursive: true, force: true });

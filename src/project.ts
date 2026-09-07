@@ -27,6 +27,7 @@ export type ProjectCaptureInput = {
   sceneKey: string;
   sourcePath?: string;
   path?: string;
+  screenshotPath?: string;
   /** Project root used to relativize absolute capture-layer outputs. */
   root?: string;
   runId?: string;
@@ -58,6 +59,7 @@ export function capturesFromRun(run: CaptureResult): { root: string; captures: P
       id: `capture-${capture.sceneKey}-${capture.runId}`,
       sceneKey: capture.sceneKey,
       path: relative(root, capture.sourcePath).replace(/\\/g, "/"),
+      ...afterScreenshot(run, capture.sceneKey, root, root),
       runId: capture.runId,
       actionIds: capture.actionIds,
       checkpointActionId: capture.checkpointActionId,
@@ -75,7 +77,7 @@ export function materializeCaptureRun(root: string, project: Project, run: Captu
   const captured = capturesFromRun(run);
   let captures: Array<ProjectCaptureInput & { path: string }> = captured.captures.map((capture) => {
     if (!capture.path) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
-    return { ...capture, path: projectRelativePath(root, captured.root, capture.path) };
+    return { ...capture, path: projectRelativePath(root, captured.root, capture.path), ...(capture.screenshotPath ? { screenshotPath: projectRelativePath(root, captured.root, capture.screenshotPath) } : {}) };
   });
   if (media?.targetTotalSeconds) {
     captures = normalizeRunMedia(root, captures, {
@@ -289,6 +291,7 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     actionIds,
     checkpointActionId,
     path,
+    ...(input.screenshotPath ? { screenshotPath: input.root ? normalizeCapturePath(input.root, input.screenshotPath) : requireProjectRelativePath(input.screenshotPath) } : {}),
     sha256,
     durationMs: input.durationMs,
     width: input.width ?? environment.viewport.width,
@@ -337,6 +340,7 @@ function requireProjectRelativePath(inputPath: string): string {
 /** Minimal immutable capture-run shape needed to build project inputs. */
 export interface CaptureRunSummary {
   runPath: string;
+  artifacts?: Array<{ sceneKey: string; boundary: "before" | "after"; path: string }>;
   captures: Array<{
     sceneKey: string;
     sourcePath: string;
@@ -359,6 +363,7 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
       id: deriveCaptureId(capture.sceneKey, capture.runId, capture.sha256),
       sceneKey: capture.sceneKey,
       path: normalizeCapturePath(root, isAbsolute(capture.sourcePath) ? capture.sourcePath : resolve(runRoot, capture.sourcePath)),
+      ...afterScreenshot(run, capture.sceneKey, root, runRoot),
       root,
       runId: capture.runId,
       actionIds: capture.actionIds,
@@ -370,6 +375,11 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
       fps: 30 as const,
     })),
   };
+}
+
+function afterScreenshot(run: Pick<CaptureRunSummary, "artifacts">, sceneKey: string, root: string, runRoot: string): { screenshotPath?: string } {
+  const path = run.artifacts?.find((artifact) => artifact.sceneKey === sceneKey && artifact.boundary === "after")?.path;
+  return path ? { screenshotPath: normalizeCapturePath(root, isAbsolute(path) ? path : resolve(runRoot, path)) } : {};
 }
 
 async function writeAtomic(path: string, contents: string): Promise<void> {

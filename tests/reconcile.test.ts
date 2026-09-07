@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,20 @@ describe("selective recapture reconciliation", () => {
       expect(project.scenes[0].captureId).toBe("capture-0");
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a project-relative replacement through a junction", async () => {
+    const { root, project } = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), "replex-recapture-outside-"));
+    try {
+      await writeFile(join(outside, "outside.mp4"), "outside");
+      await symlink(outside, join(root, "captures", "link"), "junction");
+      const result = reconcileCapture(project, root, { id: "capture-outside", sceneKey: "open-demo", path: "captures/link/outside.mp4", durationMs: 10000, sha256: createHash("sha256").update("outside").digest("hex"), changedStepIds: [project.scenes[0].checkpointActionId], reason: "outside" });
+      expect(result).toMatchObject({ ok: false, code: "INVALID_RECAPTURE" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

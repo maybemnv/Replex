@@ -169,6 +169,7 @@ describe("project persistence", () => {
 
     const adapted = captureInputFromResult(resolve(tmpdir(), "replex-project-root"), {
       runPath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "run.json"),
+      artifacts: [{ sceneKey: "open-demo", boundary: "after", path: join(resolve(tmpdir(), "replex-project-root"), "run-id", "screenshots", "6f70656e2d64656d6f-after.png") }],
       captures: [{
         sceneKey: "open-demo",
         sourcePath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "captures", "open-demo.webm"),
@@ -183,6 +184,7 @@ describe("project persistence", () => {
     });
     expect(adapted.captures[0].id).toBe(deriveCaptureId("open-demo", "run-one", "a".repeat(64)));
     expect(adapted.captures[0].path).toBe("run-id/captures/open-demo.webm");
+    expect(adapted.captures[0].screenshotPath).toBe("run-id/screenshots/6f70656e2d64656d6f-after.png");
   });
 });
 

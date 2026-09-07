@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { probeVideo } from "./capture.js";
+import { normalizeCapturePath } from "./project.js";
 import type { Capture, Project } from "./schema.js";
 import { applyOperations } from "./operations.js";
 
@@ -26,7 +27,10 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   if (!target) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture scene key does not exist" };
   const previous = project.captures[target.captureId];
   if (!previous || input.id === previous.id || input.durationMs <= 0 || !input.changedStepIds.length) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture metadata is incomplete" };
-  const sourcePath = safePath(root, input.path);
+  let normalizedPath: string;
+  try { normalizedPath = normalizeCapturePath(root, input.path); }
+  catch { return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture path escapes the project root" }; }
+  const sourcePath = resolve(root, normalizedPath);
   if (!sourcePath || !existsSync(sourcePath) || hashFileSync(sourcePath) !== input.sha256) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture is missing or does not match its SHA-256" };
   let media: ReturnType<typeof probeVideo>;
   try {
@@ -45,7 +49,7 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
     ...previous,
     id: input.id,
     sceneKey: input.sceneKey,
-    path: input.path,
+    path: normalizedPath,
     sha256: input.sha256,
     durationMs: mediaDurationMs,
     predecessorId: previous.id,
@@ -71,12 +75,6 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
     return { ok: false, code: "PRESERVATION_MISMATCH", detail: `operation log cannot be validated: ${error instanceof Error ? error.message : String(error)}` };
   }
   return { ok: true, project: persisted.project, preserved: true };
-}
-
-function safePath(root: string, value: string): string | undefined {
-  if (isAbsolute(value) || value.includes("..")) return undefined;
-  const resolved = resolve(root, value);
-  return relative(resolve(root), resolved).startsWith("..") ? undefined : resolved;
 }
 
 function hashFileSync(path: string): string | undefined {
