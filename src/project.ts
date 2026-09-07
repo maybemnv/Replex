@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
 import {
@@ -144,10 +145,10 @@ export async function writeRevision(
     const staged = await readFile(revisionPath, "utf8");
     if (staged !== serialized) throw new Error(`revision already exists: ${canonicalProject.currentRevisionId}`);
   } else {
-    await writeDurable(revisionPath, serialized);
+    await writeAtomic(revisionPath, serialized);
   }
   if (options.interruptBeforeCommit) throw new Error("simulated interruption");
-  await writeDurable(join(root, "project.json"), serialized);
+  await writeAtomic(join(root, "project.json"), serialized);
 }
 
 export async function loadProject(root: string): Promise<Project> {
@@ -209,6 +210,10 @@ export function normalizeCapturePath(root: string, inputPath: string): string {
     if (!relation || relation.startsWith("..") || isAbsolute(relation)) {
       throw new Error("capture path escapes the project root");
     }
+    if (existsSync(base) && existsSync(resolved)) {
+      const realRelation = relative(realpathSync(base), realpathSync(resolved));
+      if (!realRelation || realRelation.startsWith("..") || isAbsolute(realRelation)) throw new Error("capture path escapes the project root");
+    }
     return relation.replace(/\\/g, "/");
   }
   return requireProjectRelativePath(inputPath);
@@ -259,7 +264,7 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
   };
 }
 
-async function writeDurable(path: string, contents: string): Promise<void> {
+async function writeAtomic(path: string, contents: string): Promise<void> {
   const temporary = join(dirname(path), `.${parsePath(path).base}.${randomUUID()}.tmp`);
   let committed = false;
   try {
