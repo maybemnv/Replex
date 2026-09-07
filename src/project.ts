@@ -316,20 +316,15 @@ export function deriveCaptureId(sceneKey: string, runId: string, sha256: string)
 
 /** Relativizes an absolute capture-layer output against the project root. */
 export function normalizeCapturePath(root: string, inputPath: string): string {
-  if (isAbsolute(inputPath)) {
-    const base = resolve(root);
-    const resolved = resolve(inputPath);
-    const relation = relative(base, resolved);
-    if (!relation || relation.startsWith("..") || isAbsolute(relation)) {
-      throw new Error("capture path escapes the project root");
-    }
-    if (existsSync(base) && existsSync(resolved)) {
-      const realRelation = relative(realpathSync(base), realpathSync(resolved));
-      if (!realRelation || realRelation.startsWith("..") || isAbsolute(realRelation)) throw new Error("capture path escapes the project root");
-    }
-    return relation.replace(/\\/g, "/");
+  const base = resolve(root);
+  const resolved = isAbsolute(inputPath) ? resolve(inputPath) : resolve(base, requireProjectRelativePath(inputPath));
+  const relation = relative(base, resolved);
+  if (!relation || relation.startsWith("..") || isAbsolute(relation)) throw new Error("capture path escapes the project root");
+  if (existsSync(base) && existsSync(resolved)) {
+    const realRelation = relative(realpathSync(base), realpathSync(resolved));
+    if (!realRelation || realRelation.startsWith("..") || isAbsolute(realRelation)) throw new Error("capture path escapes the project root");
   }
-  return requireProjectRelativePath(inputPath);
+  return relation.replace(/\\/g, "/");
 }
 
 function requireProjectRelativePath(inputPath: string): string {
