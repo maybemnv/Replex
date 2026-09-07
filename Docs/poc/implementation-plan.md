@@ -35,7 +35,7 @@ The only tension is that the PRD labels model use optional where reasoning is un
 | Media | System FFmpeg/ffprobe, checked at startup and version-recorded | No render engine or binary packaging in POC. |
 | Model | One Claude tool-use client called from `agent-draft` | No provider interface, router, agents, or fallback model. |
 | Review | Generated local HTML report using escaped HTML and native video controls | Avoids a frontend framework while exposing required evidence. |
-| Persistence | Atomic JSON revisions plus immutable files on local disk | Enough to inspect, reproduce, and recover the POC. |
+| Persistence | Temp-and-rename JSON revisions plus immutable files on local disk | Enough to inspect and reproduce the POC; process-crash recovery remains a production gate. |
 
 Pin exact dependency versions in the lockfile when execution begins. Do not create a monorepo or reusable SDK.
 
@@ -136,7 +136,7 @@ interface VerificationResult { phase:"capture"|"project"|"render"|"reconcile"; p
 
 ## Deterministic Operation Contract
 
-All operations parse with a discriminated Zod union, validate against the source revision, apply through one pure `applyOperation(project, operation)` reducer, then atomically write a new revision. On failure: return a typed error, append a rejected-call audit event, and leave current state unchanged. Replay from the same revision and ordered operations must yield the same semantic manifest hash.
+All operations parse with a discriminated Zod union, validate against the source revision, and apply through one pure `applyOperation(project, operation)` reducer. Validation and caught write failures leave current state unchanged; the POC does not claim recovery from process termination between grouped file renames. Replay from the same revision and ordered operations must yield the same semantic manifest hash.
 
 | Operation | Validation and mutation | Reversible in POC |
 |---|---|---|

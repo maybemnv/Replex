@@ -340,7 +340,7 @@ Initial scene order follows flow order. Default ranges use the full successful c
 
 **Interface:** `applyOperations(baseRevisionId, operations, actor) -> AcceptedRevision | OperationRejection`.
 
-Structural Zod validation checks discriminants, required/unknown fields, ID syntax, enums, string lengths, finite integer milliseconds, normalized coordinates, and numeric ranges. Semantic validation then loads the base revision and checks entity existence, capture success/probe, source bounds, positive derived duration, exact-set reorder, overlay/focus range and safe area, transition neighbors/duration, 25-35 second result, and current-revision precondition. Only after both pass does the pure reducer compute the next manifest and the project writer atomically commit it.
+Structural Zod validation checks discriminants, required/unknown fields, ID syntax, enums, string lengths, finite integer milliseconds, normalized coordinates, and numeric ranges. Semantic validation then loads the base revision and checks entity existence, capture success/probe, source bounds, positive derived duration, exact-set reorder, overlay/focus range and safe area, transition neighbors/duration, 25-35 second result, and current-revision precondition. Only after both pass does the pure reducer compute the next manifest. The POC writer rolls back caught write failures; crash recovery across grouped file renames is deferred to the production persistence gate.
 
 Operation semantics:
 

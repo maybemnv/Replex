@@ -82,7 +82,8 @@ export function inspectProject(project: Project, root: string, request: Inspecti
     case "inspect_screenshot": {
       const scene = project.scenes.find((candidate) => candidate.id === request.sceneId);
       if (!scene) return { ok: false, code: "NOT_FOUND", detail: "scene does not exist" };
-      const path = `screenshots/${scene.sceneKey}-after.png`;
+      const path = project.captures[scene.captureId]?.screenshotPath;
+      if (!path) return { ok: false, code: "NOT_FOUND", detail: "targeted screenshot was not recorded for this capture" };
       if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "targeted screenshot does not exist" };
       summary = `Targeted post-checkpoint screenshot is available for scene ${scene.id}.`;
       artifacts = [{ id: `screenshot:${scene.id}:after`, path, kind: "screenshot" }];
