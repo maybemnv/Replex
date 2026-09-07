@@ -190,8 +190,8 @@ async function loadProjectForCommand(args: ParsedArgs) {
   return { root, project: await loadProject(root) };
 }
 
-function printJson(io: CliIO, value: unknown): void {
-  io.stdout(`${JSON.stringify(value)}\n`);
+function printJson(io: CliIO, value: unknown, tools?: StartupToolStatus[]): void {
+  io.stdout(`${JSON.stringify(tools ? { ...value as object, tools } : value)}\n`);
 }
 
 async function executeRenderCommand(
@@ -378,9 +378,13 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     const startup = checkStartupTools(options.toolPaths);
     if (!startup.ok) throw new StartupCheckError(startup);
 
-    const exitCode = await executeCommand(command as Command, args, options, io);
-    if (exitCode === 0) printJson(io, { command, status: "ready", tools: startup.tools });
-    return exitCode;
+    return executeCommand(command as Command, args, { ...options, toolPaths: options.toolPaths }, {
+      ...io,
+      stdout: (text) => {
+        const value = JSON.parse(text) as object;
+        printJson(io, value, startup.tools);
+      },
+    });
   } catch (error) {
     const payload = errorPayload(error);
     io.stderr(JSON.stringify({ error: payload }) + "\n");

@@ -41,6 +41,22 @@ describe("CLI", () => {
     expect(output.stdout).toContain("report");
   });
 
+  it("emits one authoritative JSON result with startup metadata", async () => {
+    const { output, io } = captureOutput();
+    const exitCode = await runCli(["verify"], {
+      io,
+      toolPaths: {
+        chromium: "C:/missing/chromium.exe",
+        ffmpeg: "C:/missing/ffmpeg.exe",
+        ffprobe: "C:/missing/ffprobe.exe",
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.stdout).toBe("");
+    expect(output.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
   it("returns a typed failure naming every missing startup tool", async () => {
     const { output, io } = captureOutput();
 
@@ -196,7 +212,9 @@ describe("CLI", () => {
         const revisionPath = join(root, "revisions", `${materialized.currentRevisionId}.json`);
         await expect(readFile(revisionPath, "utf8")).resolves.toBe(await readFile(join(root, "project.json"), "utf8"));
         const response = output.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(response).toHaveLength(1);
         expect(response[0]).toMatchObject({ command: "capture", status: "completed" });
+        expect(response[0].tools).toEqual(expect.any(Array));
         expect(response[0].revisionId).toBe(materialized.currentRevisionId);
         expect(new Set((response[0].captures as Array<{ path: string }>).map(({ path }) => path)))
           .toEqual(new Set(Object.values(materialized.captures).map((capture) => capture.path)));

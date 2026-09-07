@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "fixtures": "tsx fixtures/operator.ts"
   },
   "dependencies": {
     "@playwright/test": "^1.55.0",
