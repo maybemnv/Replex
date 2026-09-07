@@ -13,6 +13,7 @@ import {
   type Scene,
 } from "./schema.js";
 import { semanticHash } from "./project.js";
+import { canonicalJson } from "./canonical-json.js";
 
 export type { EditOperation } from "./schema.js";
 
@@ -25,6 +26,7 @@ export interface ApplyOperationsOptions {
   artifactRoot?: string;
   operationsPath?: string;
   createdAt?: string;
+  interruptAfterWrite?: number;
 }
 
 export type OperationResult =
@@ -325,17 +327,6 @@ function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
 
 function formatZodError(error: { issues: Array<{ path: PropertyKey[]; message: string }> }): string {
   return error.issues.map((issue) => `${issue.path.join(".") || "operation"}: ${issue.message}`).join("; ");
@@ -397,16 +388,33 @@ function persistAccepted(
   }));
   for (const record of records) OperationRecordSchema.parse(record);
   const path = options.operationsPath ?? (root ? join(root, "operations.jsonl") : undefined);
-  if (path) {
-    for (const record of records) appendJsonLine(path, record);
-  }
+  const writes: Array<{ path: string; contents: string }> = [];
+  if (path) writes.push({ path, contents: `${existsSync(path) ? readFileSync(path, "utf8") : ""}${records.map((record) => JSON.stringify(record)).join("\n")}\n` });
   if (root) {
     const serialized = `${JSON.stringify(project, null, 2)}\n`;
     const revisionPath = join(root, "revisions", `${revisionId}.json`);
     mkdirSync(dirname(revisionPath), { recursive: true });
-    if (!existsSync(revisionPath)) atomicWrite(revisionPath, serialized);
-    else if (readFileSync(revisionPath, "utf8") !== serialized) throw new Error(`revision already exists: ${revisionId}`);
-    atomicWrite(join(root, "project.json"), serialized);
+    if (existsSync(revisionPath) && readFileSync(revisionPath, "utf8") !== serialized) throw new Error(`revision already exists: ${revisionId}`);
+    writes.push({ path: revisionPath, contents: serialized }, { path: join(root, "project.json"), contents: serialized });
+  }
+  writeSetAtomic(writes, options.interruptAfterWrite);
+}
+
+function writeSetAtomic(writes: Array<{ path: string; contents: string }>, interruptAfterWrite?: number): void {
+  const originals = new Map(writes.map(({ path }) => [path, existsSync(path) ? readFileSync(path) : undefined]));
+  try {
+    for (const [index, write] of writes.entries()) {
+      atomicWrite(write.path, write.contents);
+      if (interruptAfterWrite === index + 1) throw new Error("simulated grouped-write interruption");
+    }
+  } catch (error) {
+    for (const { path } of writes) {
+      const original = originals.get(path);
+      if (original === undefined) {
+        if (existsSync(path)) unlinkSync(path);
+      } else atomicWrite(path, original);
+    }
+    throw error;
   }
 }
 
@@ -415,7 +423,7 @@ function appendJsonLine(path: string, value: unknown): void {
   appendFileSync(path, `${JSON.stringify(value)}\n`, "utf8");
 }
 
-function atomicWrite(path: string, contents: string): void {
+function atomicWrite(path: string, contents: string | Buffer): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${parsePath(path).base}.${randomUUID()}.tmp`);
   try {

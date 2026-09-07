@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
 import type { CaptureResult } from "./capture.js";
 import { probeVideo } from "./capture.js";
+import { canonicalJson } from "./canonical-json.js";
 import {
   BriefSchema,
   EnvironmentSchema,
@@ -130,7 +131,8 @@ export function normalizeRunMedia(root: string, captures: Array<ProjectCaptureIn
     const rawPath = capture.path ?? capture.sourcePath;
     if (!rawPath) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
     const inputPath = resolve(root, rawPath);
-    const outputPath = join(root, "captures", `normalized-${capture.sceneKey}.mp4`);
+    const fileKey = Buffer.from(capture.sceneKey, "utf8").toString("hex");
+    const outputPath = join(root, "captures", capture.runId ?? "unknown-run", `normalized-${fileKey}-${capture.sha256?.slice(0, 12) ?? randomUUID()}.mp4`);
     mkdirSync(dirname(outputPath), { recursive: true });
     const run = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i", inputPath, "-t", String(targetSeconds), "-an", "-vf", "fps=30,scale=1920:1080", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", outputPath], { encoding: "utf8", windowsHide: true, shell: false, timeout: 300_000 });
     if (run.status !== 0) throw new Error(`capture media normalization failed: ${(run.stderr || run.error?.message || "ffmpeg failed").trim()}`);
@@ -405,16 +407,4 @@ async function exists(path: string): Promise<boolean> {
 function stripLegacyRevision(project: Project): Record<string, unknown> {
   const { revision: _revision, ...canonical } = project as Project & { revision?: unknown };
   return canonical;
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }

@@ -332,9 +332,10 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
           index += 1;
         }
       } else if (arg === "--project" || arg.startsWith("--project=")) {
-        args.projectRoot = argv[index + 1];
+        const inline = arg.startsWith("--project=") ? arg.slice("--project=".length) : undefined;
+        args.projectRoot = inline ?? argv[index + 1];
         if (!args.projectRoot || args.projectRoot.startsWith("-")) throw usageError("--project requires a path");
-        index += 1;
+        if (inline === undefined) index += 1;
       } else if (argv[index] === "--artifact-root") {
         args.artifactRoot = argv[index + 1];
         if (!args.artifactRoot || args.artifactRoot.startsWith("-")) throw usageError("--artifact-root requires a path");
@@ -378,9 +379,10 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     const startup = checkStartupTools(options.toolPaths);
     if (!startup.ok) throw new StartupCheckError(startup);
 
-    const exitCode = await executeCommand(command as Command, args, options, io);
-    if (exitCode === 0) printJson(io, { command, status: "ready", tools: startup.tools });
-    return exitCode;
+    return executeCommand(command as Command, args, options, {
+      ...io,
+      stdout: (text) => printJson(io, { ...JSON.parse(text), tools: startup.tools }),
+    });
   } catch (error) {
     const payload = errorPayload(error);
     io.stderr(JSON.stringify({ error: payload }) + "\n");

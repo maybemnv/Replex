@@ -3,9 +3,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { deflateSync } from "node:zlib";
 import { ProjectSchema, transitionAdjustedDurationMs, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
 import { semanticHash } from "./project.js";
+import { canonicalJson } from "./canonical-json.js";
 import { loadVerificationResult } from "./verify.js";
 
 export interface RenderJobOverlay {
@@ -15,7 +15,6 @@ export interface RenderJobOverlay {
   placement: Overlay["placement"];
   startMs: number;
   endMs: number;
-  assetPath: string;
 }
 
 export interface RenderJobScene {
@@ -103,7 +102,6 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   const renderRoot = dirname(outputPath);
   mkdirSync(renderRoot, { recursive: true });
   const temporary = `${outputPath}.${job.sha256.slice(0, 12)}.tmp.mp4`;
-  writeOverlayAssets(job, root);
   const argv = buildFfmpegArgv(job, root, temporary);
   const stem = outputPath.slice(0, -4);
   writeFileSync(`${stem}.render-job.json`, `${JSON.stringify(job, null, 2)}\n`, "utf8");
@@ -177,7 +175,6 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
       placement: overlay.placement,
       startMs: overlay.startMs,
       endMs: overlay.endMs,
-      assetPath: overlayAssetPath(overlay),
     })),
     transition: scene.transition,
   };
@@ -185,18 +182,12 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
 
 function buildFfmpegArgv(job: RenderJob, root: string, temporary: string): string[] {
   const sourceInputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
-  const overlays = job.scenes.flatMap((scene) => scene.overlays);
-  const overlayInputs = overlays.flatMap((overlay) => ["-loop", "1", "-framerate", "30", "-t", seconds(overlay.endMs), "-i", resolveProjectPath(root, overlay.assetPath)]);
   const totalSeconds = renderedDurationSeconds(job.scenes);
-  const audioInput = job.scenes.length + overlays.length;
-  let overlayInput = job.scenes.length;
-  const filters = job.scenes.flatMap((scene, index) => {
-    const indexes = scene.overlays.map(() => overlayInput++);
-    return sceneFilters(scene, index, indexes);
-  });
+  const audioInput = job.scenes.length;
+  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index));
   filters.push(...timelineFilters(job.scenes));
   return [
-    "-y", ...sourceInputs, ...overlayInputs,
+    "-y", ...sourceInputs,
     "-f", "lavfi", "-t", seconds(totalSeconds * 1000), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
     "-filter_complex", filters.join(";"),
     "-map", "[video]", "-map", `${audioInput}:a`, "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", temporary,
@@ -225,13 +216,27 @@ function timelineFilters(scenes: RenderJobScene[]): string[] {
   return filters;
 }
 
-function sceneFilters(scene: RenderJobScene, index: number, overlayInputIndexes: number[]): string[] {
-  const focus = focusFilters(scene.focus);
-  const filters = [`[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2${focus}[base${index}]`];
+function sceneFilters(scene: RenderJobScene, index: number): string[] {
+  const input = `[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2`;
+  const filters: string[] = [];
+  if (scene.focus?.preset === "zoom") {
+    const { x, y, width, height } = scene.focus.bounds!;
+    const start = seconds(scene.focus.startMs);
+    const end = seconds(scene.focus.endMs);
+    filters.push(`${input},split=2[plain${index}][zoomSource${index}]`);
+    filters.push(`[zoomSource${index}]crop=${(width * 1920).toFixed(3)}:${(height * 1080).toFixed(3)}:${(x * 1920).toFixed(3)}:${(y * 1080).toFixed(3)},scale=1920:1080[zoom${index}]`);
+    filters.push(`[plain${index}][zoom${index}]overlay=0:0:enable='between(t,${start},${end})'[base${index}]`);
+  } else {
+    filters.push(`${input}${focusFilters(scene.focus)}[base${index}]`);
+  }
   let previous = `base${index}`;
   for (const [overlayIndex, overlay] of scene.overlays.entries()) {
     const next = `overlay${index}_${overlayIndex}`;
-    filters.push(`[${previous}][${overlayInputIndexes[overlayIndex]}:v]overlay=x=0:y=0:eof_action=repeat:enable='between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})'[${next}]`);
+    const y = overlay.placement === "bottom" ? 892 : overlay.placement === "target" ? 476 : 72;
+    const background = overlay.kind === "title" ? "0x111827@0.94" : "0xF5C56B@0.94";
+    const foreground = overlay.kind === "title" ? "white" : "0x111827";
+    const enable = `between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})`;
+    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
     previous = next;
   }
   filters.push(`[${previous}]null[scene${index}]`);
@@ -290,77 +295,9 @@ function renderedDurationSeconds(scenes: RenderJobScene[]): number {
   }))) / 1000;
 }
 
-function writeOverlayAssets(job: RenderJob, root: string): void {
-  for (const overlay of job.scenes.flatMap((scene) => scene.overlays)) {
-    const path = resolveProjectPath(root, overlay.assetPath);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, overlayPng(overlay));
-  }
+function escapeDrawtext(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/%/g, "\\%");
 }
-
-function overlayAssetPath(overlay: Pick<RenderJobOverlay, "id" | "kind" | "text" | "placement">): string {
-  const id = overlay.id.replace(/[^A-Za-z0-9._-]/g, "_") || "overlay";
-  const fingerprint = sha256(canonicalJson(overlay)).slice(0, 16);
-  return `render-assets/${id}-${fingerprint}.png`;
-}
-
-function overlayPng(overlay: RenderJobOverlay): Buffer {
-  const width = 1920;
-  const height = 1080;
-  const pixels = Buffer.alloc(width * height * 4);
-  const y = overlay.placement === "bottom" ? 892 : overlay.placement === "target" ? 476 : 72;
-  const background: [number, number, number] = overlay.kind === "title" ? [17, 24, 39] : [245, 197, 107];
-  const foreground: [number, number, number] = overlay.kind === "title" ? [255, 255, 255] : [17, 24, 39];
-  drawRect(pixels, width, 160, y, 1600, 128, background);
-  drawText(pixels, width, overlay.text, y + 36, foreground);
-  return png(width, height, pixels);
-}
-
-function drawRect(pixels: Buffer, width: number, x: number, y: number, rectangleWidth: number, rectangleHeight: number, color: [number, number, number]): void {
-  for (let row = y; row < y + rectangleHeight; row += 1) for (let column = x; column < x + rectangleWidth; column += 1) setPixel(pixels, width, column, row, color);
-}
-
-function drawText(pixels: Buffer, width: number, value: string, y: number, color: [number, number, number]): void {
-  const glyphs = value.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").slice(0, 35).split("");
-  const scale = 8;
-  const characterWidth = 6 * scale;
-  let x = Math.max(192, Math.floor((1920 - glyphs.length * characterWidth) / 2));
-  for (const character of glyphs) {
-    for (const [row, line] of (FONT[character] ?? FONT[" "]).entries()) for (const [column, bit] of [...line].entries()) if (bit === "1") drawRect(pixels, width, x + column * scale, y + row * scale, scale, scale, color);
-    x += characterWidth;
-  }
-}
-
-function setPixel(pixels: Buffer, width: number, x: number, y: number, color: [number, number, number]): void {
-  const index = (y * width + x) * 4;
-  pixels[index] = color[0]; pixels[index + 1] = color[1]; pixels[index + 2] = color[2]; pixels[index + 3] = 255;
-}
-
-function png(width: number, height: number, pixels: Buffer): Buffer {
-  const rows = Buffer.alloc((width * 4 + 1) * height);
-  for (let row = 0; row < height; row += 1) pixels.copy(rows, row * (width * 4 + 1) + 1, row * width * 4, (row + 1) * width * 4);
-  return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), pngChunk("IHDR", Buffer.from([0, 0, 7, 128, 0, 0, 4, 56, 8, 6, 0, 0, 0])), pngChunk("IDAT", deflateSync(rows)), pngChunk("IEND", Buffer.alloc(0))]);
-}
-
-function pngChunk(type: string, data: Buffer): Buffer {
-  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-  const chunk = Buffer.alloc(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0); body.copy(chunk, 4); chunk.writeUInt32BE(crc32(body), 8 + data.length);
-  return chunk;
-}
-
-function crc32(value: Buffer): number {
-  let crc = 0xffffffff;
-  for (const byte of value) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-const FONT: Record<string, string[]> = {
-  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"], B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"], C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"], D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"], E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"], F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"], G: ["01111", "10000", "10000", "10111", "10001", "10001", "01111"], H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"], I: ["11111", "00100", "00100", "00100", "00100", "00100", "11111"], J: ["00111", "00010", "00010", "00010", "10010", "10010", "01100"], K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"], L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"], M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"], N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"], O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"], P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"], Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"], R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"], S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"], T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"], U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"], V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"], W: ["10001", "10001", "10001", "10101", "10101", "10101", "01010"], X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"], Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"], Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"], "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"], "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"], "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"], "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"], "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"], "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"], "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"], "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"], "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"], "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"], " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
-};
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -376,10 +313,4 @@ function readProjectForRender(root: string): Project {
 
 function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
-  return JSON.stringify(value) ?? "null";
 }

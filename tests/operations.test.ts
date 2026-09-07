@@ -201,6 +201,21 @@ describe("operation reducer", () => {
     }
   });
 
+  it("rolls back audit, revision, and project when a grouped commit is interrupted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-operations-interrupt-"));
+    try {
+      const source = project();
+      const result = applyOperations(source, source.currentRevisionId, [{ type: "trim_scene", sceneId: scene(source).id, sourceInMs: 100, sourceOutMs: 9000 }], { root, interruptAfterWrite: 1 });
+      expect(result).toMatchObject({ ok: false, code: "PERSISTENCE_ERROR" });
+      const audit = await readFile(join(root, "operations.jsonl"), "utf8");
+      expect(audit).toContain('"accepted":false');
+      expect(audit).not.toContain('"accepted":true');
+      await expect(readFile(join(root, "project.json"), "utf8")).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("redacts secret-shaped rejected operation inputs in the audit trail", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-operations-redaction-"));
     try {

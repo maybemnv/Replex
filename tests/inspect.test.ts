@@ -17,15 +17,14 @@ function project() {
 }
 
 describe("bounded inspection", () => {
-  it("returns a capped project summary and disclosure audit", async () => {
+  it("returns one bounded project payload and disclosure audit", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-inspect-"));
     try {
       const source = project();
       const result = inspectProject(source, root, { kind: "inspect_project" });
       expect(result).toMatchObject({ ok: true, truncated: false });
       if (!result.ok) return;
-      expect(result.summary).toContain("inspect-project");
-      expect(result.summary.length).toBeLessThanOrEqual(1000);
+      expect(result.summary).toBeUndefined();
       expect(result.artifacts).toContainEqual(expect.objectContaining({ id: "capture:capture-0", path: "captures/0.mp4" }));
       expect(result.details?.scenes).toContainEqual(expect.objectContaining({ id: source.scenes[0].id, sceneKey: "open-demo", checkpointActionId: "open-release-page" }));
       expect(await readFile(join(root, "logs", "disclosures.jsonl"), "utf8")).toContain('"tool":"inspect_project"');
@@ -79,6 +78,6 @@ describe("bounded inspection", () => {
     const source = project();
     const result = inspectProject({ ...source, brief: { ...source.brief, message: "token=not-for-model" } }, "unused", { kind: "inspect_project" });
     expect(result).toMatchObject({ ok: true });
-    if (result.ok) expect(result.summary).not.toContain("not-for-model");
+    if (result.ok) expect(JSON.stringify(result)).not.toContain("not-for-model");
   });
 });

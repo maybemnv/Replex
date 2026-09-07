@@ -10,9 +10,11 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "fixtures": "tsx fixtures/operator.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "@playwright/test": "^1.55.0",
     "zod": "^4.1.5"
   },
