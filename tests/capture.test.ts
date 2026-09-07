@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import {
   CapturePlanError,
+  artifactSceneKey,
   buildScenePlan,
   fingerprintCapture,
   validateCapturePlan,
@@ -12,6 +13,11 @@ import {
 } from "../src/capture.js";
 
 describe("approved capture plan", () => {
+  it("encodes stable scene keys into collision-free portable filenames", () => {
+    expect(artifactSceneKey("billing:filter")).toMatch(/^[a-f0-9]+$/);
+    expect(artifactSceneKey("CON")).not.toBe("CON");
+    expect(artifactSceneKey("Scene")).not.toBe(artifactSceneKey("scene"));
+  });
   it("rejects duplicate action IDs before execution or scene planning", () => {
     const flow = normalFlow("http://127.0.0.1:4173");
     flow.steps[1] = { ...flow.steps[1], id: flow.steps[0].id };
