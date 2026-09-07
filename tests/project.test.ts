@@ -154,6 +154,7 @@ describe("project persistence", () => {
       await writeFile(join(outside, "outside.webm"), "outside");
       await symlink(outside, join(root, "captures", "link"), "junction");
       expect(() => normalizeCapturePath(root, join(root, "captures", "link", "outside.webm"))).toThrow("escapes the project root");
+      expect(() => normalizeCapturePath(root, "captures/link/outside.webm")).toThrow("escapes the project root");
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
