@@ -192,6 +192,7 @@ export const CaptureSchema = z
     checkpointActionId: IdSchema,
     path: nonEmptyText.refine((path) => !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path) && !path.split(/[\\/]+/).includes(".."), "capture path must be project-relative"),
     screenshotPath: nonEmptyText.refine((path) => !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path) && !path.split(/[\\/]+/).includes(".."), "screenshot path must be project-relative").optional(),
+    tracePath: nonEmptyText.refine((path) => !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path) && !path.split(/[\\/]+/).includes(".."), "trace path must be project-relative").optional(),
     sha256: Sha256Schema,
     durationMs: MillisecondsSchema.refine((value) => value > 0, "capture duration must be positive"),
     width: z.number().int().positive(),

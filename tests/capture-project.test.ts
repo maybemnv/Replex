@@ -12,6 +12,6 @@ describe("capture-to-project bridge", () => {
       actionEvents: [], artifacts: [],
       captures: [{ sceneKey: "open-demo", sourcePath: "C:/work/project/run-1/captures/open-demo.webm", sha256: "a".repeat(64), width: 1920, height: 1080, durationMs: 10000, runId: "run-1", actionIds: ["open"], checkpointActionId: "open" }],
     });
-    expect(result).toMatchObject({ root: "C:/work/project/run-1", captures: [{ path: "captures/open-demo.webm", runId: "run-1", actionIds: ["open"] }] });
+    expect(result).toMatchObject({ root: "C:/work/project/run-1", captures: [{ path: "captures/open-demo.webm", tracePath: "traces/trace.zip", runId: "run-1", actionIds: ["open"] }] });
   });
 });

@@ -49,15 +49,17 @@ describe("bounded inspection", () => {
     const root = await mkdtemp(join(tmpdir(), "replex-inspect-evidence-"));
     try {
       const source = project();
-      await mkdir(join(root, "traces"), { recursive: true });
       const screenshotPath = `capture-runs/run-0/screenshots/${artifactSceneKey("open-demo")}-after.png`;
+      const tracePath = "capture-runs/run-0/traces/trace.zip";
       await mkdir(join(root, "capture-runs", "run-0", "screenshots"), { recursive: true });
+      await mkdir(join(root, "capture-runs", "run-0", "traces"), { recursive: true });
       await mkdir(join(root, "verification"), { recursive: true });
-      await writeFile(join(root, "traces", "trace.zip"), "trace");
       await writeFile(join(root, screenshotPath), "image");
+      await writeFile(join(root, tracePath), "trace");
       source.captures[source.scenes[0].captureId].screenshotPath = screenshotPath;
+      source.captures[source.scenes[0].captureId].tracePath = tracePath;
       await writeFile(join(root, "verification", "revision-0.json"), "{}");
-      expect(inspectProject(source, root, { kind: "inspect_browser_trace" })).toMatchObject({ ok: true, artifacts: [{ id: "trace:latest" }] });
+      expect(inspectProject(source, root, { kind: "inspect_browser_trace" })).toMatchObject({ ok: true, artifacts: [{ id: "trace:latest", path: tracePath }] });
       expect(inspectProject(source, root, { kind: "inspect_screenshot", sceneId: source.scenes[0].id })).toMatchObject({ ok: true, artifacts: [{ id: `screenshot:${source.scenes[0].id}:after`, path: screenshotPath }] });
       expect(inspectProject(source, root, { kind: "inspect_verification_results" })).toMatchObject({ ok: true, artifacts: [{ id: "verification:revision-0" }] });
     } finally {
