@@ -183,7 +183,7 @@ function toolInputSchema(name: AgentTool): Record<string, unknown> {
   const evidenceRefs = { type: "array", minItems: 1, items: { type: "string", pattern: "^(capture|screenshot|verification):[A-Za-z0-9._:-]+$" } };
   const base = { baseRevisionId: id, evidenceRefs };
   if (name === "inspect_scene" || name === "inspect_screenshot") return { type: "object", properties: { sceneId: id }, required: ["sceneId"], additionalProperties: false };
-  if (name === "inspect_capture") return { type: "object", properties: { captureId: id }, required: ["captureId"], additionalProperties: false };
+  if (name === "inspect_capture" || name === "inspect_browser_trace") return { type: "object", properties: { captureId: id }, required: ["captureId"], additionalProperties: false };
   if (isEditTool(name)) {
     const schema = z.toJSONSchema(EditOperationSchemas[name]) as Record<string, any>;
     delete schema.properties.type;

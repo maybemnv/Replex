@@ -41,7 +41,7 @@ describe("bounded inspection", () => {
     const scene = inspectProject(source, "unused", { kind: "inspect_scene", sceneId: source.scenes[0].id });
     expect(scene).toMatchObject({ ok: true, details: { scenes: [expect.objectContaining({ id: source.scenes[0].id, actionIds: ["open-release-page"], checkpoint: expect.objectContaining({ expected: "Release Replay Demo" }) })] } });
     expect(inspectProject(source, "unused", { kind: "inspect_capture", captureId: "missing" })).toMatchObject({ ok: false, code: "NOT_FOUND" });
-    expect(inspectProject(source, "unused", { kind: "inspect_browser_trace" })).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    expect(inspectProject(source, "unused", { kind: "inspect_browser_trace", captureId: source.scenes[0].captureId })).toMatchObject({ ok: false, code: "NOT_FOUND" });
     expect(inspectProject(source, "unused", { kind: "inspect_project", path: "../secrets" } as unknown as { kind: "inspect_project" })).toMatchObject({ ok: false, code: "INVALID_REQUEST" });
   });
 
@@ -59,7 +59,7 @@ describe("bounded inspection", () => {
       source.captures[source.scenes[0].captureId].screenshotPath = screenshotPath;
       source.captures[source.scenes[0].captureId].tracePath = tracePath;
       await writeFile(join(root, "verification", "revision-0.json"), "{}");
-      expect(inspectProject(source, root, { kind: "inspect_browser_trace" })).toMatchObject({ ok: true, artifacts: [{ id: "trace:latest", path: tracePath }] });
+      expect(inspectProject(source, root, { kind: "inspect_browser_trace", captureId: source.scenes[0].captureId })).toMatchObject({ ok: true, artifacts: [{ id: `trace:${source.scenes[0].captureId}`, path: tracePath }] });
       expect(inspectProject(source, root, { kind: "inspect_screenshot", sceneId: source.scenes[0].id })).toMatchObject({ ok: true, artifacts: [{ id: `screenshot:${source.scenes[0].id}:after`, path: screenshotPath }] });
       expect(inspectProject(source, root, { kind: "inspect_verification_results" })).toMatchObject({ ok: true, artifacts: [{ id: "verification:revision-0" }] });
     } finally {
