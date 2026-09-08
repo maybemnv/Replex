@@ -90,7 +90,8 @@ export function inspectProject(project: Project, root: string, request: Inspecti
       break;
     }
     case "inspect_browser_trace": {
-      const path = "traces/trace.zip";
+      const path = Object.values(project.captures).find((capture) => capture.tracePath)?.tracePath;
+      if (!path) return { ok: false, code: "NOT_FOUND", detail: "trace evidence was not recorded for this capture" };
       if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "trace evidence does not exist" };
       summary = "Trace evidence exists. The raw trace remains undisclosed; use the named capture and checkpoint evidence instead.";
       artifacts = [{ id: "trace:latest", path, kind: "trace" }];

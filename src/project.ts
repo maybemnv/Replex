@@ -28,6 +28,7 @@ export type ProjectCaptureInput = {
   sourcePath?: string;
   path?: string;
   screenshotPath?: string;
+  tracePath?: string;
   /** Project root used to relativize absolute capture-layer outputs. */
   root?: string;
   runId?: string;
@@ -60,6 +61,7 @@ export function capturesFromRun(run: CaptureResult): { root: string; captures: P
       sceneKey: capture.sceneKey,
       path: relative(root, capture.sourcePath).replace(/\\/g, "/"),
       ...afterScreenshot(run, capture.sceneKey, root, root),
+      ...captureTrace(run, root, root),
       runId: capture.runId,
       actionIds: capture.actionIds,
       checkpointActionId: capture.checkpointActionId,
@@ -77,7 +79,8 @@ export function materializeCaptureRun(root: string, project: Project, run: Captu
   const captured = capturesFromRun(run);
   let captures: Array<ProjectCaptureInput & { path: string }> = captured.captures.map((capture) => {
     if (!capture.path) throw new Error(`capture path is missing for scene: ${capture.sceneKey}`);
-    return { ...capture, path: projectRelativePath(root, captured.root, capture.path), ...(capture.screenshotPath ? { screenshotPath: projectRelativePath(root, captured.root, capture.screenshotPath) } : {}) };
+    const insideProject = (path: string) => normalizeCapturePath(root, resolve(captured.root, path));
+    return { ...capture, path: insideProject(capture.path), ...(capture.screenshotPath ? { screenshotPath: insideProject(capture.screenshotPath) } : {}), ...(capture.tracePath ? { tracePath: insideProject(capture.tracePath) } : {}) };
   });
   if (media?.targetTotalSeconds) {
     captures = normalizeRunMedia(root, captures, {
@@ -292,6 +295,7 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     checkpointActionId,
     path,
     ...(input.screenshotPath ? { screenshotPath: input.root ? normalizeCapturePath(input.root, input.screenshotPath) : requireProjectRelativePath(input.screenshotPath) } : {}),
+    ...(input.tracePath ? { tracePath: input.root ? normalizeCapturePath(input.root, input.tracePath) : requireProjectRelativePath(input.tracePath) } : {}),
     sha256,
     durationMs: input.durationMs,
     width: input.width ?? environment.viewport.width,
@@ -300,15 +304,6 @@ function normalizeCapture(input: ProjectCaptureInput, flow: Flow, environment: E
     capturedAt,
     ...(input.predecessorId ? { predecessorId: input.predecessorId } : {}),
   };
-}
-
-function projectRelativePath(projectRoot: string, artifactRoot: string, path: string): string {
-  const resolved = resolve(artifactRoot, path);
-  const relativePath = relative(resolve(projectRoot), resolved).replace(/\\/g, "/");
-  if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || relativePath.startsWith("/")) {
-    throw new Error("captured media must be stored inside the project root");
-  }
-  return relativePath;
 }
 
 /** Binds a capture identity to its immutable media instead of trusting caller invention. */
@@ -340,6 +335,7 @@ function requireProjectRelativePath(inputPath: string): string {
 /** Minimal immutable capture-run shape needed to build project inputs. */
 export interface CaptureRunSummary {
   runPath: string;
+  tracePath?: string;
   artifacts?: Array<{ sceneKey: string; boundary: "before" | "after"; path: string }>;
   captures: Array<{
     sceneKey: string;
@@ -364,6 +360,7 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
       sceneKey: capture.sceneKey,
       path: normalizeCapturePath(root, isAbsolute(capture.sourcePath) ? capture.sourcePath : resolve(runRoot, capture.sourcePath)),
       ...afterScreenshot(run, capture.sceneKey, root, runRoot),
+      ...captureTrace(run, root, runRoot),
       root,
       runId: capture.runId,
       actionIds: capture.actionIds,
@@ -380,6 +377,10 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
 function afterScreenshot(run: Pick<CaptureRunSummary, "artifacts">, sceneKey: string, root: string, runRoot: string): { screenshotPath?: string } {
   const path = run.artifacts?.find((artifact) => artifact.sceneKey === sceneKey && artifact.boundary === "after")?.path;
   return path ? { screenshotPath: normalizeCapturePath(root, isAbsolute(path) ? path : resolve(runRoot, path)) } : {};
+}
+
+function captureTrace(run: Pick<CaptureRunSummary, "tracePath">, root: string, runRoot: string): { tracePath?: string } {
+  return run.tracePath ? { tracePath: normalizeCapturePath(root, isAbsolute(run.tracePath) ? run.tracePath : resolve(runRoot, run.tracePath)) } : {};
 }
 
 async function writeAtomic(path: string, contents: string): Promise<void> {

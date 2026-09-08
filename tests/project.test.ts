@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { ProjectSchema } from "../src/schema.js";
-import { captureInputFromResult, createProject, deriveCaptureId, loadProject, normalizeCapturePath, semanticHash, stableSceneId, writeRevision, type ProjectInput } from "../src/project.js";
+import { captureInputFromResult, createProject, deriveCaptureId, loadProject, materializeCaptureRun, normalizeCapturePath, semanticHash, stableSceneId, writeRevision, type ProjectInput } from "../src/project.js";
 
 const origin = "http://127.0.0.1:4173";
 
@@ -161,6 +161,24 @@ describe("project persistence", () => {
     }
   });
 
+  it("rejects a capture run rooted through an in-project junction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-project-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "replex-project-outside-"));
+    try {
+      const runRoot = join(outside, "run-1");
+      await mkdir(join(runRoot, "captures"), { recursive: true });
+      await writeFile(join(runRoot, "run.json"), "{}");
+      await writeFile(join(runRoot, "captures", "open.webm"), "outside");
+      await symlink(outside, join(root, "capture-runs"), "junction");
+      const source = projectWithId("junction-project");
+      const run = { run: { id: "run-1", attempt: 1, startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), status: "passed" as const }, runPath: join(root, "capture-runs", "run-1", "run.json"), rawVideoPath: join(root, "capture-runs", "run-1", "raw.webm"), logs: { actionsPath: "actions", consolePath: "console" }, actionEvents: [], artifacts: [], captures: [{ sceneKey: "open-demo", sourcePath: join(root, "capture-runs", "run-1", "captures", "open.webm"), sha256: "a".repeat(64), width: 1920, height: 1080, durationMs: 10000, runId: "run-1", actionIds: ["open-release-page"], checkpointActionId: "open-release-page" }] };
+      expect(() => materializeCaptureRun(root, source, run)).toThrow("escapes the project root");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it("binds derived capture IDs to immutable media", () => {
     const first = deriveCaptureId("open-demo", "run-one", "a".repeat(64));
     expect(deriveCaptureId("open-demo", "run-one", "a".repeat(64))).toBe(first);
@@ -169,6 +187,7 @@ describe("project persistence", () => {
 
     const adapted = captureInputFromResult(resolve(tmpdir(), "replex-project-root"), {
       runPath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "run.json"),
+      tracePath: join(resolve(tmpdir(), "replex-project-root"), "run-id", "traces", "trace.zip"),
       artifacts: [{ sceneKey: "open-demo", boundary: "after", path: join(resolve(tmpdir(), "replex-project-root"), "run-id", "screenshots", "6f70656e2d64656d6f-after.png") }],
       captures: [{
         sceneKey: "open-demo",
@@ -185,6 +204,7 @@ describe("project persistence", () => {
     expect(adapted.captures[0].id).toBe(deriveCaptureId("open-demo", "run-one", "a".repeat(64)));
     expect(adapted.captures[0].path).toBe("run-id/captures/open-demo.webm");
     expect(adapted.captures[0].screenshotPath).toBe("run-id/screenshots/6f70656e2d64656d6f-after.png");
+    expect(adapted.captures[0].tracePath).toBe("run-id/traces/trace.zip");
   });
 });
 
