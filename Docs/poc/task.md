@@ -2,7 +2,7 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced.
+> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-09: POC-6 through POC-8 are covered by the real FFmpeg render, bounded-inspection, and typed-agent test suites; POC-9 still requires a live model run.
 
 - [x] POC-1: Establish the minimal local runtime
 
@@ -54,7 +54,7 @@
   - Tests: One valid and boundary-invalid case per operation, stale revision, exact-set reorder, replay determinism, atomic batch rejection.
   - Out of scope: Delete, audio mixing, arbitrary effects, plugins, direct JSON editing.
 
-- [ ] POC-6: Produce the non-AI vertical render baseline
+- [x] POC-6: Produce the non-AI vertical render baseline
 
   - Goal: Render a terrible but valid 30-second App A MP4 through manual/hard-coded operations, proving mechanics independently of model quality.
   - Depends on: POC-5.
@@ -64,7 +64,7 @@
   - Tests: Render-job golden, full tiny-fixture render/probe/decode, overlay-boundary frames, missing/corrupt/blank asset blocks render.
   - Out of scope: Interactive preview, timeline, arbitrary FFmpeg/filtergraph, creative scoring.
 
-- [ ] POC-7: Expose bounded inspection tools
+- [x] POC-7: Expose bounded inspection tools
 
   - Goal: Let a model inspect only relevant structured evidence without filesystem or secret access.
   - Depends on: POC-4, POC-6.
@@ -74,7 +74,7 @@
   - Tests: Golden bounded responses, truncation, missing ID, redaction canaries, artifact-disclosure log.
   - Out of scope: Vector search, media transcription, generic query language, MCP server.
 
-- [ ] POC-8: Connect one Claude model to validated tools
+- [x] POC-8: Connect one Claude model to validated tools
 
   - Goal: Execute a bounded real tool loop without creating a second mutation path.
   - Depends on: POC-5, POC-7.

@@ -98,12 +98,12 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   }
   const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-  const font = job.scenes.some((scene) => scene.overlays.length) ? resolveRenderFont() : undefined;
   const outputPath = resolveProjectPath(root, job.output.path);
   const renderRoot = dirname(outputPath);
   mkdirSync(renderRoot, { recursive: true });
   const temporary = `${outputPath}.${job.sha256.slice(0, 12)}.tmp.mp4`;
-  const argv = buildFfmpegArgv(job, root, temporary, font?.file);
+  const overlayAssets = writeOverlayAssets(job, renderRoot, ffmpegPath);
+  const argv = buildFfmpegArgv(job, root, temporary, overlayAssets);
   const stem = outputPath.slice(0, -4);
   writeFileSync(`${stem}.render-job.json`, `${JSON.stringify(job, null, 2)}\n`, "utf8");
   writeFileSync(`${stem}.argv.json`, `${JSON.stringify(argv, null, 2)}\n`, "utf8");
@@ -181,15 +181,19 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
   };
 }
 
-function buildFfmpegArgv(job: RenderJob, root: string, temporary: string, fontFile = "arial.ttf"): string[] {
+function buildFfmpegArgv(job: RenderJob, root: string, temporary: string, overlayAssets: Map<string, string>): string[] {
   const sourceInputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
   const totalSeconds = renderedDurationSeconds(job.scenes);
   const audioInput = job.scenes.length;
-  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index, fontFile));
+  const overlays = job.scenes.flatMap((scene) => scene.overlays);
+  const overlayInputs = overlays.flatMap((overlay) => ["-i", overlayAssets.get(overlay.id)!]);
+  const overlayInputIndexes = new Map(overlays.map((overlay, index) => [overlay.id, audioInput + 1 + index]));
+  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index, overlayInputIndexes));
   filters.push(...timelineFilters(job.scenes));
   return [
     "-y", ...sourceInputs,
     "-f", "lavfi", "-t", seconds(totalSeconds * 1000), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+    ...overlayInputs,
     "-filter_complex", filters.join(";"),
     "-map", "[video]", "-map", `${audioInput}:a`, "-r", "30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", temporary,
   ];
@@ -217,7 +221,7 @@ function timelineFilters(scenes: RenderJobScene[]): string[] {
   return filters;
 }
 
-function sceneFilters(scene: RenderJobScene, index: number, fontFile: string): string[] {
+function sceneFilters(scene: RenderJobScene, index: number, overlayInputIndexes: Map<string, number>): string[] {
   const input = `[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2`;
   const filters: string[] = [];
   if (scene.focus?.preset === "zoom") {
@@ -234,10 +238,11 @@ function sceneFilters(scene: RenderJobScene, index: number, fontFile: string): s
   for (const [overlayIndex, overlay] of scene.overlays.entries()) {
     const next = `overlay${index}_${overlayIndex}`;
     const y = overlay.placement === "bottom" ? 892 : overlay.placement === "target" ? 476 : 72;
-    const background = overlay.kind === "title" ? "0x111827@0.94" : "0xF5C56B@0.94";
-    const foreground = overlay.kind === "title" ? "white" : "0x111827";
     const enable = `between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})`;
-    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=fontfile='${escapeFontPath(fontFile)}':text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
+    const assetInput = overlayInputIndexes.get(overlay.id);
+    if (assetInput === undefined) throw new Error(`overlay asset is missing: ${overlay.id}`);
+    filters.push(`[${assetInput}:v]format=rgba[asset${index}_${overlayIndex}]`);
+    filters.push(`[${previous}][asset${index}_${overlayIndex}]overlay=160:${y}:enable='${enable}'[${next}]`);
     previous = next;
   }
   filters.push(`[${previous}]null[scene${index}]`);
@@ -296,6 +301,27 @@ function renderedDurationSeconds(scenes: RenderJobScene[]): number {
   }))) / 1000;
 }
 
+function writeOverlayAssets(job: RenderJob, renderRoot: string, ffmpegPath: string): Map<string, string> {
+  const directory = join(renderRoot, `${job.id}-overlays`);
+  mkdirSync(directory, { recursive: true });
+  const overlays = job.scenes.flatMap((scene) => scene.overlays);
+  if (!overlays.length) return new Map();
+  const font = resolveRenderFont();
+  return new Map(overlays.map((overlay) => {
+    const path = join(directory, `${safeFilename(overlay.id)}.png`);
+    const background = overlay.kind === "title" ? "0x111827" : "0xF5C56B";
+    const foreground = overlay.kind === "title" ? "white" : "0x111827";
+    const drawtext = `drawtext=fontfile=${font.file}:text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=34`;
+    const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${background}:s=1600x128:d=0.04`, "-vf", drawtext, "-frames:v", "1", path], { cwd: font.directory, encoding: "utf8", windowsHide: true });
+    if (run.status !== 0 || !existsSync(path)) throw new Error(`overlay asset generation failed for ${overlay.id}: ${(run.stderr || run.error?.message || "unknown error").trim()}`);
+    return [overlay.id, path] as const;
+  }));
+}
+
+function safeFilename(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
 function escapeDrawtext(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/%/g, "\\%");
 }
@@ -305,15 +331,10 @@ function escapeFontPath(value: string): string {
 }
 
 function resolveRenderFont(): { directory: string; file: string } {
-  const candidates = [
-    process.env.REPLEX_FONT_FILE,
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-  ].filter((candidate): candidate is string => Boolean(candidate));
+  const candidates = [process.env.REPLEX_FONT_FILE, "C:\\Windows\\Fonts\\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"].filter((candidate): candidate is string => Boolean(candidate));
   const fontPath = candidates.find((candidate) => existsSync(candidate));
   if (!fontPath) throw new Error("overlay asset generation requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
-  return { directory: dirname(fontPath), file: fontPath };
+  return { directory: dirname(fontPath), file: basename(fontPath) };
 }
 
 function sha256(value: string): string {
