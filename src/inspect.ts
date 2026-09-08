@@ -7,7 +7,7 @@ export type InspectionRequest =
   | { kind: "inspect_flow" }
   | { kind: "inspect_scene"; sceneId: string }
   | { kind: "inspect_capture"; captureId: string }
-  | { kind: "inspect_browser_trace" }
+  | { kind: "inspect_browser_trace"; captureId: string }
   | { kind: "inspect_verification_results" }
   | { kind: "inspect_screenshot"; sceneId: string };
 
@@ -90,11 +90,11 @@ export function inspectProject(project: Project, root: string, request: Inspecti
       break;
     }
     case "inspect_browser_trace": {
-      const path = Object.values(project.captures).find((capture) => capture.tracePath)?.tracePath;
+      const path = project.captures[request.captureId]?.tracePath;
       if (!path) return { ok: false, code: "NOT_FOUND", detail: "trace evidence was not recorded for this capture" };
       if (!existsSync(join(root, path))) return { ok: false, code: "NOT_FOUND", detail: "trace evidence does not exist" };
       summary = "Trace evidence exists. The raw trace remains undisclosed; use the named capture and checkpoint evidence instead.";
-      artifacts = [{ id: "trace:latest", path, kind: "trace" }];
+      artifacts = [{ id: `trace:${request.captureId}`, path, kind: "trace" }];
       break;
     }
     case "inspect_verification_results": {
@@ -165,9 +165,9 @@ function validRequest(value: unknown): value is InspectionRequest {
   if (!value || typeof value !== "object") return false;
   const input = value as Record<string, unknown>;
   const keys = Object.keys(input).sort();
-  if (input.kind === "inspect_project" || input.kind === "inspect_flow" || input.kind === "inspect_browser_trace" || input.kind === "inspect_verification_results") return keys.length === 1;
+  if (input.kind === "inspect_project" || input.kind === "inspect_flow" || input.kind === "inspect_verification_results") return keys.length === 1;
   if (input.kind === "inspect_scene" || input.kind === "inspect_screenshot") return keys.length === 2 && typeof input.sceneId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(input.sceneId);
-  return input.kind === "inspect_capture" && keys.length === 2 && typeof input.captureId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(input.captureId);
+  return (input.kind === "inspect_capture" || input.kind === "inspect_browser_trace") && keys.length === 2 && typeof input.captureId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(input.captureId);
 }
 
 function captureArtifacts(project: Project): ArtifactReference[] {

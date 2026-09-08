@@ -3,7 +3,7 @@ import { closeSync, existsSync, openSync, readSync, readFileSync } from "node:fs
 import { join, resolve } from "node:path";
 import { probeVideo } from "./capture.js";
 import { normalizeCapturePath } from "./project.js";
-import type { Capture, Project } from "./schema.js";
+import { CaptureSchema, type Capture, type Project } from "./schema.js";
 import { applyOperations } from "./operations.js";
 
 export interface RecaptureInput {
@@ -12,6 +12,12 @@ export interface RecaptureInput {
   path: string;
   sha256: string;
   durationMs: number;
+  runId: string;
+  capturedAt: string;
+  actionIds: string[];
+  checkpointActionId: string;
+  screenshotPath?: string;
+  tracePath?: string;
   changedStepIds: string[];
   reason: string;
   ffprobePath?: string;
@@ -26,6 +32,7 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   const target = project.scenes.find((scene) => scene.sceneKey === input.sceneKey);
   if (!target) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture scene key does not exist" };
   const previous = project.captures[target.captureId];
+  if (project.captures[input.id] || !input.runId || input.runId === previous?.runId || !Array.isArray(input.actionIds) || JSON.stringify(input.actionIds) !== JSON.stringify(target.actionIds) || input.checkpointActionId !== target.checkpointActionId) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement requires a new capture identity and matching new-attempt provenance" };
   if (!previous || input.id === previous.id || input.durationMs <= 0 || !input.changedStepIds.length) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture metadata is incomplete" };
   let normalizedPath: string;
   try { normalizedPath = normalizeCapturePath(root, input.path); }
@@ -46,7 +53,13 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
   const expectedSteps = new Set(target.actionIds);
   if (input.changedStepIds.some((id) => !expectedSteps.has(id))) return { ok: false, code: "INVALID_RECAPTURE", detail: "changed steps must belong to the target scene" };
   const replacement: Capture = {
-    ...previous,
+    runId: input.runId,
+    capturedAt: input.capturedAt,
+    actionIds: [...input.actionIds],
+    checkpointActionId: input.checkpointActionId,
+    width: media.width,
+    height: media.height,
+    fps: previous.fps,
     id: input.id,
     sceneKey: input.sceneKey,
     path: normalizedPath,
@@ -54,6 +67,15 @@ export function reconcileCapture(project: Project, root: string, input: Recaptur
     durationMs: mediaDurationMs,
     predecessorId: previous.id,
   };
+  try {
+    for (const field of ["screenshotPath", "tracePath"] as const) {
+      if (input[field] !== undefined) {
+        replacement[field] = normalizeCapturePath(root, input[field]);
+        if (!existsSync(resolve(root, replacement[field]))) throw new Error("replacement evidence does not exist");
+      }
+    }
+    CaptureSchema.parse(replacement);
+  } catch (error) { return { ok: false, code: "INVALID_RECAPTURE", detail: `invalid replacement provenance: ${error instanceof Error ? error.message : String(error)}` }; }
   let beforeOperations: unknown[];
   try {
     beforeOperations = readOperationRecords(root);

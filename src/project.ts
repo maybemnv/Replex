@@ -63,6 +63,7 @@ export function capturesFromRun(run: CaptureResult): { root: string; captures: P
       ...afterScreenshot(run, capture.sceneKey, root, root),
       ...captureTrace(run, root, root),
       runId: capture.runId,
+      capturedAt: run.run.endedAt,
       actionIds: capture.actionIds,
       checkpointActionId: capture.checkpointActionId,
       sha256: capture.sha256,
@@ -335,6 +336,7 @@ function requireProjectRelativePath(inputPath: string): string {
 /** Minimal immutable capture-run shape needed to build project inputs. */
 export interface CaptureRunSummary {
   runPath: string;
+  run?: { endedAt: string };
   tracePath?: string;
   artifacts?: Array<{ sceneKey: string; boundary: "before" | "after"; path: string }>;
   captures: Array<{
@@ -361,6 +363,7 @@ export function captureInputFromResult(root: string, run: CaptureRunSummary): { 
       path: normalizeCapturePath(root, isAbsolute(capture.sourcePath) ? capture.sourcePath : resolve(runRoot, capture.sourcePath)),
       ...afterScreenshot(run, capture.sceneKey, root, runRoot),
       ...captureTrace(run, root, runRoot),
+      ...(run.run ? { capturedAt: run.run.endedAt } : {}),
       root,
       runId: capture.runId,
       actionIds: capture.actionIds,

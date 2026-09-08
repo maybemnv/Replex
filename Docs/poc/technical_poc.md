@@ -379,7 +379,9 @@ Inspection tools return capped structured views:
 - `inspect_flow`: approved steps, scene keys, checkpoints, safety flags, run outcomes.
 - `inspect_scene`: one scene, overlays/focus, timing, source and provenance references.
 - `inspect_capture`: probe, duration/timing, step links, and requested frame/contact-sheet handles.
-- `inspect_browser_trace`: bounded events around named steps; never raw trace/DOM dump.
+- `inspect_browser_trace({ captureId })`: a trace handle for that exact current or historical capture; never raw trace/DOM dump. There is no global latest trace.
+
+Recapture input must supply the new attempt's `runId`, `capturedAt`, `actionIds`, and `checkpointActionId` alongside its media identity, hash, duration, changed steps, and reason. Optional `screenshotPath` and `tracePath` belong to that attempt and must resolve inside the project. Omitted evidence stays absent; it is never inherited from the predecessor. Existing capture records remain unchanged.
 - `inspect_verification_results`: failed/all checks for a named revision/output.
 - `inspect_render_result`: probe and targeted boundary/overlay/blank-frame evidence.
 

@@ -93,6 +93,7 @@ describe.skipIf(!mediaAvailable)("dynamic and difficult POC-13 end-to-end paths"
         await copyFile(replacementPath, join(materialized.root, projectReplacementPath));
         const replacement = reconcileCapture(agent.project, materialized.root, {
           id: `${changedCapture.sceneKey}-${changedCapture.runId}`,
+          runId: changedCapture.runId, capturedAt: changed.run.endedAt, actionIds: changedCapture.actionIds, checkpointActionId: changedCapture.checkpointActionId,
           sceneKey: changedCapture.sceneKey,
           path: projectReplacementPath,
           sha256: createHash("sha256").update(await readFile(join(materialized.root, projectReplacementPath))).digest("hex"),
