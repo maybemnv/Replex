@@ -68,7 +68,7 @@ npm run cli -- verify --project work/<project-id>
 npm run cli -- baseline --project work/<project-id>
 npm run cli -- report --project work/<project-id>
 
-$env:ANTHROPIC_API_KEY = "<operator-provided key>"
+# The CLI loads OPENAI_API_KEY from the ignored root .env file.
 npm run cli -- agent-draft --project work/<project-id>
 npm run cli -- report --project work/<project-id>
 
@@ -94,7 +94,7 @@ Before handing off the result:
 
 - Record Node, Chromium, FFmpeg, and ffprobe versions from command output.
 - Retain every initial attempt, retry, intervention, changed-state recapture, verification, render, and report.
-- Run the real Claude path with an operator-provided session key.
+- Run the real OpenAI `gpt-5.6-luna` path with the ignored root `.env` key.
 - Collect the usefulness reviews and correction timing required by the PRD.
 - Confirm no authentication state, API key, production data, or private trace was committed.
 - Read the generated `decision.md`. Production remains unauthorized regardless of the POC decision.

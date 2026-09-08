@@ -74,9 +74,9 @@
   - Tests: Golden bounded responses, truncation, missing ID, redaction canaries, artifact-disclosure log.
   - Out of scope: Vector search, media transcription, generic query language, MCP server.
 
-- [x] POC-8: Connect one Claude model to validated tools
+- [x] POC-8: Connect one OpenAI model to validated tools
 
-  - Goal: Execute a bounded real tool loop without creating a second mutation path.
+  - Goal: Execute a bounded `gpt-5.6-luna` tool loop without creating a second mutation path or fallback.
   - Depends on: POC-5, POC-7.
   - Files/modules: `src/agent.ts`, `src/schema.ts`, `tests/agent.test.ts`.
   - Implementation: Register inspection tools, operation tools, `verify_project`, `render_draft`, and `inspect_render_result`; enforce 20 calls, two edit passes, two renders, timeout, one visible retry, current revision preconditions, and evidence citations for generated copy/choices.

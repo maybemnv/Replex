@@ -1,6 +1,6 @@
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import OpenAI from "openai";
 import { z } from "zod";
 import { inspectProject, type InspectionRequest } from "./inspect.js";
 import { applyOperations } from "./operations.js";
@@ -18,9 +18,15 @@ type AgentTool = (typeof AGENT_TOOL_NAMES)[number];
 type EditTool = Extract<AgentTool, "create_scene" | "trim_scene" | "reorder_scene" | "replace_capture" | "set_speed" | "set_focus" | "set_title" | "set_callout" | "set_transition">;
 
 export interface RecordedToolCall { id?: string; tool: string; input: unknown }
-export interface ClaudeRequest { model: string; system: string; tools: Array<{ name: AgentTool; input_schema: Record<string, unknown> }>; messages: Array<{ role: "user" | "assistant"; content: unknown }> }
-export interface ClaudeResponse { toolCalls: RecordedToolCall[]; stopReason: "tool_use" | "end_turn"; assistantContent?: unknown }
-export interface ClaudeClient { createMessage(request: ClaudeRequest, signal: AbortSignal): Promise<ClaudeResponse> }
+export interface OpenAIRequest {
+  model: string;
+  instructions: string;
+  tools: Array<{ type: "function"; name: AgentTool; parameters: Record<string, unknown>; strict: true }>;
+  input: string | Array<{ type: "function_call_output"; call_id: string; output: string }>;
+  previousResponseId?: string;
+}
+export interface OpenAIResponse { id: string; toolCalls: RecordedToolCall[]; stopReason: "tool_use" | "end_turn" }
+export interface OpenAIClient { createResponse(request: OpenAIRequest, signal: AbortSignal): Promise<OpenAIResponse> }
 
 export type AgentResult =
   | { ok: true; project: Project; toolCalls: number; events: string[] }
@@ -42,16 +48,16 @@ export function runRecordedAgentDraft(project: Project, root: string, calls: Rec
 }
 
 /** Runs the one configured provider seam; a missing key never falls back to recorded mode. */
-export async function runClaudeDraft(project: Project, root: string, client = createClaudeClient()): Promise<AgentResult> {
+export async function runOpenAIDraft(project: Project, root: string, client = createOpenAIClient()): Promise<AgentResult> {
   const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: new Set() };
-  let request = initialClaudeRequest(project);
+  let request = initialOpenAIRequest(project);
   for (;;) {
-    let response: ClaudeResponse;
+    let response: OpenAIResponse;
     try {
-      response = await client.createMessage(request, AbortSignal.timeout(60_000));
+      response = await client.createResponse(request, AbortSignal.timeout(60_000));
     } catch (error) {
       try {
-        response = await client.createMessage(request, AbortSignal.timeout(60_000));
+        response = await client.createResponse(request, AbortSignal.timeout(60_000));
       } catch (retryError) {
         return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", retryError instanceof Error ? retryError.message : String(error), root);
       }
@@ -62,32 +68,42 @@ export async function runClaudeDraft(project: Project, root: string, client = cr
         : failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "agent ended before an edit, verification, and render completed", root);
     }
     if (!Array.isArray(response.toolCalls) || response.toolCalls.length === 0) {
-      return failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "Claude declared tool use without a parsed tool call", root);
+      return failure(state.project, state.toolCalls, state.events, "INVALID_CALL", "OpenAI declared tool use without a parsed tool call", root);
     }
     const result = dispatch(state, root, response.toolCalls);
     if (!result.ok) return result;
     const outputs = state.outputs.splice(-response.toolCalls.length);
-    request = {
-      ...request,
-      messages: [...request.messages, { role: "assistant", content: response.assistantContent ?? [] }, { role: "user", content: response.toolCalls.map((call, index) => ({ type: "tool_result", tool_use_id: call.id ?? "missing-tool-id", content: outputs[index] ?? JSON.stringify({ ok: false, detail: "tool produced no result" }) })) }],
-    };
+    request = { ...request, previousResponseId: response.id, input: response.toolCalls.map((call, index) => ({
+      type: "function_call_output",
+      call_id: call.id ?? "missing-tool-id",
+      output: outputs[index] ?? JSON.stringify({ ok: false, detail: "tool produced no result" }),
+    })) };
   }
 }
 
-export function createClaudeClient(): ClaudeClient {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error("ANTHROPIC_API_KEY is required for real Claude runs");
-  const anthropic = new Anthropic({ apiKey: key });
+export function createOpenAIClient(): OpenAIClient {
+  if (!process.env.OPENAI_API_KEY && existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error("OPENAI_API_KEY is required for real OpenAI runs");
+  const openai = new OpenAI({ apiKey: key });
   return {
-    async createMessage(request, signal) {
-      const response = await anthropic.messages.create({
-        model: request.model, max_tokens: 1200, system: request.system,
-        tools: request.tools as Anthropic.Messages.Tool[],
-        messages: request.messages as Anthropic.Messages.MessageParam[],
+    async createResponse(request, signal) {
+      const response = await openai.responses.create({
+        model: request.model,
+        instructions: request.instructions,
+        tools: request.tools,
+        input: request.input,
+        previous_response_id: request.previousResponseId,
+        parallel_tool_calls: false,
+        max_output_tokens: 1200,
       }, { signal });
-      const toolCalls = response.content.filter((item): item is Anthropic.Messages.ToolUseBlock => item.type === "tool_use")
-        .map((item) => ({ id: item.id, tool: item.name, input: item.input }));
-      return { stopReason: response.stop_reason === "tool_use" ? "tool_use" : "end_turn", assistantContent: response.content, toolCalls };
+      const toolCalls = response.output.filter((item) => item.type === "function_call")
+        .map((item) => {
+          let input: unknown = item.arguments;
+          try { input = JSON.parse(item.arguments); } catch { /* dispatcher rejects malformed arguments */ }
+          return { id: item.call_id, tool: item.name, input };
+        });
+      return { id: response.id, stopReason: toolCalls.length ? "tool_use" : "end_turn", toolCalls };
     },
   };
 }
@@ -169,12 +185,12 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
   return { ok: true, project, toolCalls: state.toolCalls, events };
 }
 
-function initialClaudeRequest(project: Project): ClaudeRequest {
+function initialOpenAIRequest(project: Project): OpenAIRequest {
   return {
-    model: process.env.REPLEX_CLAUDE_MODEL ?? "claude-sonnet-4-20250514",
-    system: "Use only the supplied typed tools. Never request browser access, shell, files, JavaScript, FFmpeg arguments, raw traces, secrets, or direct manifest writes. Cite stable evidence references for every edit.",
-    tools: AGENT_TOOL_NAMES.map((name) => ({ name, input_schema: toolInputSchema(name) })),
-    messages: [{ role: "user", content: `Create a bounded first draft for project ${project.projectId}. Inspect before editing.` }],
+    model: "gpt-5.6-luna",
+    instructions: "Use only the supplied typed tools. Never request browser access, shell, files, JavaScript, FFmpeg arguments, raw traces, secrets, or direct manifest writes. Inspect before editing. Cite stable evidence references for every edit. Make at most two mutation tool calls total; then immediately call verify_project, render_draft, and inspect_render_result. Do not request a third mutation. Finish only after a successful verification and render.",
+    tools: AGENT_TOOL_NAMES.map((name) => ({ type: "function", name, parameters: strictToolSchema(toolInputSchema(name)), strict: true })),
+    input: `Create a bounded first draft for project ${project.projectId}.`,
   };
 }
 
@@ -192,6 +208,36 @@ function toolInputSchema(name: AgentTool): Record<string, unknown> {
     return schema;
   }
   return { type: "object", properties: {}, additionalProperties: false };
+}
+
+/** Responses strict tools require every declared object property to be required. */
+function strictToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+  const normalize = (value: unknown): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const objectValue = value as Record<string, unknown>;
+    if (Array.isArray(objectValue.allOf)) {
+      const branches = objectValue.allOf as Record<string, unknown>[];
+      delete objectValue.allOf;
+      for (const branch of branches) {
+        normalize(branch);
+        for (const key of ["type", "enum", "const", "pattern", "minimum", "maximum", "minLength", "maxLength"]) {
+          if (objectValue[key] === undefined && branch[key] !== undefined) objectValue[key] = branch[key];
+        }
+        if (branch.const !== undefined) objectValue.const = branch.const;
+      }
+    }
+    if (objectValue.type === "object" || objectValue.properties) {
+      const properties = objectValue.properties && typeof objectValue.properties === "object"
+        ? Object.keys(objectValue.properties as Record<string, unknown>) : [];
+      objectValue.additionalProperties = false;
+      objectValue.required = properties;
+    }
+    for (const child of Object.values(objectValue)) normalize(child);
+  };
+  delete copy.$schema;
+  normalize(copy);
+  return copy;
 }
 
 function isInspectionTool(tool: string): tool is Extract<AgentTool, `inspect_${string}`> {

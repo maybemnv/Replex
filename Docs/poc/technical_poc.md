@@ -367,7 +367,7 @@ interface AgentModel {
 }
 ```
 
-`AgentInput` contains messages, allowed tool schemas, bounded evidence parts, and remaining budgets. `AgentTurn` contains tool calls, optional explanation, provider attempt metadata, usage, and stop reason. The first adapter maps this contract to Gemini 3.8 Flash. Later one-at-a-time evaluations may provide GPT, Claude, or local Qwen-family VL adapters.
+`AgentInput` contains messages, allowed tool schemas, bounded evidence parts, and remaining budgets. `AgentTurn` contains tool calls, optional explanation, provider attempt metadata, usage, and stop reason. The POC adapter maps this contract to OpenAI `gpt-5.6-luna`; later production evaluation may select a different model only through an explicit separately approved change.
 
 This is the only vendor seam. There is no provider registry, capability negotiation, router, fallback, common lowest-denominator media platform, or model name in the manifest. Provider/model/version belong in `ModelAttempt` evidence. An adapter failure cannot mutate the project.
 

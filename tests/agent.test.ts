@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
-import { runClaudeDraft, runRecordedAgentDraft } from "../src/agent.js";
+import { createOpenAIClient, runOpenAIDraft, runRecordedAgentDraft } from "../src/agent.js";
 import { createProject } from "../src/project.js";
 
 async function fixture() {
@@ -23,6 +23,25 @@ async function fixture() {
 }
 
 describe("recorded bounded model loop", () => {
+  it("loads OPENAI_API_KEY from an ignored root env file without writing it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-env-"));
+    const originalCwd = process.cwd();
+    const originalKey = process.env.OPENAI_API_KEY;
+    try {
+      await writeFile(join(root, ".env"), "OPENAI_API_KEY=test-canary-key\n");
+      process.chdir(root);
+      delete process.env.OPENAI_API_KEY;
+      createOpenAIClient();
+      expect(process.env.OPENAI_API_KEY).toBe("test-canary-key");
+      expect(await (await import("node:fs/promises")).readdir(root)).toEqual([".env"]);
+    } finally {
+      process.chdir(originalCwd);
+      if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalKey;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("routes an evidence-grounded edit through the sole operation reducer", async () => {
     const { root, project } = await fixture();
     try {
@@ -98,27 +117,33 @@ describe("recorded bounded model loop", () => {
     const { root, project } = await fixture();
     try {
       const responses = [
-        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-1", tool: "inspect_project", input: {} }] },
-        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-2", tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-live", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 1000 } } }] },
-        { stopReason: "tool_use" as const, toolCalls: [{ id: "tool-3", tool: "verify_project", input: {} }] },
-        { stopReason: "end_turn" as const, toolCalls: [] },
+        { id: "response-1", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-1", tool: "inspect_project", input: {} }] },
+        { id: "response-2", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-2", tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-live", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 1000 } } }] },
+        { id: "response-3", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-3", tool: "verify_project", input: {} }] },
+        { id: "response-4", stopReason: "end_turn" as const, toolCalls: [] },
       ];
-      const result = await runClaudeDraft(project, root, { createMessage: async () => responses.shift()! });
+      const requests: unknown[] = [];
+      const result = await runOpenAIDraft(project, root, { createResponse: async (request) => {
+        requests.push(request);
+        return responses.shift()!;
+      } });
       expect(result).toMatchObject({ ok: false, code: "VERIFICATION_FAILED", toolCalls: 3 });
       expect(result.project.overlays["title-live"].text).toBe("Filter releases");
+      expect(requests[0]).toMatchObject({ model: "gpt-5.6-luna", tools: expect.arrayContaining([expect.objectContaining({ type: "function", name: "inspect_project", strict: true })]) });
+      expect(requests[1]).toMatchObject({ previousResponseId: "response-1", input: [{ type: "function_call_output", call_id: "tool-1" }] });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("fails closed when Claude reports tool use without a parsed call", async () => {
+  it("fails closed when OpenAI reports tool use without a parsed call", async () => {
     const { root, project } = await fixture();
     try {
       let calls = 0;
-      const result = await runClaudeDraft(project, root, {
-        createMessage: async () => {
+      const result = await runOpenAIDraft(project, root, {
+        createResponse: async () => {
           calls += 1;
-          return { stopReason: "tool_use" as const, toolCalls: [] };
+          return { id: "response-empty", stopReason: "tool_use" as const, toolCalls: [] };
         },
       });
       expect(result).toMatchObject({ ok: false, code: "INVALID_CALL", toolCalls: 0 });
