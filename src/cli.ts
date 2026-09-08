@@ -80,7 +80,7 @@ export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> 
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
   const args = name === "chromium"
-    ? ["--headless=new", "--no-sandbox", "--disable-gpu", "--dump-dom", "data:text/html,<script>document.write(navigator.userAgent)</script>"]
+    ? ["--headless=new", "--disable-gpu", "--dump-dom", "data:text/html,<script>document.write(navigator.userAgent)</script>"]
     : ["-version"];
   const result = spawnSync(path, args, {
     encoding: "utf8",
@@ -332,9 +332,10 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
           index += 1;
         }
       } else if (arg === "--project" || arg.startsWith("--project=")) {
-        args.projectRoot = argv[index + 1];
+        const inline = arg.startsWith("--project=") ? arg.slice("--project=".length) : undefined;
+        args.projectRoot = inline ?? argv[index + 1];
         if (!args.projectRoot || args.projectRoot.startsWith("-")) throw usageError("--project requires a path");
-        index += 1;
+        if (inline === undefined) index += 1;
       } else if (argv[index] === "--artifact-root") {
         args.artifactRoot = argv[index + 1];
         if (!args.artifactRoot || args.artifactRoot.startsWith("-")) throw usageError("--artifact-root requires a path");

@@ -76,6 +76,13 @@ describe("CLI", () => {
     expect(output.stderr).toContain("ffprobe");
   });
 
+  it("accepts an inline project path before startup checks", async () => {
+    const { output, io } = captureOutput();
+    const exitCode = await runCli(["verify", "--project=C:/tmp/replex-project"], { io, toolPaths: { chromium: "C:/missing/chromium.exe", ffmpeg: "C:/missing/ffmpeg.exe", ffprobe: "C:/missing/ffprobe.exe" } });
+    expect(exitCode).toBe(1);
+    expect(output.stderr).toContain('"code":"STARTUP_CHECK_FAILED"');
+  });
+
   it("executes Chromium's version probe instead of trusting an existing path", () => {
     const result = checkStartupTools({
       chromium: fileURLToPath(import.meta.url),
