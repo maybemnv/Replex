@@ -20,31 +20,35 @@ Pass requires: 5/6 flows complete without intervention, 100% checkpoint correctn
 
 ## Architecture
 
-```text
-approved flow + brief
-        |
-        v
-Playwright capture -> immutable evidence/captures
-        |
-        v
-canonical scene manifest <--------+
-        ^                           |
-        |                           |
-manual baseline --------+          |
-                        v          |
-model -> typed tools -> validated operation reducer
-                                   |
-                                   v
-                              verification
-                                   |
-                                   v
-                               RenderJob
-                                   |
-                                   v
-                                 FFmpeg
-                                   |
-                                   v
-                         MP4 + targeted inspection
+```mermaid
+flowchart TD
+    A["approved flow + brief<br/><i>stable IDs • checkpoints • allowed origins</i>"] --> B["Playwright Capture<br/>fresh context • trace • screenshots • raw video"]
+    B --> C["Immutable Evidence<br/>captures • run log • action events"]
+    C --> D["Canonical Scene Manifest<br/><i>stable sceneIds • immutable captureIds • revisions</i>"]
+
+    E["Manual Baseline<br/>fixed operations"] --> G
+    D --> G["Validated Operation Reducer<br/><i>Zod + semantic checks • pure • atomic</i>"]
+    F["AgentModel<br/>Gemini 3.8 Flash<br/><i>bounded tools</i>"] --> T["Typed Tools<br/>inspect_* • edit • verify • render"]
+    T --> G
+
+    G --> H["Verification<br/>browser • scene • duration • overlay • blank-frame"]
+    H --> I["RenderJob<br/><i>verified revision • fixed primitives • hashed</i>"]
+    I --> J["FFmpeg<br/>trim / speed / focus / overlay<br/>1920×1080 30fps H.264/AAC"]
+    J --> K["MP4 + Targeted Inspection<br/>probe • full decode • boundary frames"]
+    K --> L["Selective Recapture<br/>replace_capture • lineage • preservation hash"]
+    L --> G
+
+    classDef input fill:#0f172a,stroke:#38bdf8,stroke-width:1.5px,color:#e2e8f0
+    classDef capture fill:#1e293b,stroke:#38bdf8,color:#e2e8f0
+    classDef core fill:#0f172a,stroke:#a78bfa,stroke-width:1.5px,color:#e2e8f0
+    classDef verify fill:#1e1b4b,stroke:#f472b6,color:#e2e8f0
+    classDef render fill:#172554,stroke:#22d3ee,color:#e2e8f0
+
+    class A input
+    class B,C capture
+    class D,E,F,G,T core
+    class H verify
+    class I,J,K,L render
 ```
 
 The manifest revision is authoritative. The model proposes; tools validate; the reducer mutates; verification authorizes; the renderer translates a `RenderJob` to fixed FFmpeg argv. No model-authored shell, JS, or filtergraph.
