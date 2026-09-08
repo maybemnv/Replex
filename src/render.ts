@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ProjectSchema, transitionAdjustedDurationMs, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
 import { semanticHash } from "./project.js";
@@ -98,15 +98,16 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   }
   const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
+  const font = job.scenes.some((scene) => scene.overlays.length) ? resolveRenderFont() : undefined;
   const outputPath = resolveProjectPath(root, job.output.path);
   const renderRoot = dirname(outputPath);
   mkdirSync(renderRoot, { recursive: true });
   const temporary = `${outputPath}.${job.sha256.slice(0, 12)}.tmp.mp4`;
-  const argv = buildFfmpegArgv(job, root, temporary);
+  const argv = buildFfmpegArgv(job, root, temporary, font?.file);
   const stem = outputPath.slice(0, -4);
   writeFileSync(`${stem}.render-job.json`, `${JSON.stringify(job, null, 2)}\n`, "utf8");
   writeFileSync(`${stem}.argv.json`, `${JSON.stringify(argv, null, 2)}\n`, "utf8");
-  const run = spawnSync(ffmpegPath, argv, { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  const run = spawnSync(ffmpegPath, argv, { cwd: font?.directory, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   writeFileSync(`${stem}.stderr.txt`, run.stderr || "", "utf8");
   if (run.status !== 0 || !existsSync(temporary)) throw new Error(`FFmpeg render failed: ${(run.stderr || run.error?.message || "unknown error").trim()}`);
   const probe = probeMedia(temporary, ffprobePath);
@@ -180,11 +181,11 @@ function sceneJob(project: Project, scene: Scene): RenderJobScene {
   };
 }
 
-function buildFfmpegArgv(job: RenderJob, root: string, temporary: string): string[] {
+function buildFfmpegArgv(job: RenderJob, root: string, temporary: string, fontFile = "arial.ttf"): string[] {
   const sourceInputs = job.scenes.flatMap((scene) => ["-ss", seconds(scene.inMs), "-t", seconds(scene.outMs - scene.inMs), "-i", resolveProjectPath(root, scene.sourcePath)]);
   const totalSeconds = renderedDurationSeconds(job.scenes);
   const audioInput = job.scenes.length;
-  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index));
+  const filters = job.scenes.flatMap((scene, index) => sceneFilters(scene, index, fontFile));
   filters.push(...timelineFilters(job.scenes));
   return [
     "-y", ...sourceInputs,
@@ -216,7 +217,7 @@ function timelineFilters(scenes: RenderJobScene[]): string[] {
   return filters;
 }
 
-function sceneFilters(scene: RenderJobScene, index: number): string[] {
+function sceneFilters(scene: RenderJobScene, index: number, fontFile: string): string[] {
   const input = `[${index}:v]setpts=(PTS-STARTPTS)/${scene.speed},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2`;
   const filters: string[] = [];
   if (scene.focus?.preset === "zoom") {
@@ -236,7 +237,7 @@ function sceneFilters(scene: RenderJobScene, index: number): string[] {
     const background = overlay.kind === "title" ? "0x111827@0.94" : "0xF5C56B@0.94";
     const foreground = overlay.kind === "title" ? "white" : "0x111827";
     const enable = `between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})`;
-    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
+    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=fontfile=${fontFile}:text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
     previous = next;
   }
   filters.push(`[${previous}]null[scene${index}]`);
@@ -297,6 +298,18 @@ function renderedDurationSeconds(scenes: RenderJobScene[]): number {
 
 function escapeDrawtext(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/%/g, "\\%");
+}
+
+function resolveRenderFont(): { directory: string; file: string } {
+  const candidates = [
+    process.env.REPLEX_FONT_FILE,
+    "C:\\Windows\\Fonts\\arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  const fontPath = candidates.find((candidate) => existsSync(candidate));
+  if (!fontPath) throw new Error("render requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
+  return { directory: dirname(fontPath), file: basename(fontPath) };
 }
 
 function sha256(value: string): string {
