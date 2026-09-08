@@ -1,0 +1,148 @@
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, openSync, readSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { probeVideo } from "./capture.js";
+import { normalizeCapturePath } from "./project.js";
+import { CaptureSchema, type Capture, type Project } from "./schema.js";
+import { applyOperations } from "./operations.js";
+
+export interface RecaptureInput {
+  id: string;
+  sceneKey: string;
+  path: string;
+  sha256: string;
+  durationMs: number;
+  runId: string;
+  capturedAt: string;
+  actionIds: string[];
+  checkpointActionId: string;
+  screenshotPath?: string;
+  tracePath?: string;
+  changedStepIds: string[];
+  reason: string;
+  ffprobePath?: string;
+}
+
+export type ReconcileResult =
+  | { ok: true; project: Project; preserved: true }
+  | { ok: false; code: "INVALID_RECAPTURE" | "PRESERVATION_MISMATCH" | "PERSISTENCE_ERROR"; detail: string };
+
+/** Applies one verified capture replacement and proves all unrelated scene semantics stayed intact. */
+export function reconcileCapture(project: Project, root: string, input: RecaptureInput): ReconcileResult {
+  const target = project.scenes.find((scene) => scene.sceneKey === input.sceneKey);
+  if (!target) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture scene key does not exist" };
+  const previous = project.captures[target.captureId];
+  if (project.captures[input.id] || !input.runId || input.runId === previous?.runId || !Array.isArray(input.actionIds) || JSON.stringify(input.actionIds) !== JSON.stringify(target.actionIds) || input.checkpointActionId !== target.checkpointActionId) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement requires a new capture identity and matching new-attempt provenance" };
+  if (!previous || input.id === previous.id || input.durationMs <= 0 || !input.changedStepIds.length) return { ok: false, code: "INVALID_RECAPTURE", detail: "recapture metadata is incomplete" };
+  let normalizedPath: string;
+  try { normalizedPath = normalizeCapturePath(root, input.path); }
+  catch { return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture path escapes the project root" }; }
+  const sourcePath = resolve(root, normalizedPath);
+  if (!sourcePath || !existsSync(sourcePath) || hashFileSync(sourcePath) !== input.sha256) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture is missing or does not match its SHA-256" };
+  let media: ReturnType<typeof probeVideo>;
+  try {
+    media = probeVideo(input.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe", sourcePath);
+  } catch (error) {
+    return { ok: false, code: "INVALID_RECAPTURE", detail: `replacement capture media probe failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const mediaDurationMs = Math.round(media.durationSeconds * 1000);
+  if (Math.abs(mediaDurationMs - input.durationMs) > 100) return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture duration does not match its probed media" };
+  if (media.width !== previous.width || media.height !== previous.height || Math.abs(media.fps - previous.fps) > 0.01) {
+    return { ok: false, code: "INVALID_RECAPTURE", detail: "replacement capture dimensions or frame rate are incompatible" };
+  }
+  const expectedSteps = new Set(target.actionIds);
+  if (input.changedStepIds.some((id) => !expectedSteps.has(id))) return { ok: false, code: "INVALID_RECAPTURE", detail: "changed steps must belong to the target scene" };
+  const replacement: Capture = {
+    runId: input.runId,
+    capturedAt: input.capturedAt,
+    actionIds: [...input.actionIds],
+    checkpointActionId: input.checkpointActionId,
+    width: media.width,
+    height: media.height,
+    fps: previous.fps,
+    id: input.id,
+    sceneKey: input.sceneKey,
+    path: normalizedPath,
+    sha256: input.sha256,
+    durationMs: mediaDurationMs,
+    predecessorId: previous.id,
+  };
+  try {
+    for (const field of ["screenshotPath", "tracePath"] as const) {
+      if (input[field] !== undefined) {
+        replacement[field] = normalizeCapturePath(root, input[field]);
+        if (!existsSync(resolve(root, replacement[field]))) throw new Error("replacement evidence does not exist");
+      }
+    }
+    CaptureSchema.parse(replacement);
+  } catch (error) { return { ok: false, code: "INVALID_RECAPTURE", detail: `invalid replacement provenance: ${error instanceof Error ? error.message : String(error)}` }; }
+  let beforeOperations: unknown[];
+  try {
+    beforeOperations = readOperationRecords(root);
+  } catch (error) {
+    return { ok: false, code: "INVALID_RECAPTURE", detail: `operation log cannot be read: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const before = unaffectedProjection(project, target.id, beforeOperations);
+  const withCapture: Project = { ...project, captures: { ...project.captures, [replacement.id]: replacement } };
+  const operation = [{ type: "replace_capture" as const, sceneId: target.id, captureId: replacement.id, changedStepIds: input.changedStepIds, reason: input.reason }];
+  const mutation = applyOperations(withCapture, withCapture.currentRevisionId, operation, { actor: "recapture" });
+  if (!mutation.ok) return { ok: false, code: "INVALID_RECAPTURE", detail: mutation.detail };
+  if (unaffectedProjection(mutation.project, target.id, beforeOperations) !== before) return { ok: false, code: "PRESERVATION_MISMATCH", detail: "unaffected scene, overlay, capture, or operation semantics changed" };
+  const persisted = applyOperations(withCapture, withCapture.currentRevisionId, operation, { actor: "recapture", root });
+  if (!persisted.ok) return { ok: false, code: "PERSISTENCE_ERROR", detail: persisted.detail };
+  try {
+    const afterOperations = readOperationRecords(root).filter((record) => (record as { resultRevisionId?: string }).resultRevisionId !== persisted.revisionId);
+    if (unaffectedProjection(persisted.project, target.id, afterOperations) !== before) return { ok: false, code: "PRESERVATION_MISMATCH", detail: "unaffected scene, overlay, capture, or operation semantics changed" };
+  } catch (error) {
+    return { ok: false, code: "PRESERVATION_MISMATCH", detail: `operation log cannot be validated: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  return { ok: true, project: persisted.project, preserved: true };
+}
+
+function hashFileSync(path: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(1024 * 1024);
+    for (;;) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return hash.digest("hex");
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close errors; hash result (or undefined) already determined
+      }
+    }
+  }
+}
+
+function unaffectedProjection(project: Project, targetSceneId: string, operations: unknown[]): string {
+  const targetSceneKey = project.scenes.find((scene) => scene.id === targetSceneId)?.sceneKey;
+  const value = {
+    scenes: project.scenes.filter((scene) => scene.id !== targetSceneId),
+    overlays: Object.values(project.overlays).filter((overlay) => overlay.sceneId !== targetSceneId),
+    captures: Object.values(project.captures).filter((capture) => capture.sceneKey !== targetSceneKey),
+    operations,
+  };
+  return JSON.stringify(value);
+}
+
+function readOperationRecords(root: string): unknown[] {
+  const path = join(root, "operations.jsonl");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean).map((line, index) => {
+    try {
+      return JSON.parse(line) as unknown;
+    } catch (error) {
+      throw new Error(`invalid JSON on line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+}
