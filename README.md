@@ -1,4 +1,4 @@
-# Replex — Release Replay
+# Replex
 
 > **Playwright flow + feature brief → reproducible, editable release video.** When the product changes, recapture only the affected scene — not the whole video.
 
