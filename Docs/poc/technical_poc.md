@@ -8,7 +8,7 @@ Define the smallest local architecture that can prove:
 
 The proof ends at a reviewable 25-35 second MP4, an inspectable scene project, a real model-driven edit revision, and a selective-recapture revision. It is not an MVP foundation exercise or a general video editor.
 
-The approved PRD is normative for product scope and gates. The POC implementation plan supplies dependency order and operating detail. This document resolves their technical mechanics. Where the later approved technical direction differs from those documents, it intentionally uses pnpm and a one-method vendor seam with Gemini 3.8 Flash as the initial model; neither choice changes canonical project semantics.
+The approved PRD is normative for product scope and gates. The POC implementation plan supplies dependency order and operating detail. This document resolves their technical mechanics. The implemented POC uses npm and one OpenAI Responses API seam fixed to `gpt-5.6-luna`; neither choice changes canonical project semantics.
 
 ## 2. POC hypotheses
 
@@ -25,11 +25,11 @@ The hypotheses are measured independently. Slice 1 proves A without AI. Slice 2 
 ## 3. Scope
 
 - One local CLI-driven POC on founder laptops.
-- Node.js 22+, TypeScript, pnpm, and `tsx`.
+- Node.js 22+, TypeScript, npm, and `tsx`.
 - Chromium-only approved Playwright flows, fixed environment, explicit checkpoints, and 3-5 scenes.
 - Filesystem project persistence, immutable source captures, JSON manifest, JSONL operation/event logs, and revisions.
 - Fixed operations: scene creation, trim, reorder, capture replacement, speed, focus, title, callout, and transition.
-- One active model adapter, initially Gemini 3.8 Flash, with typed inspection/edit/verify/render tools.
+- One active OpenAI Responses API adapter fixed to `gpt-5.6-luna`, with typed inspection/edit/verify/render tools.
 - Static `report.html` for founder review.
 - Local FFmpeg/ffprobe authoritative 1920x1080, 30 fps, H.264/AAC export.
 - Two measured runs against each of Apps A, B, and C, plus one selective recapture per app.
@@ -74,7 +74,7 @@ The manifest revision is authoritative. The model proposes actions; tools valida
 | Concern | Choice | POC reason |
 |---|---|---|
 | Runtime | Node.js 22+ and TypeScript | One language for browser, schemas, tools, project state, and rendering orchestration. |
-| Package/tooling | pnpm, `tsx`, TypeScript compiler | Small local workflow and locked dependencies. |
+| Package/tooling | npm, `tsx`, TypeScript compiler | Small local workflow and locked dependencies. |
 | Browser | Playwright with bundled Chromium | Approved-flow execution, video, screenshots, traces, and metadata in one library. |
 | Schemas | Zod | Structural parsing at disk/tool/render seams; inferred TypeScript types. |
 | Tests | Vitest | One test framework for pure and integration tests; Playwright is invoked by fixtures rather than added as a second assertion framework. |
@@ -83,7 +83,7 @@ The manifest revision is authoritative. The model proposes actions; tools valida
 | Overlays | Fixed SVG templates; Sharp only for rasterization/contact sheets | No motion engine. |
 | Logs | JSON/JSONL; Pino only if plain JSONL writing becomes noisy | Inspectable artifacts without an observability stack. |
 | Review | Generated static HTML with native video controls | Enough to assess provenance, output, and correction time. |
-| Model | One `AgentModel` adapter, initially configured for Gemini 3.8 Flash | Vendor choice can be evaluated without touching project/edit/render semantics. |
+| Model | One OpenAI Responses API adapter fixed to `gpt-5.6-luna` | Vendor choice can be evaluated later without touching project/edit/render semantics. |
 
 No Python is introduced. If a concrete codec/tooling blocker appears, first use FFmpeg rather than adding another runtime.
 
@@ -109,7 +109,7 @@ release-replay/
 ├── projects/                # gitignored POC projects and evidence
 ├── tests/                   # Vitest tests through public module interfaces
 ├── package.json
-├── pnpm-lock.yaml
+├── package-lock.json
 └── tsconfig.json
 ```
 
@@ -367,7 +367,7 @@ interface AgentModel {
 }
 ```
 
-`AgentInput` contains messages, allowed tool schemas, bounded evidence parts, and remaining budgets. `AgentTurn` contains tool calls, optional explanation, provider attempt metadata, usage, and stop reason. The first adapter maps this contract to Gemini 3.8 Flash. Later one-at-a-time evaluations may provide GPT, Claude, or local Qwen-family VL adapters.
+`AgentInput` contains messages, allowed tool schemas, bounded evidence parts, and remaining budgets. `AgentTurn` contains tool calls, optional explanation, provider attempt metadata, usage, and stop reason. The POC adapter maps this contract to OpenAI `gpt-5.6-luna`; later production evaluation may select a different model only through an explicit separately approved change.
 
 This is the only vendor seam. There is no provider registry, capability negotiation, router, fallback, common lowest-denominator media platform, or model name in the manifest. Provider/model/version belong in `ModelAttempt` evidence. An adapter failure cannot mutate the project.
 
@@ -596,13 +596,13 @@ On the declared founder reference machine: raw flow <=5 minutes; 3-5 scenes; sta
 
 ## 34. Cost model
 
-Technical infrastructure cost is approximately ₹0: founder laptop, local Chromium, installed FFmpeg, local files, and open-source libraries. Variable model cost equals measured Gemini requests; context/image/tool budgets keep it near zero to a few thousand rupees for all POC runs. No paid hosting, database, storage, browser, render, GPU, queue, logging, or analytics service is required.
+Technical infrastructure cost is approximately ₹0: founder laptop, local Chromium, installed FFmpeg, local files, and open-source libraries. Variable model cost equals measured OpenAI requests; context/image/tool budgets keep it bounded. No paid hosting, database, storage, browser, render, GPU, queue, logging, or analytics service is required.
 
 Track founder engineering/review/correction time separately. Interview incentives and concierge/pilot production are market-validation costs, not technical POC costs and remain under the PRD's separate gates.
 
 ## 35. POC execution sequence
 
-1. Bootstrap only Node 22+, TypeScript, pnpm, `tsx`, Zod, Vitest, Playwright, execa, and tool preflight.
+1. Bootstrap only Node 22+, TypeScript, npm, `tsx`, Zod, Vitest, Playwright, execa, and tool preflight.
 2. Execute one hard-coded approved App A Playwright flow.
 3. Record source video, screenshots, trace, action timing, and checkpoints.
 4. Cut/probe immutable captures and create the minimal manifest with stable identities.
@@ -612,7 +612,7 @@ Track founder engineering/review/correction time separately. Interview incentive
 8. Generate a bounded RenderJob only from that verified revision.
 9. Produce the first ugly MP4 through FFmpeg, then add post-render probe/decode/blank-frame verification before accepting it as valid.
 10. Add bounded inspection tools and context/redaction rules.
-11. Implement the one-method adapter and configure Gemini 3.8 Flash.
+11. Implement the OpenAI Responses API adapter and fix the model to `gpt-5.6-luna`.
 12. Let the model create real edits through the existing tools/reducer.
 13. Verify and render the agent-edited draft; optionally allow one targeted second pass.
 14. Change App A, recapture one approved scene, and apply `replace_capture`.

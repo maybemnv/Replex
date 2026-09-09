@@ -2,7 +2,7 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced.
+> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-09: POC-6 through POC-8 are covered by the real FFmpeg render, bounded-inspection, and typed-agent test suites; POC-9 through POC-12 have retained live App A evidence under `work/evaluation-2026-09-09/normal-attempt-2` and `normal-recapture-1`; POC-13 has retained App B/C baseline, live-agent, failure, and selective-recapture evidence under `work/evaluation-2026-09-09`; POC-14 and POC-15 remain pending the frozen six-run evaluation and three human usefulness reviews.
 
 - [x] POC-1: Establish the minimal local runtime
 
@@ -54,7 +54,7 @@
   - Tests: One valid and boundary-invalid case per operation, stale revision, exact-set reorder, replay determinism, atomic batch rejection.
   - Out of scope: Delete, audio mixing, arbitrary effects, plugins, direct JSON editing.
 
-- [ ] POC-6: Produce the non-AI vertical render baseline
+- [x] POC-6: Produce the non-AI vertical render baseline
 
   - Goal: Render a terrible but valid 30-second App A MP4 through manual/hard-coded operations, proving mechanics independently of model quality.
   - Depends on: POC-5.
@@ -64,7 +64,7 @@
   - Tests: Render-job golden, full tiny-fixture render/probe/decode, overlay-boundary frames, missing/corrupt/blank asset blocks render.
   - Out of scope: Interactive preview, timeline, arbitrary FFmpeg/filtergraph, creative scoring.
 
-- [ ] POC-7: Expose bounded inspection tools
+- [x] POC-7: Expose bounded inspection tools
 
   - Goal: Let a model inspect only relevant structured evidence without filesystem or secret access.
   - Depends on: POC-4, POC-6.
@@ -74,9 +74,9 @@
   - Tests: Golden bounded responses, truncation, missing ID, redaction canaries, artifact-disclosure log.
   - Out of scope: Vector search, media transcription, generic query language, MCP server.
 
-- [ ] POC-8: Connect one Claude model to validated tools
+- [x] POC-8: Connect one OpenAI model to validated tools
 
-  - Goal: Execute a bounded real tool loop without creating a second mutation path.
+  - Goal: Execute a bounded `gpt-5.6-luna` tool loop without creating a second mutation path or fallback.
   - Depends on: POC-5, POC-7.
   - Files/modules: `src/agent.ts`, `src/schema.ts`, `tests/agent.test.ts`.
   - Implementation: Register inspection tools, operation tools, `verify_project`, `render_draft`, and `inspect_render_result`; enforce 20 calls, two edit passes, two renders, timeout, one visible retry, current revision preconditions, and evidence citations for generated copy/choices.
@@ -84,7 +84,7 @@
   - Tests: Stubbed valid transcript; unknown tool, malformed args, stale revision, invented fact, secret request, shell request, and budget exhaustion transcripts.
   - Out of scope: Chat UI, provider abstraction, model routing, multi-agent loop, dynamic tools.
 
-- [ ] POC-9: Generate and render the first agent-edited draft
+- [x] POC-9: Generate and render the first agent-edited draft
 
   - Goal: Prove agent -> tools -> revision -> verification -> render on App A.
   - Depends on: POC-8.
@@ -94,7 +94,7 @@
   - Tests: Recorded tool-sequence replay, valid render/probe, reviewer comparison against deterministic baseline, operation-grounding audit.
   - Out of scope: Claiming creative quality from model self-review, open-ended iteration.
 
-- [ ] POC-10: Complete verification and targeted render inspection
+- [x] POC-10: Complete verification and targeted render inspection
 
   - Goal: Make explicit correctness failures machine-checkable while leaving taste to humans.
   - Depends on: POC-6, POC-9.
@@ -104,7 +104,7 @@
   - Tests: One fixture per invariant plus a valid end-to-end fixture; render-boundary frame assertions.
   - Out of scope: General computer-vision quality score, LLM-as-judge pass gate.
 
-- [ ] POC-11: Reconcile one selectively recaptured scene
+- [x] POC-11: Reconcile one selectively recaptured scene
 
   - Goal: Replace changed source media while retaining scene identity and all unrelated project state.
   - Depends on: POC-5, POC-10.
@@ -114,7 +114,7 @@
   - Tests: Successful replacement, wrong scene key, short/incompatible capture, preservation mismatch, revised render/probe.
   - Out of scope: Automatic invalidation detection, multi-scene recapture scheduling.
 
-- [ ] POC-12: Prove agent edits survive recapture
+- [x] POC-12: Prove agent edits survive recapture
 
   - Goal: Demonstrate that selective recapture preserves the accepted agent-generated edit sequence where unrelated.
   - Depends on: POC-9, POC-11.
@@ -124,7 +124,7 @@
   - Tests: Agent transcript replay -> recapture -> semantic diff -> render; affected-range invalidation case.
   - Out of scope: Asking the model to rediscover all edits after every recapture.
 
-- [ ] POC-13: Add dynamic and difficult application fixtures
+- [x] POC-13: Add dynamic and difficult application fixtures
 
   - Goal: Exercise identical capture/project/agent/render/reconcile paths against Apps B and C.
   - Depends on: POC-3, POC-12.

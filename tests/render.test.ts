@@ -126,8 +126,14 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       expect(result.output).toMatchObject({ id: "render-output-revision-0", revisionId: "revision-0", path: "renders/revision-0.mp4", verificationId: verification.id });
       expect((JSON.parse(await readFile(join(root, "project.json"), "utf8")) as Project).outputs).toEqual([result.output]);
       expect(await readFile(join(root, "renders", "revision-0.render-job.json"), "utf8")).toContain(job.sha256);
-      expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("-filter_complex");
-      expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("between(t,0.000,3.000)");
+      const argv = await readFile(join(root, "renders", "revision-0.argv.json"), "utf8");
+      expect(argv).toContain("-filter_complex");
+      expect(argv).toContain("between(t,0.000,3.000)");
+      expect(argv).toContain("title-1.png");
+      expect(argv).not.toContain("Filter releases");
+      expect(argv).not.toContain("drawtext");
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "title-1.png"))).toBe(true);
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "callout-1.png"))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
