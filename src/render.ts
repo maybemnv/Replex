@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ProjectSchema, transitionAdjustedDurationMs, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
 import { semanticHash } from "./project.js";
@@ -107,7 +107,7 @@ export function executeRenderJob(job: RenderJob, root: string, options: RenderOp
   const stem = outputPath.slice(0, -4);
   writeFileSync(`${stem}.render-job.json`, `${JSON.stringify(job, null, 2)}\n`, "utf8");
   writeFileSync(`${stem}.argv.json`, `${JSON.stringify(argv, null, 2)}\n`, "utf8");
-  const run = spawnSync(ffmpegPath, argv, { cwd: font?.directory, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  const run = spawnSync(ffmpegPath, argv, { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   writeFileSync(`${stem}.stderr.txt`, run.stderr || "", "utf8");
   if (run.status !== 0 || !existsSync(temporary)) throw new Error(`FFmpeg render failed: ${(run.stderr || run.error?.message || "unknown error").trim()}`);
   const probe = probeMedia(temporary, ffprobePath);
@@ -237,7 +237,7 @@ function sceneFilters(scene: RenderJobScene, index: number, fontFile: string): s
     const background = overlay.kind === "title" ? "0x111827@0.94" : "0xF5C56B@0.94";
     const foreground = overlay.kind === "title" ? "white" : "0x111827";
     const enable = `between(t,${seconds(overlay.startMs)},${seconds(overlay.endMs)})`;
-    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=fontfile=${fontFile}:text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
+    filters.push(`[${previous}]drawbox=x=160:y=${y}:w=1600:h=128:color=${background}:thickness=fill:enable='${enable}',drawtext=fontfile='${escapeFontPath(fontFile)}':text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=${y + 34}:enable='${enable}'[${next}]`);
     previous = next;
   }
   filters.push(`[${previous}]null[scene${index}]`);
@@ -300,6 +300,10 @@ function escapeDrawtext(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/%/g, "\\%");
 }
 
+function escapeFontPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/:/g, "\\:");
+}
+
 function resolveRenderFont(): { directory: string; file: string } {
   const candidates = [
     process.env.REPLEX_FONT_FILE,
@@ -308,8 +312,8 @@ function resolveRenderFont(): { directory: string; file: string } {
     "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
   ].filter((candidate): candidate is string => Boolean(candidate));
   const fontPath = candidates.find((candidate) => existsSync(candidate));
-  if (!fontPath) throw new Error("render requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
-  return { directory: dirname(fontPath), file: basename(fontPath) };
+  if (!fontPath) throw new Error("overlay asset generation requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
+  return { directory: dirname(fontPath), file: fontPath };
 }
 
 function sha256(value: string): string {
