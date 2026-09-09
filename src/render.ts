@@ -311,8 +311,8 @@ function writeOverlayAssets(job: RenderJob, renderRoot: string, ffmpegPath: stri
     const path = join(directory, `${safeFilename(overlay.id)}.png`);
     const background = overlay.kind === "title" ? "0x111827" : "0xF5C56B";
     const foreground = overlay.kind === "title" ? "white" : "0x111827";
-    const drawtext = `drawtext=fontfile=${font.file}:text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=34`;
-    const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${background}:s=1600x128:d=0.04`, "-vf", drawtext, "-frames:v", "1", path], { cwd: font.directory, encoding: "utf8", windowsHide: true });
+    const drawtext = `drawtext=fontfile='${escapeFontPath(font.file)}':text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=34`;
+    const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${background}:s=1600x128:d=0.04`, "-vf", drawtext, "-frames:v", "1", path], { encoding: "utf8", windowsHide: true });
     if (run.status !== 0 || !existsSync(path)) throw new Error(`overlay asset generation failed for ${overlay.id}: ${(run.stderr || run.error?.message || "unknown error").trim()}`);
     return [overlay.id, path] as const;
   }));
@@ -334,7 +334,7 @@ function resolveRenderFont(): { directory: string; file: string } {
   const candidates = [process.env.REPLEX_FONT_FILE, "C:\\Windows\\Fonts\\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"].filter((candidate): candidate is string => Boolean(candidate));
   const fontPath = candidates.find((candidate) => existsSync(candidate));
   if (!fontPath) throw new Error("overlay asset generation requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
-  return { directory: dirname(fontPath), file: basename(fontPath) };
+  return { directory: dirname(fontPath), file: fontPath };
 }
 
 function sha256(value: string): string {
