@@ -2,7 +2,7 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-09: POC-6 through POC-8 are covered by the real FFmpeg render, bounded-inspection, and typed-agent test suites; POC-9 through POC-12 now have retained live App A evidence under `work/evaluation-2026-09-09/normal-attempt-2` and `normal-recapture-1`; POC-13 through POC-15 remain pending live B/C runs and human evaluation.
+> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-09: POC-6 through POC-8 are covered by the real FFmpeg render, bounded-inspection, and typed-agent test suites; POC-9 through POC-12 have retained live App A evidence under `work/evaluation-2026-09-09/normal-attempt-2` and `normal-recapture-1`; POC-13 has retained App B/C baseline, live-agent, failure, and selective-recapture evidence under `work/evaluation-2026-09-09`; POC-14 and POC-15 remain pending the frozen six-run evaluation and three human usefulness reviews.
 
 - [x] POC-1: Establish the minimal local runtime
 
@@ -124,7 +124,7 @@
   - Tests: Agent transcript replay -> recapture -> semantic diff -> render; affected-range invalidation case.
   - Out of scope: Asking the model to rediscover all edits after every recapture.
 
-- [ ] POC-13: Add dynamic and difficult application fixtures
+- [x] POC-13: Add dynamic and difficult application fixtures
 
   - Goal: Exercise identical capture/project/agent/render/reconcile paths against Apps B and C.
   - Depends on: POC-3, POC-12.

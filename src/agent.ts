@@ -25,7 +25,12 @@ export interface OpenAIRequest {
   input: string | Array<{ type: "function_call_output"; call_id: string; output: string }>;
   previousResponseId?: string;
 }
-export interface OpenAIResponse { id: string; toolCalls: RecordedToolCall[]; stopReason: "tool_use" | "end_turn" }
+export interface OpenAIResponse {
+  id: string;
+  toolCalls: RecordedToolCall[];
+  stopReason: "tool_use" | "end_turn";
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+}
 export interface OpenAIClient { createResponse(request: OpenAIRequest, signal: AbortSignal): Promise<OpenAIResponse> }
 
 export type AgentResult =
@@ -50,18 +55,24 @@ export function runRecordedAgentDraft(project: Project, root: string, calls: Rec
 /** Runs the one configured provider seam; a missing key never falls back to recorded mode. */
 export async function runOpenAIDraft(project: Project, root: string, client = createOpenAIClient()): Promise<AgentResult> {
   const state: DispatchState = { project, toolCalls: 0, editPasses: 0, renderCount: 0, verified: false, events: [], outputs: [], disclosed: new Set() };
+  const deadline = Date.now() + 120_000;
   let request = initialOpenAIRequest(project);
   for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", "agent exceeded two-minute model wall-time budget", root);
     let response: OpenAIResponse;
     try {
-      response = await client.createResponse(request, AbortSignal.timeout(60_000));
+      response = await client.createResponse(request, AbortSignal.timeout(Math.min(60_000, remaining)));
     } catch (error) {
+      const retryRemaining = deadline - Date.now();
+      if (retryRemaining <= 0) return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", "agent exceeded two-minute model wall-time budget", root);
       try {
-        response = await client.createResponse(request, AbortSignal.timeout(60_000));
+        response = await client.createResponse(request, AbortSignal.timeout(Math.min(60_000, retryRemaining)));
       } catch (retryError) {
         return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", retryError instanceof Error ? retryError.message : String(error), root);
       }
     }
+    audit(root, { provider: "openai", model: request.model, responseId: response.id, usage: response.usage });
     if (response.stopReason !== "tool_use") {
       return state.editPasses && state.verified && state.renderCount
         ? { ok: true, project: state.project, toolCalls: state.toolCalls, events: state.events }
@@ -103,7 +114,16 @@ export function createOpenAIClient(): OpenAIClient {
           try { input = JSON.parse(item.arguments); } catch { /* dispatcher rejects malformed arguments */ }
           return { id: item.call_id, tool: item.name, input };
         });
-      return { id: response.id, stopReason: toolCalls.length ? "tool_use" : "end_turn", toolCalls };
+      return {
+        id: response.id,
+        stopReason: toolCalls.length ? "tool_use" : "end_turn",
+        toolCalls,
+        usage: response.usage ? {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+          totalTokens: response.usage.total_tokens,
+        } : undefined,
+      };
     },
   };
 }
@@ -188,7 +208,7 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
 function initialOpenAIRequest(project: Project): OpenAIRequest {
   return {
     model: "gpt-5.6-luna",
-    instructions: "Use only the supplied typed tools. Never request browser access, shell, files, JavaScript, FFmpeg arguments, raw traces, secrets, or direct manifest writes. Inspect before editing. Cite stable evidence references for every edit. Make at most two mutation tool calls total; then immediately call verify_project, render_draft, and inspect_render_result. Do not request a third mutation. Finish only after a successful verification and render.",
+    instructions: "Use only the supplied typed tools. Never request browser access, shell, files, JavaScript, FFmpeg arguments, raw traces, secrets, or direct manifest writes. Inspect before editing. Cite stable evidence references for every edit. Copy currentRevisionId exactly from the latest inspect_project into each mutation; after an accepted mutation, use its returned revisionId for the next mutation. Make at most two mutation tool calls total; then immediately call verify_project, render_draft, and inspect_render_result. Do not request a third mutation. Finish only after a successful verification and render.",
     tools: AGENT_TOOL_NAMES.map((name) => ({ type: "function", name, parameters: strictToolSchema(toolInputSchema(name)), strict: true })),
     input: `Create a bounded first draft for project ${project.projectId}.`,
   };

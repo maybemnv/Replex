@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { createOpenAIClient, runOpenAIDraft, runRecordedAgentDraft } from "../src/agent.js";
 import { createProject } from "../src/project.js";
@@ -117,7 +117,7 @@ describe("recorded bounded model loop", () => {
     const { root, project } = await fixture();
     try {
       const responses = [
-        { id: "response-1", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-1", tool: "inspect_project", input: {} }] },
+        { id: "response-1", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-1", tool: "inspect_project", input: {} }], usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } },
         { id: "response-2", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-2", tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-live", sceneId: project.scenes[0].id, kind: "title", text: "Filter releases", placement: "top", startMs: 0, endMs: 1000 } } }] },
         { id: "response-3", stopReason: "tool_use" as const, toolCalls: [{ id: "tool-3", tool: "verify_project", input: {} }] },
         { id: "response-4", stopReason: "end_turn" as const, toolCalls: [] },
@@ -130,7 +130,9 @@ describe("recorded bounded model loop", () => {
       expect(result).toMatchObject({ ok: false, code: "VERIFICATION_FAILED", toolCalls: 3 });
       expect(result.project.overlays["title-live"].text).toBe("Filter releases");
       expect(requests[0]).toMatchObject({ model: "gpt-5.6-luna", tools: expect.arrayContaining([expect.objectContaining({ type: "function", name: "inspect_project", strict: true })]) });
+      expect(requests[0]).toMatchObject({ instructions: expect.stringContaining("use its returned revisionId") });
       expect(requests[1]).toMatchObject({ previousResponseId: "response-1", input: [{ type: "function_call_output", call_id: "tool-1" }] });
+      expect(await readFile(join(root, "logs", "agent.jsonl"), "utf8")).toContain('"usage":{"inputTokens":100,"outputTokens":20,"totalTokens":120}');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -150,6 +152,22 @@ describe("recorded bounded model loop", () => {
       if (!result.ok) expect(result.detail).toContain("without a parsed tool call");
       expect(calls).toBe(1);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces one cumulative two-minute model deadline", async () => {
+    const { root, project } = await fixture();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const result = await runOpenAIDraft(project, root, { createResponse: async () => {
+        now += 120_001;
+        return { id: "response-late", stopReason: "tool_use", toolCalls: [{ id: "tool-late", tool: "inspect_project", input: {} }] };
+      } });
+      expect(result).toMatchObject({ ok: false, code: "TRANSPORT_FAILED", detail: "agent exceeded two-minute model wall-time budget", toolCalls: 1 });
+    } finally {
+      clock.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });
