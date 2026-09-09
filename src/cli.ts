@@ -379,7 +379,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     const startup = checkStartupTools(options.toolPaths);
     if (!startup.ok) throw new StartupCheckError(startup);
 
-    return executeCommand(command as Command, args, { ...options, toolPaths: options.toolPaths }, {
+    return await executeCommand(command as Command, args, { ...options, toolPaths: options.toolPaths }, {
       ...io,
       stdout: (text) => {
         const value = JSON.parse(text) as object;

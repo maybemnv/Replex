@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
@@ -117,7 +117,7 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       const verification = verifyProject(source, root);
       const job = buildRenderJob(source, root, verification);
       await writeRevision(root, source as Project);
-      const result = executeRenderJob(job, root, { ffmpegPath, ffprobePath, project: source as Project });
+      const result = executeRenderJob(job, root, { ffmpegPath: relative(process.cwd(), ffmpegPath), ffprobePath, project: source as Project });
 
       expect(result.outputPath).toBe(join(root, "renders", "revision-0.mp4"));
       expect(result.probe).toMatchObject({ width: 1920, height: 1080, fps: 30, videoCodec: "h264", audioCodec: "aac" });
