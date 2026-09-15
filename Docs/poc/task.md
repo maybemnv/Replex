@@ -2,7 +2,7 @@
 
 > Execute only after reading `Docs/PRD.md` and `Docs/poc/implementation-plan.md`. Each task is a reviewable capability; no task authorizes production infrastructure.
 
-> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-09: POC-6 through POC-8 are covered by the real FFmpeg render, bounded-inspection, and typed-agent test suites; POC-9 through POC-12 have retained live App A evidence under `work/evaluation-2026-09-09/normal-attempt-2` and `normal-recapture-1`; POC-13 has retained App B/C baseline, live-agent, failure, and selective-recapture evidence under `work/evaluation-2026-09-09`; POC-14 and POC-15 remain pending the frozen six-run evaluation and three human usefulness reviews.
+> Status is represented by the task checkboxes below. A checked item means its full acceptance criterion is evidenced. Reconciled 2026-09-16: POC-1 through POC-13 remain covered by the implementation and focused suites; the fresh official batch at `work/evaluation-2026-09-16/official` records six live `gpt-5.6-luna` attempts, 6/6 browser completions, 9/9 valid final outputs, and 3/3 selective-recapture preservation proofs. The computed gate is `REWORK` with `productionAuthorized: false` because the required three human usefulness reviews and correction-time measurements are still absent; POC-14 and POC-15 remain unchecked.
 
 - [x] POC-1: Establish the minimal local runtime
 
