@@ -61,7 +61,7 @@
   - Files/modules: `src/verify.ts`, `src/render.ts`, `src/report.ts`, `tests/render.test.ts`, `fixtures/media/`.
   - Implementation: Verify project invariants, build authoritative RenderJob, generate fixed overlay assets, create known FFmpeg argv, render/ffprobe/decode, and generate a static HTML scene/evidence report.
   - Acceptance criteria: Verified 3-5-scene revision renders 25-35 seconds at 1920x1080/30fps H.264/AAC; silent AAC exists if sources lack audio; report exposes scene order, provenance, operations, checks, and video.
-  - Tests: Render-job golden, full tiny-fixture render/probe/decode, overlay-boundary frames, missing/corrupt/blank asset blocks render.
+  - Tests: Render-job golden, full tiny-fixture render/probe/decode, overlay-boundary frame sampling, collision-safe asset names, and missing/corrupt/blank asset rejection (`tests/render.test.ts`).
   - Out of scope: Interactive preview, timeline, arbitrary FFmpeg/filtergraph, creative scoring.
 
 - [x] POC-7: Expose bounded inspection tools

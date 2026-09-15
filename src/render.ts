@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ProjectSchema, transitionAdjustedDurationMs, type Focus, type Overlay, type Project, type RenderOutput, type Scene, type Transition } from "./schema.js";
@@ -314,12 +314,28 @@ function writeOverlayAssets(job: RenderJob, renderRoot: string, ffmpegPath: stri
     const drawtext = `drawtext=fontfile='${escapeFontPath(font.file)}':text='${escapeDrawtext(overlay.text)}':fontcolor=${foreground}:fontsize=48:x=(w-text_w)/2:y=34`;
     const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", `color=c=${background}:s=1600x128:d=0.04`, "-vf", drawtext, "-frames:v", "1", path], { encoding: "utf8", windowsHide: true });
     if (run.status !== 0 || !existsSync(path)) throw new Error(`overlay asset generation failed for ${overlay.id}: ${(run.stderr || run.error?.message || "unknown error").trim()}`);
+    validateOverlayAsset(path, ffmpegPath, overlay.id);
     return [overlay.id, path] as const;
   }));
 }
 
 function safeFilename(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, "_");
+  return `overlay-${Buffer.from(value, "utf8").toString("hex")}`;
+}
+
+export function validateOverlayAsset(path: string, ffmpegPath: string, overlayId = "overlay"): void {
+  if (!existsSync(path) || statSync(path).size === 0) throw new Error(`overlay asset generation produced a blank asset for ${overlayId}`);
+  const run = spawnSync(ffmpegPath, ["-v", "error", "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { encoding: "buffer", windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+  if (run.status !== 0 || !run.stdout || run.stdout.length < 4) throw new Error(`overlay asset generation produced a corrupt asset for ${overlayId}`);
+  const first = run.stdout.subarray(0, 4);
+  let differs = false;
+  for (let index = 4; index < run.stdout.length; index += 4) {
+    if (!run.stdout.subarray(index, index + 4).equals(first)) {
+      differs = true;
+      break;
+    }
+  }
+  if (!differs) throw new Error(`overlay asset generation produced a blank asset for ${overlayId}`);
 }
 
 function escapeDrawtext(value: string): string {

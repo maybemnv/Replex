@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
 import { createOpenAIClient, runOpenAIDraft, runRecordedAgentDraft } from "../src/agent.js";
+import { applyOperations } from "../src/operations.js";
 import { createProject } from "../src/project.js";
+import { ffmpegPath, mediaAvailable } from "./media.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "replex-agent-"));
@@ -138,6 +141,34 @@ describe("recorded bounded model loop", () => {
     }
   });
 
+  it.skipIf(!mediaAvailable)("invalidates verification after a later accepted edit", async () => {
+    const { root, project: base } = await fixture();
+    try {
+      const captures = { ...base.captures };
+      for (const [id, capture] of Object.entries(captures)) {
+        const path = join(root, capture.path);
+        const generated = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:r=30:d=10", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
+        if (generated.status !== 0) throw new Error(generated.stderr || "could not create agent verification fixture");
+        captures[id] = { ...capture, sha256: createHash("sha256").update(await readFile(path)).digest("hex") };
+      }
+      const project = { ...base, captures };
+      const firstOverlay = { id: "title-after-verify", sceneId: project.scenes[0].id, kind: "title" as const, text: "First edit", placement: "top" as const, startMs: 0, endMs: 2000 };
+      const first = applyOperations(project, project.currentRevisionId, [{ type: "set_title" as const, overlay: firstOverlay }]);
+      if (!first.ok) throw new Error(first.detail);
+      const result = runRecordedAgentDraft(project, root, [
+        { tool: "inspect_project", input: {} },
+        { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: firstOverlay } },
+        { tool: "verify_project", input: {} },
+        { tool: "set_callout", input: { baseRevisionId: first.project.currentRevisionId, evidenceRefs: ["capture:capture-1"], overlay: { id: "callout-after-verify", sceneId: project.scenes[1].id, kind: "callout", text: "Second edit", placement: "target", startMs: 0, endMs: 2000 } } },
+        { tool: "render_draft", input: {} },
+      ]);
+      expect(result).toMatchObject({ ok: false, code: "VERIFICATION_FAILED" });
+      expect(result.events).toEqual(["inspect_project", "set_title", "verify_project", "set_callout"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
   it("fails closed when OpenAI reports tool use without a parsed call", async () => {
     const { root, project } = await fixture();
     try {
@@ -151,6 +182,26 @@ describe("recorded bounded model loop", () => {
       expect(result).toMatchObject({ ok: false, code: "INVALID_CALL", toolCalls: 0 });
       if (!result.ok) expect(result.detail).toContain("without a parsed tool call");
       expect(calls).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("audits the first transport failure before retrying", async () => {
+    const { root, project } = await fixture();
+    try {
+      let calls = 0;
+      const result = await runOpenAIDraft(project, root, {
+        createResponse: async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("transport unavailable");
+          return { id: "response-after-retry", stopReason: "tool_use" as const, toolCalls: [] };
+        },
+      });
+      expect(result).toMatchObject({ ok: false, code: "INVALID_CALL" });
+      expect(calls).toBe(2);
+      expect(await readFile(join(root, "logs", "agent.jsonl"), "utf8")).toContain('"event":"transport_retry"');
+      expect(await readFile(join(root, "logs", "agent.jsonl"), "utf8")).not.toContain("transport unavailable");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

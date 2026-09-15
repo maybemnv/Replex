@@ -66,6 +66,7 @@ export async function runOpenAIDraft(project: Project, root: string, client = cr
     } catch (error) {
       const retryRemaining = deadline - Date.now();
       if (retryRemaining <= 0) return failure(state.project, state.toolCalls, state.events, "TRANSPORT_FAILED", "agent exceeded two-minute model wall-time budget", root);
+      audit(root, { provider: "openai", model: request.model, event: "transport_retry", attempt: 1, detail: "initial transport attempt failed; retrying" });
       try {
         response = await client.createResponse(request, AbortSignal.timeout(Math.min(60_000, retryRemaining)));
       } catch (retryError) {
@@ -162,6 +163,8 @@ function dispatch(state: DispatchState, root: string, calls: RecordedToolCall[])
       if (!mutation.ok) return fail(state.toolCalls + index + 1, "INVALID_CALL", mutation.detail);
       project = mutation.project;
       editPasses += 1;
+      verified = false;
+      latestVerification = undefined;
       events.push(call.tool);
       state.outputs.push(JSON.stringify({ ok: true, revisionId: project.currentRevisionId, operationIds: mutation.operationIds }));
       continue;
