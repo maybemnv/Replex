@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalEnvironment, normalFlow } from "../fixtures/apps/normal/flow.js";
-import { buildRenderJob, executeRenderJob, type RenderJob } from "../src/render.js";
+import { buildRenderJob, executeRenderJob, validateOverlayAsset, type RenderJob } from "../src/render.js";
 import { createProject, semanticHash, type Project, writeRevision } from "../src/project.js";
 import { verifyProject } from "../src/verify.js";
 import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
@@ -99,6 +99,21 @@ describe("RenderJob", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects missing, corrupt, and blank overlay assets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-overlay-assets-"));
+    try {
+      expect(() => validateOverlayAsset(join(root, "missing.png"), ffmpegPath, "missing")).toThrow("blank asset");
+      const blank = join(root, "blank.png");
+      await writeFile(blank, Buffer.alloc(0));
+      expect(() => validateOverlayAsset(blank, ffmpegPath, "blank")).toThrow("blank asset");
+      const corrupt = join(root, "corrupt.png");
+      await writeFile(corrupt, "not an image");
+      expect(() => validateOverlayAsset(corrupt, ffmpegPath, "corrupt")).toThrow("corrupt asset");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
@@ -110,6 +125,11 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       for (const index of [1, 2, 3]) makeSource(join(root, "captures", `${index}.mp4`), index);
       const sourceCore = {
         ...base,
+        overlays: {
+          ...base.overlays,
+          "title:hero": { ...base.overlays["title-1"], id: "title:hero", startMs: 4000, endMs: 5000 },
+          "title_hero": { ...base.overlays["title-1"], id: "title_hero", startMs: 5000, endMs: 6000 },
+        },
         captures: Object.fromEntries(await Promise.all(Object.entries(base.captures).map(async ([id, capture]) => [id, { ...capture, sha256: createHash("sha256").update(await readFile(join(root, capture.path))).digest("hex") }]))) as Project["captures"],
         scenes: [{ ...base.scenes[0], focus: { preset: "box" as const, bounds: { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }, startMs: 0, endMs: 3000 }, transition: { type: "crossfade" as const, durationMs: 250 as const } }, ...base.scenes.slice(1)],
       };
@@ -126,8 +146,21 @@ describe.skipIf(!mediaAvailable)("FFmpeg baseline render", () => {
       expect(result.output).toMatchObject({ id: "render-output-revision-0", revisionId: "revision-0", path: "renders/revision-0.mp4", verificationId: verification.id });
       expect((JSON.parse(await readFile(join(root, "project.json"), "utf8")) as Project).outputs).toEqual([result.output]);
       expect(await readFile(join(root, "renders", "revision-0.render-job.json"), "utf8")).toContain(job.sha256);
-      expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("-filter_complex");
-      expect(await readFile(join(root, "renders", "revision-0.argv.json"), "utf8")).toContain("between(t,0.000,3.000)");
+      const argv = await readFile(join(root, "renders", "revision-0.argv.json"), "utf8");
+      expect(argv).toContain("-filter_complex");
+      expect(argv).toContain("between(t,0.000,3.000)");
+      expect(argv).toContain("overlay-7469746c653a6865726f.png");
+      expect(argv).toContain("overlay-7469746c655f6865726f.png");
+      expect(argv).not.toContain("Filter releases");
+      expect(argv).not.toContain("drawtext");
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "overlay-7469746c652d31.png"))).toBe(true);
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "overlay-63616c6c6f75742d31.png"))).toBe(true);
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "overlay-7469746c653a6865726f.png"))).toBe(true);
+      expect(existsSync(join(root, "renders", "render-revision-0-overlays", "overlay-7469746c655f6865726f.png"))).toBe(true);
+      const onBoundary = frameRgb(result.outputPath, 2.9);
+      const offBoundary = frameRgb(result.outputPath, 3.1);
+      expect(colorDistance(onBoundary, 200, 100, [17, 24, 39])).toBeLessThan(24);
+      expect(colorDistance(offBoundary, 200, 100, [17, 24, 39])).toBeGreaterThan(24);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -138,4 +171,15 @@ function makeSource(path: string, index: number): void {
   void index;
   const run = spawnSync(ffmpegPath, ["-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:r=30:d=9", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path], { encoding: "utf8", windowsHide: true });
   if (run.status !== 0) throw new Error(run.stderr || "could not create render fixture");
+}
+
+function frameRgb(path: string, timestamp: number): Buffer {
+  const run = spawnSync(ffmpegPath, ["-ss", timestamp.toFixed(3), "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], { encoding: "buffer", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  if (run.status !== 0 || !run.stdout) throw new Error(run.stderr?.toString() || "could not extract render frame");
+  return run.stdout;
+}
+
+function colorDistance(frame: Buffer, x: number, y: number, expected: [number, number, number]): number {
+  const offset = (y * 1920 + x) * 3;
+  return Math.hypot(frame[offset] - expected[0], frame[offset + 1] - expected[1], frame[offset + 2] - expected[2]);
 }

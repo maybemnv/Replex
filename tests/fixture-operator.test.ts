@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { fixtureDefinition, startFixtureServers, type RunningFixtureServers } from "../fixtures/operator.js";
+import { bootstrapFixture, fixtureDefinition, startFixtureServers, type RunningFixtureServers } from "../fixtures/operator.js";
 
 describe("fixture operator", () => {
   let running: RunningFixtureServers | undefined;
@@ -39,4 +39,16 @@ describe("fixture operator", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("resets changed fixture state before bootstrapping", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-fixture-bootstrap-"));
+    running = await startFixtureServers({ normal: 0, dynamic: 0, difficult: 0 });
+    try {
+      const origin = running.origins.dynamic;
+      await fetch(`${origin}/__change`, { method: "POST" });
+      await bootstrapFixture("dynamic", root, origin);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

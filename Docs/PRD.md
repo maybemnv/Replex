@@ -417,7 +417,7 @@ The MVP is not intended to:
 
 ## 22. AI/model responsibilities
 
-Use one capable reasoning model initially. Claude is the default first model; no provider abstraction is required.
+Use OpenAI `gpt-5.6-luna` initially; no provider abstraction, router, or fallback is required.
 
 ### Model context
 

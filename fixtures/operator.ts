@@ -86,6 +86,8 @@ export async function startFixtureServers(ports: Record<FixtureKind, number> = d
 export async function bootstrapFixture(kind: FixtureKind, projectRoot: string, origin = `http://127.0.0.1:${defaultPorts[kind]}`): Promise<void> {
   const root = resolve(projectRoot);
   const definition = fixtureDefinition(kind, origin, root);
+  const reset = await fetch(`${origin}/__reset`, { method: "POST" });
+  if (reset.status !== 204) throw new Error(`${kind} fixture reset failed with status ${reset.status}`);
   await mkdir(root, { recursive: true });
   if (kind === "difficult") {
     await mkdir(definition.uploadRoots[0], { recursive: true });
