@@ -14,7 +14,7 @@
 - **POC fail:** any PRD gate fails, the agent never causes a real renderable revision, output needs arbitrary manifest repair or undocumented founder editing, or safety depends on model judgment.
 - **MVP/P0 later:** reopenable local projects, reviewed capture plans, bounded review editor, recovery, revision revert, local credential protection, selective recapture, and one 1080p export. These are not POC infrastructure.
 - **Non-goals:** accounts, billing, teams, cloud capture/render/storage, queues, services, polished timeline, TTS, music, multiple formats, CI/GitHub integration, autonomous browsing, multi-agent/model routing, plugins, general NLE, Motion Canvas, WebGPU, and arbitrary model-authored JSON, code, shell, or FFmpeg.
-- **Architecture:** local-only TypeScript CLI plus a static generated HTML review report. Chromium/Playwright captures; an owned JSON manifest and pure reducer hold project state; FFmpeg is the authoritative backend; one Claude model uses typed tools.
+- **Architecture:** local-only TypeScript CLI plus a static generated HTML review report. Chromium/Playwright captures; an owned JSON manifest and pure reducer hold project state; FFmpeg is the authoritative backend; OpenAI `gpt-5.6-luna` uses typed tools.
 - **Privacy:** credentials and Playwright storage state stay outside projects and source control; model context excludes secrets/storage and includes only selected project evidence; every disclosed artifact is logged.
 - **Performance:** raw flow <=5 minutes; 3-5 scenes; 25-35 seconds at 1920x1080/30fps H.264/AAC; capture-to-draft <10 minutes; recapture-to-draft <5 minutes; render <3 minutes on the declared reference machine.
 - **Validation:** deterministic baseline first, then agent path, then two runs each on Apps A/B/C, changed-state recapture for each, external-use review, and an explicit PASS/FAIL/REWORK decision.
@@ -33,7 +33,7 @@ The only tension is that the PRD labels model use optional where reasoning is un
 | Browser | `@playwright/test`, bundled Chromium only | Reuses approved tests, tracing, video, screenshots, and semantic locators. |
 | Validation/tests | Zod + Vitest | One runtime schema at every disk/model boundary and lightweight deterministic tests. |
 | Media | System FFmpeg/ffprobe, checked at startup and version-recorded | No render engine or binary packaging in POC. |
-| Model | One Claude tool-use client called from `agent-draft` | No provider interface, router, agents, or fallback model. |
+| Model | One OpenAI Responses API client using `gpt-5.6-luna`, called from `agent-draft` | No provider interface, router, agents, or fallback model. |
 | Review | Generated local HTML report using escaped HTML and native video controls | Avoids a frontend framework while exposing required evidence. |
 | Persistence | Temp-and-rename JSON revisions plus immutable files on local disk | Enough to inspect and reproduce the POC; process-crash recovery remains a production gate. |
 
@@ -50,7 +50,7 @@ src/
   operations.ts          # validated pure reducer; the sole mutation boundary
   capture.ts             # approved-flow execution and capture artifact assembly
   inspect.ts             # bounded inspection views/contact-sheet requests
-  agent.ts               # Claude call, typed tool loop, two-pass budget
+  agent.ts               # OpenAI call, typed tool loop, two-pass budget
   verify.ts              # browser/project/render invariant checks
   render.ts              # manifest -> RenderJob -> argv -> FFmpeg/ffprobe
   reconcile.ts           # same-scene recapture and preservation assertions
@@ -212,7 +212,7 @@ Agent metrics: valid/invalid call counts; prevented malformed mutations; percent
 3. Materialize stable manifest and pure operations.
 4. Produce the earliest ugly deterministic MP4 and report through verification.
 5. Expose bounded inspection tools over that same project.
-6. Connect Claude tools to the same reducer and produce a real first draft.
+6. Connect OpenAI `gpt-5.6-luna` tools to the same reducer and produce a real first draft.
 7. Add targeted render inspection and the optional second pass.
 8. Recapture one scene and prove all unrelated manual/model edits survive.
 9. Run the identical harness against Apps A/B/C, collect reviewer evidence, and gate the POC.

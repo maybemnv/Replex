@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, relative, resolve } from "node:path";
 import { chromium } from "@playwright/test";
-import { runClaudeDraft } from "./agent.js";
+import { runOpenAIDraft } from "./agent.js";
 import { runCapture } from "./capture.js";
 import { capturesFromRun, loadProject, materializeCaptureRun, writeRevision } from "./project.js";
 import { reconcileCapture } from "./reconcile.js";
@@ -264,7 +264,7 @@ async function executeCommand(command: Command, args: ParsedArgs, options: RunCl
   if (command === "baseline" || command === "render") return executeRenderCommand(command, args, toolPaths, io);
   if (command === "agent-draft") {
     const { root, project } = await loadProjectForCommand(args);
-    const result = await runClaudeDraft(project, root);
+    const result = await runOpenAIDraft(project, root);
     printJson(io, { command, status: result.ok ? "completed" : "failed", result });
     return result.ok ? 0 : 1;
   }
