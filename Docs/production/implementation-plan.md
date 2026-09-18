@@ -1,5 +1,7 @@
 # Release Replay Production Implementation Plan
 
+> **Superseded for sequencing by [`../v2/implementation-plan.md`](../v2/implementation-plan.md).** Retained as historical production planning only. It is not authorized for execution.
+
 > **Conditional plan only:** No task after `PROD-0` may start until the POC, external product validation, and scope-reconfirmation gates pass.
 
 **Goal:** Evolve validated Release Replay mechanics into a reliable paid product without weakening the boundary `AI reasoning -> typed tools -> validated operations -> canonical project -> deterministic renderer`.

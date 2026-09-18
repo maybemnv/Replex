@@ -1,3 +1,5 @@
+> **Historical architecture sketch.** Preserved as early context; it is not the current V2 architecture. See [`architecture/REPLEX_V2.md`](architecture/REPLEX_V2.md).
+
                        USER
                         │
        "Turn this into a 30 sec launch reel"

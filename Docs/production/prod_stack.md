@@ -1,8 +1,10 @@
 # Release Replay Production Stack
 
+> **Superseded conditional direction.** This pre-V2 stack is retained for history and does not authorize production. Any future production proposal must follow the V2 evidence gate in [`../v2/implementation-plan.md`](../v2/implementation-plan.md) and receive explicit approval.
+
 ## 1. Decision status
 
-**Status:** current default production direction, dated 4 September 2026. The repository/application name is **Replex**; “Release Replay” remains the PRD capability name used in this document.
+**Historical status:** this was the default conditional direction on 4 September 2026. The repository/application name is **Replex**; “Release Replay” remains the PRD capability name used in this document.
 
 This stack is conditional on the POC and product-validation gates. It refines the older production implementation plan where that plan chose Electron, canonical SQLite project state, Fastify, and a hosted container. The current decision instead uses Tauri 2, portable file projects, and a gated Cloudflare Workers/Hono control plane. It does not change the PRD, authorize production execution, or move P1 features into scope.
 

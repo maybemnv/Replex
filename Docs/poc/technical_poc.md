@@ -1,5 +1,7 @@
 # Release Replay Technical POC
 
+> **Implemented V1 historical architecture.** This remains the source of truth for what the browser-first POC built. It is preserved, not retroactively rewritten as V2. See [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for the proposed successor architecture.
+
 ## 1. Purpose
 
 Define the smallest local architecture that can prove:

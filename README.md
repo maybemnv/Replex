@@ -1,12 +1,20 @@
 # Replex
 
+> **V2 direction:** Media composition is the project; browser capture is one intelligent media source.
+
+**Repository status (19 September 2026):** The browser-first V1 POC is implemented and has strong technical evidence. Its formal product gate remains `REWORK` because human usefulness and correction-time evidence are incomplete. Replex V2 is architecture-approved and planned, but none of its upload, general composition, motion-backend, ffmpeg-skill, service, or cloud features is implemented. Start with the [documentation index](Docs/README.md), [V2 architecture](Docs/architecture/REPLEX_V2.md), and [V2 PRD](Docs/REPLEX_V2_PRD.md).
+
+## Product evolution
+
+The original Release Replay thesis remains a supported and differentiating capability: an approved Playwright flow can become reproducible source footage that is selectively recaptured later. V2 broadens the canonical project so browser captures, uploaded video, images, and audio can converge in one composition, operation log, revision history, and render pipeline. The sections below describe the implemented historical V1 POC unless explicitly marked V2.
+
 > **Playwright flow + feature brief → reproducible, editable release video.** When the product changes, recapture only the affected scene — not the whole video.
 
-**Status:** Local POC only. Disposable evidence for hypothesis validation, not a production foundation. See [`Docs/PRD.md`](Docs/PRD.md) and [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md).
+**V1 status:** Local POC only. Evidence for hypothesis validation, not a production foundation. See [`Docs/PRD.md`](Docs/PRD.md) and [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md).
 
 ---
 
-## What it proves
+## What the V1 POC proves
 
 Two independent hypotheses against three adversarial browser apps (normal, dynamic, difficult):
 
@@ -165,6 +173,11 @@ Checks before render: approved flow completed, every expected checkpoint reached
 
 | Doc | Purpose |
 |-----|---------|
+| [`Docs/README.md`](Docs/README.md) | Status-labelled documentation index |
+| [`Docs/architecture/REPLEX_V2.md`](Docs/architecture/REPLEX_V2.md) | Normative V2 architecture; not implemented |
+| [`Docs/REPLEX_V2_PRD.md`](Docs/REPLEX_V2_PRD.md) | V2 product definition and POC scope |
+| [`Docs/v2/implementation-plan.md`](Docs/v2/implementation-plan.md) | Dependency-ordered future implementation plan |
+| [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md) | Gurbaaz frontend handoff |
 | [`Docs/PRD.md`](Docs/PRD.md) | Normative POC scope, requirements POC-01…POC-20, pass/fail gates |
 | [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md) | Minimal local architecture, data model, contracts |
 | [`Docs/poc/implementation-plan.md`](Docs/poc/implementation-plan.md) | Spec for agentic workers |
@@ -172,8 +185,7 @@ Checks before render: approved flow completed, every expected checkpoint reached
 | [`Docs/poc/FIXTURE_CATALOG.md`](Docs/poc/FIXTURE_CATALOG.md) | App definitions and expected metadata |
 | [`Docs/DIFFUSION_STUDIO_TAKEAWAYS.md`](Docs/DIFFUSION_STUDIO_TAKEAWAYS.md) | Research basis for the compiler model |
 | [`Docs/Architrure.md`](Docs/Architrure.md) | Early agent → media → edit → FFmpeg sketch |
-| [`Docs/production/prod_stack.md`](Docs/production/prod_stack.md) | Gated production stack (Tauri 2 + file projects + Workers) |
-| [`Docs/pr-review-report.md`](Docs/pr-review-report.md) | Stacked PR review — blocking findings per branch |
+| [`Docs/production/prod_stack.md`](Docs/production/prod_stack.md) | Historical conditional production stack; superseded for V2 sequencing |
 
 ---
 

@@ -1,5 +1,7 @@
 # Release Replay
 
+> **Historical V1 product specification.** This document preserves the original browser-first thesis and formal POC gates. It is not rewritten by V2. The current proposed product definition is [`REPLEX_V2_PRD.md`](REPLEX_V2_PRD.md), while the unresolved V1 human usefulness and correction-time gates remain authoritative historical evidence.
+
 ## Test-Backed Release Video Compiler PRD
 
 ## 1. Document status
