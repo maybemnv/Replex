@@ -1,0 +1,319 @@
+﻿{
+  "available": [
+    "bsf:filter_units",
+    "encoder:aac",
+    "encoder:flac",
+    "encoder:gif",
+    "encoder:libmp3lame",
+    "encoder:libopus",
+    "encoder:libsvtav1",
+    "encoder:libvorbis",
+    "encoder:libx264",
+    "encoder:libx265",
+    "encoder:mov_text",
+    "encoder:prores_ks",
+    "encoder:srt",
+    "encoder:webvtt",
+    "ffmpeg",
+    "ffprobe",
+    "filter:acompressor",
+    "filter:acrossfade",
+    "filter:afftdn",
+    "filter:agate",
+    "filter:alimiter",
+    "filter:amix",
+    "filter:areverse",
+    "filter:ass",
+    "filter:boxblur",
+    "filter:chromakey",
+    "filter:colorbalance",
+    "filter:colorlevels",
+    "filter:colortemperature",
+    "filter:cropdetect",
+    "filter:curves",
+    "filter:deesser",
+    "filter:drawbox",
+    "filter:eq",
+    "filter:exposure",
+    "filter:extrastereo",
+    "filter:gradients",
+    "filter:hqdn3d",
+    "filter:loudnorm",
+    "filter:lut3d",
+    "filter:minterpolate",
+    "filter:overlay",
+    "filter:palettegen",
+    "filter:reverse",
+    "filter:rotate",
+    "filter:scdet",
+    "filter:showspectrum",
+    "filter:showwaves",
+    "filter:sidechaincompress",
+    "filter:signalstats",
+    "filter:silencedetect",
+    "filter:subtitles",
+    "filter:tile",
+    "filter:tonemap",
+    "filter:tpad",
+    "filter:v360",
+    "filter:vidstabdetect",
+    "filter:vidstabtransform",
+    "filter:xfade",
+    "filter:xstack",
+    "filter:yadif",
+    "filter:zoompan",
+    "filter:zscale"
+  ],
+  "detection": {
+    "bsfs": {
+      "count": 51,
+      "detail": "51 entries",
+      "status": "parsed"
+    },
+    "encoders": {
+      "count": 241,
+      "detail": "241 entries",
+      "status": "parsed"
+    },
+    "filters": {
+      "count": 579,
+      "detail": "579 entries",
+      "status": "parsed"
+    }
+  },
+  "errors": [
+    "filter:drawtext: drawtext render crashed (exit 3221225477) instead of failing cleanly -- the filter is present in this build but cannot be used as-is, likely a fontconfig resolution crash (see https://github.com/kajisho5/ffmpeg-skill/issues/100); pass an explicit --font-file to every drawtext tool as a workaround"
+  ],
+  "ffmpeg": "9.0.1-full_build-www.gyan.dev",
+  "ffprobe": "9.0.1-full_build-www.gyan.dev",
+  "fonts": {
+    "default_font": "DejaVu Sans",
+    "detail": "fc-match not on PATH; drawtext succeeding proves nothing (fontconfig substitutes silently), so availability cannot be verified",
+    "emoji": {
+      "assets": null,
+      "color_font": null,
+      "color_font_file": null,
+      "detail": "no fontconfig on this machine; the PNG overlay path needs none",
+      "fix": "point --emoji-assets at a directory of PNGs named by code point (1f389.png): twemoji/assets/72x72 (Twemoji, CC-BY 4.0) or noto-emoji/png/128 (Noto Emoji, OFL/Apache-2.0) are the two people already have. The skill has no network at runtime, so the assets must already exist on this machine -- nothing is ever downloaded",
+      "libass_color": null,
+      "mode": "none"
+    },
+    "scripts": {
+      "ar": {
+        "file": "C:\\WINDOWS\\Fonts\\tahoma.ttf",
+        "status": "available"
+      },
+      "bn": {
+        "file": null,
+        "status": "missing"
+      },
+      "el": {
+        "file": "C:\\WINDOWS\\Fonts\\arial.ttf",
+        "status": "available"
+      },
+      "he": {
+        "file": "C:\\WINDOWS\\Fonts\\tahoma.ttf",
+        "status": "available"
+      },
+      "hi": {
+        "file": null,
+        "status": "missing"
+      },
+      "ja": {
+        "file": "C:\\WINDOWS\\Fonts\\YuGothM.ttc",
+        "status": "available"
+      },
+      "ko": {
+        "file": "C:\\WINDOWS\\Fonts\\malgun.ttf",
+        "status": "available"
+      },
+      "lo": {
+        "file": "C:\\WINDOWS\\Fonts\\leelawui.ttf",
+        "status": "available"
+      },
+      "ru": {
+        "file": "C:\\WINDOWS\\Fonts\\arial.ttf",
+        "status": "available"
+      },
+      "ta": {
+        "file": null,
+        "status": "missing"
+      },
+      "th": {
+        "file": "C:\\WINDOWS\\Fonts\\leelawui.ttf",
+        "status": "available"
+      },
+      "zh": {
+        "file": "C:\\WINDOWS\\Fonts\\msyh.ttc",
+        "status": "available"
+      }
+    },
+    "status": "unknown"
+  },
+  "gpu_encoders": {
+    "present": [
+      "av1_amf",
+      "av1_nvenc",
+      "av1_qsv",
+      "av1_vaapi",
+      "h264_amf",
+      "h264_nvenc",
+      "h264_qsv",
+      "h264_vaapi",
+      "hevc_amf",
+      "hevc_nvenc",
+      "hevc_qsv",
+      "hevc_vaapi",
+      "mjpeg_qsv",
+      "mjpeg_vaapi",
+      "mpeg2_qsv",
+      "mpeg2_vaapi",
+      "vp8_vaapi",
+      "vp9_qsv",
+      "vp9_vaapi"
+    ],
+    "status": "parsed"
+  },
+  "missing": [
+    "filter:drawtext"
+  ],
+  "missing_optional": [
+    "external:whisper"
+  ],
+  "ok": false,
+  "python": "3.13.5",
+  "tools": {
+    "audio": {
+      "usable": "yes"
+    },
+    "background": {
+      "usable": "yes"
+    },
+    "batch": {
+      "usable": "yes"
+    },
+    "broll": {
+      "usable": "yes"
+    },
+    "caption": {
+      "usable": "yes"
+    },
+    "check": {
+      "usable": "yes"
+    },
+    "color": {
+      "usable": "yes"
+    },
+    "crop": {
+      "usable": "yes"
+    },
+    "cropdetect": {
+      "usable": "yes"
+    },
+    "cut": {
+      "usable": "yes"
+    },
+    "deinterlace": {
+      "usable": "yes"
+    },
+    "denoise": {
+      "usable": "yes"
+    },
+    "export": {
+      "usable": "yes"
+    },
+    "fit": {
+      "usable": "yes"
+    },
+    "freeze": {
+      "usable": "yes"
+    },
+    "graphics": {
+      "fix": "drawtext crashed instead of rendering a frame (see errors[] for the exit detail) -- every drawtext tool already resolves a concrete font file automatically when one can be found (#100); if it still crashes, use --no-timecode with look.py or scenes.py --sheet to skip drawtext entirely, or pass --font-file explicitly to overlay.py/graphics.py (the two that accept it) rather than relying on font= resolution",
+      "missing": [
+        "filter:drawtext"
+      ],
+      "usable": "no"
+    },
+    "grid": {
+      "usable": "yes"
+    },
+    "insert": {
+      "usable": "yes"
+    },
+    "join": {
+      "usable": "yes"
+    },
+    "look": {
+      "usable": "yes"
+    },
+    "loop": {
+      "usable": "yes"
+    },
+    "loudness": {
+      "usable": "yes"
+    },
+    "metadata": {
+      "usable": "yes"
+    },
+    "multicam": {
+      "usable": "yes"
+    },
+    "overlay": {
+      "usable": "yes"
+    },
+    "pad": {
+      "usable": "yes"
+    },
+    "probe": {
+      "usable": "yes"
+    },
+    "proxy": {
+      "usable": "yes"
+    },
+    "redact": {
+      "usable": "yes"
+    },
+    "render": {
+      "usable": "yes"
+    },
+    "report": {
+      "usable": "yes"
+    },
+    "reverse": {
+      "usable": "yes"
+    },
+    "scenes": {
+      "usable": "yes"
+    },
+    "sequence": {
+      "usable": "yes"
+    },
+    "silence": {
+      "usable": "yes"
+    },
+    "speedramp": {
+      "usable": "yes"
+    },
+    "sphere": {
+      "usable": "yes"
+    },
+    "stabilize": {
+      "usable": "yes"
+    },
+    "straighten": {
+      "usable": "yes"
+    },
+    "sync": {
+      "usable": "yes"
+    },
+    "verify": {
+      "usable": "yes"
+    },
+    "waveform": {
+      "usable": "yes"
+    }
+  },
+  "unknown": [],
+  "version": "1.26.0"
+}

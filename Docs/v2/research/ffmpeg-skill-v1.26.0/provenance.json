@@ -1,0 +1,26 @@
+{
+  "captured_at": "2026-09-23 Asia/Calcutta",
+  "source": "https://github.com/kajisho5/ffmpeg-skill",
+  "release": "v1.26.0",
+  "package_version": "1.26.0",
+  "commit": "f33d0c80dcac5dc9f07c8654dc10ccac657be4a6",
+  "license": "MIT",
+  "contract_version": "1.0",
+  "source_verification": {
+    "method": "git ls-remote --tags, shallow clone of the named tag, exact HEAD and package.json version check",
+    "tag_ref": "refs/tags/v1.26.0",
+    "tag_commit": "f33d0c80dcac5dc9f07c8654dc10ccac657be4a6"
+  },
+  "contract_snapshot": {
+    "path": "contract.json",
+    "bytes": 523222,
+    "sha256": "1d343115171a6d0b185efa578a8d3bb3370f7b8a48d9a0db881911324d2b3b10",
+    "tool_count": 42
+  },
+  "doctor_snapshot": {
+    "path": "doctor.json",
+    "bytes": 7484,
+    "sha256": "3c9b89772352d1008ffa103e72a168ee1bfbd69d0a2a575a4643bff370a55137",
+    "exit_code": 1
+  }
+}
