@@ -77,13 +77,41 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Non-goals:** Agent changes, UI, arbitrary expressions, renderer details.
 - **Rollback:** Keep V1 reducer for V1 roots; no shared write path.
 
+### V2-104: Stabilize the early transport-independent service contract
+
+- **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
+- **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
+- **Dependencies:** V2-101 and V2-103.
+- **Likely files:** new `src/service-contract/` or generated schema artifact; contract fixtures and tests; architecture/frontend handoff references.
+- **Contracts:** Revision-mutating commands require `baseRevisionId`; derived jobs reference an immutable `revisionId`; every request has an idempotency key and explicit contract version.
+- **Migration concerns:** This is a read/contract addition only; V1 command routing remains unchanged and version bumps are explicit.
+- **Tests:** Strict request/response parsing, discriminated job/input/error states, stale-revision metadata, unknown-version rejection, deterministic fixture serialization.
+- **Acceptance:** Frontend mocks can import or generate these types without inventing project state or transport semantics; no HTTP/SSE/WebSocket or executor is required.
+- **Non-goals:** Network transport, process supervision, cloud infrastructure, or runtime job scheduling.
+- **Rollback:** Keep the contract artifact versioned and unused; existing CLI behavior is unaffected.
+
+## Phase 1.5: Evaluate ffmpeg-skill before duplicating media plumbing
+
+### V2-150: Run the ffmpeg-skill capability and contract spike
+
+- **Objective:** Evaluate one released, pinned ffmpeg-skill version and contract version in an isolated research harness and produce a GO/NO-GO/PARTIAL-GO report.
+- **Why:** Probe, contact sheets, scene measurements, cuts, audio analysis, and delivery checks may be cheaper and safer to delegate than to reimplement.
+- **Dependencies:** V2-104 and ADR-004 acceptance rules; no production adapter.
+- **Likely files:** research report, capability matrix, contract snapshots, synthetic-media fixtures; no runtime dependency required.
+- **Contracts:** Map each candidate capability to input/output/error/verification shape; record raw-FFmpeg leakage, overhead, platform support, cancellation, timeout, path containment, and native parity.
+- **Migration concerns:** No canonical state or project migration; do not install/vendor the dependency in this spike.
+- **Tests:** Static contract snapshot, version/license provenance, doctor/capability output, dry runs, failure/timeout/cancellation probes, path-containment checks.
+- **Acceptance:** Written report names the pinned versions, cleanly mapped capabilities, gaps, ownership split, measured overhead, and whether adoption is cheaper than the native subset.
+- **Non-goals:** Full MCP exposure, production adapter, canonical ffmpeg-skill project files, or changing the native backend.
+- **Rollback:** Delete isolated spike artifacts; repository runtime remains unchanged.
+
 ## Phase 2: Local media ingestion and baseline render
 
 ### V2-201: Import immutable local assets
 
 - **Objective:** Import video/image/audio by copy, hash, probe, and atomic asset registration.
 - **Why:** Uploaded media is the first new source type and trust boundary.
-- **Dependencies:** V2-103.
+- **Dependencies:** V2-103; V2-150 for analysis/render capability selection.
 - **Likely files:** new `src/ingest.ts`, `src/media-store.ts`; `src/cli.ts`; tests.
 - **Contracts:** `ImportAssetRequest`, `ImportResult`, typed import errors; `import_asset` only after file persistence and probe succeed.
 - **Migration concerns:** Deduplicate by hash without merging provenance records; never mutate originals.
@@ -96,7 +124,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 - **Objective:** Generate versioned shot ranges, selected frames/contact sheets, motion/audio measurements, and optional transcript references.
 - **Why:** Models need compact evidence rather than full video context.
-- **Dependencies:** V2-201.
+- **Dependencies:** V2-201 and V2-150; use the spike matrix to delegate or retain a native fallback rather than reimplementing blindly.
 - **Likely files:** new `src/analyze.ts`, `src/evidence.ts`, inspection extensions; tests and small media fixtures.
 - **Contracts:** `AnalysisRequest`, `MediaEvidenceIndex`, per-artifact hashes/version/source hash.
 - **Migration concerns:** Derived evidence is regenerable and must not change asset identity.
@@ -109,13 +137,13 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 - **Objective:** Extend the native backend to render one uploaded clip with trim, speed, transform/crop, opacity, and audio gain.
 - **Why:** Prove V2 state can reach deterministic media before agent or new dependency work.
-- **Dependencies:** V2-103, V2-201.
+- **Dependencies:** V2-103, V2-201, and V2-150.
 - **Likely files:** new V2 RenderJob planner or versioned extension in `src/render.ts`; `src/verify.ts`; render tests.
-- **Contracts:** backend-neutral `MediaExecutionJob`; output requirements and provenance.
+- **Contracts:** planner-produced immutable `MediaExecutionJob` from a frozen revision; authorized `AssetHandle`/execution context; `RenderArtifact` output requirements and provenance.
 - **Migration concerns:** Keep V1 RenderJob parsing/execution unchanged.
 - **Tests:** dry plan hash, real FFmpeg fixture, stale revision, missing asset, duration/probe/decode, unsafe path, cancellation/partial output.
 - **Acceptance:** A V2 project renders reproducibly, records backend/tool versions and hashes, and cannot render without successful current-revision verification.
-- **Non-goals:** ffmpeg-skill, captions, multi-asset, motion.
+- **Non-goals:** Production ffmpeg-skill adapter, captions, multi-asset, motion; the native path is only a baseline while the capability decision is measured.
 - **Rollback:** Native V2 feature flag/command can be disabled without affecting V1.
 
 ## Phase 3: Multimodal inspection and conversational edits
@@ -146,32 +174,19 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Non-goals:** autonomous long-running agent, multiple agents, unrestricted chat history.
 - **Rollback:** Reopen last accepted revision; failed model sessions create no mutation.
 
-## Phase 4: ffmpeg-skill adapter
+## Phase 4: Chosen media backend adapter
 
-### V2-401: Contract and capability spike
+### V2-401: Implement `FfmpegSkillBackend` when the spike warrants it
 
-- **Objective:** Pin a released ffmpeg-skill version in an isolated research branch/environment and map only Phase 2/5 needs.
-- **Why:** Confirm fit before adopting another execution layer.
-- **Dependencies:** V2-203 and ADR-004 acceptance rules.
-- **Likely files:** research report, contract fixture, no production dependency yet.
-- **Contracts:** capability matrix from Replex primitive to tool/input/output/verification; error taxonomy.
-- **Migration concerns:** None; no canonical state change.
-- **Tests:** static contract snapshot, doctor output, dry runs against synthetic media.
-- **Acceptance:** Written GO/NO-GO with gaps, version/license provenance, performance, and adapter estimate.
-- **Non-goals:** Full MCP exposure, replacing native backend.
-- **Rollback:** Delete isolated spike artifacts; repository runtime unchanged.
-
-### V2-402: Implement `FfmpegSkillBackend`
-
-- **Objective:** Translate validated jobs into the approved pinned structured contract.
+- **Objective:** Translate validated frozen `MediaExecutionJob` and authorized asset handles into the approved pinned structured contract.
 - **Why:** Reuse deterministic mechanics without ceding semantics.
-- **Dependencies:** V2-401 GO.
+- **Dependencies:** V2-150 GO or PARTIAL-GO; V2-203 baseline; chosen capability map and ADR-002 boundary.
 - **Likely files:** new `src/backends/ffmpeg-skill.ts`, backend interface/registry, lockfile/config, tests.
 - **Contracts:** `probe`, `inspect`, `execute`, `verify`; capability/version handshake; structured error mapping.
 - **Migration concerns:** Outputs record backend; projects do not.
 - **Tests:** golden dry plans, native parity, timeout/cancel, missing capability, changed input, malformed JSON, partial output cleanup, path containment.
 - **Acceptance:** Supported jobs pass through adapter with no raw command/filter fields; native fallback remains selectable.
-- **Non-goals:** Every ffmpeg-skill tool, canonical MCP, automatic fallback after partial execution.
+- **Non-goals:** Every ffmpeg-skill tool, canonical MCP, backend access to mutable project state, automatic fallback after partial execution.
 - **Rollback:** Select native backend; preserve adapter-produced outputs as historical artifacts.
 
 ## Phase 5: Richer 2D composition
@@ -180,7 +195,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 - **Objective:** Support the minimum launch-video composition beyond a single clip.
 - **Why:** Prove a useful edit, not a transcoding demo.
-- **Dependencies:** V2-402 or explicit native-backend decision.
+- **Dependencies:** V2-401 GO/PARTIAL-GO or explicit native-backend decision.
 - **Likely files:** V2 schemas/operations/planner, selected backend adapter, verification and tests.
 - **Contracts:** one primary video track, bounded B-roll/video overlay, audio track, typed caption/text/image layers, allowlisted transitions.
 - **Migration concerns:** Schema additions must be optional/defaulted or require a schema minor migration policy chosen before release.
@@ -217,19 +232,19 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Non-goals:** All eight candidate effects, arbitrary 3D scenes, user scripting.
 - **Rollback:** Remove preset operation/revert revision; media-only render remains valid when composition does not require motion.
 
-## Phase 7: Service/job API and local executor
+## Phase 7: Local executor and transport implementation
 
-### V2-701: Extract one service protocol
+### V2-701: Implement transport over the early service contract
 
-- **Objective:** Expose typed commands/jobs/events without duplicating CLI orchestration.
+- **Objective:** Expose the already-stabilized typed commands/jobs/events through a local loopback/service transport without duplicating CLI orchestration.
 - **Why:** Frontend and future cloud need stable behavior independent of transport.
-- **Dependencies:** Stable Phases 1-3 contracts; backend interfaces from Phase 4/6 as applicable.
+- **Dependencies:** V2-104; stable Phases 1-3 contracts; backend interfaces from Phase 4/6 as applicable.
 - **Likely files:** new `src/service/`, orchestration extracted from `src/cli.ts`, API schemas and tests.
 - **Contracts:** commands in `REPLEX_V2.md`; job states `queued|running|waiting_for_input|succeeded|failed|cancelled`; monotonic events.
 - **Migration concerns:** V1 commands remain version-routed or explicitly unsupported per command.
 - **Tests:** idempotency, stale revision, duplicate request, progress order, cancellation, restart recovery policy, sanitized errors.
 - **Acceptance:** CLI and loopback transport call the same service functions and produce the same revision hashes.
-- **Non-goals:** Public internet API, accounts, cloud queue.
+- **Non-goals:** Redesigning domain contracts, public internet API, accounts, cloud queue.
 - **Rollback:** CLI can continue calling service functions in-process.
 
 ### V2-702: Implement the local executor

@@ -9,7 +9,9 @@
 
 ## Decision
 
-Phase 4 evaluates a released, pinned ffmpeg-skill version through `FfmpegSkillBackend`. The adapter maps a strict subset of Replex `MediaExecutionJob` operations to its structured contract and maps results/errors back into Replex evidence. Adoption requires contract-version checks, `doctor` capability checks, dry-run plan inspection, immutable-input guarantees, deadlines, cancellation behavior, deterministic fixtures, and output verification.
+Late Phase 1 or the beginning of Phase 2 performs a cheap capability/contract spike before Replex duplicates media plumbing. The spike records the released skill version and contract version under evaluation and produces a GO, NO-GO, or PARTIAL-GO report. It evaluates probe, contact sheets, scene measurements, crop/fit, cuts, audio measurements, captions/overlays, verification/check, export, structured-contract leakage, execution overhead, platform constraints, cancellation, timeouts, path containment, failure semantics, native parity, and whether adoption is cheaper than owning the required subset.
+
+Only after that report does a later phase implement `FfmpegSkillBackend`. The adapter maps a strict subset of Replex `MediaExecutionJob` operations to its structured contract and maps results/errors back into Replex evidence. Adoption requires contract-version checks, `doctor` capability checks, dry-run plan inspection, immutable-input guarantees, deadlines, cancellation behavior, deterministic fixtures, and output verification.
 
 A restricted MCP spike may expose only probe, scene/contact-sheet analysis, cut/fit, audio measurement, and check tools to an internal research harness. It is experimental and never becomes the model's canonical editing surface. Production orchestration calls the adapter, not unrestricted MCP.
 
@@ -21,7 +23,7 @@ Replex owns project state, operations, revisions, agent planning, inspection pol
 
 ## Acceptance before adoption
 
-- The pinned contract represents every Phase 4 capability without raw command/filter input.
+- The pinned contract represents every adopted capability without raw command/filter input.
 - Dry-run translation is stable and auditable.
 - Inputs are never mutated and outputs remain within an authorized job directory.
 - Timeout, cancellation, missing capability, partial output, and verification failures map to stable Replex errors.

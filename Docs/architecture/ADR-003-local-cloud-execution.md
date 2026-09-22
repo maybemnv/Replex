@@ -9,7 +9,7 @@ Replex must support local-first use and future hosted execution. Identical infra
 
 ## Decision
 
-Define one Replex service/job protocol and canonical job envelope. Local and cloud executors implement that protocol and advertise capabilities. The frontend selects a supported target but does not branch on backend internals. Jobs share revision hashes, idempotency, progress events, cancellation semantics, results, and verification contracts.
+Define one Replex service/job protocol and canonical job envelope. First stabilize transport-independent, versioned domain contracts after the V2 schema/reducer: project snapshots/summaries, capabilities, asset/revision views, jobs, events, errors, command metadata, agent edits, operations, renders, and browser capture/recapture. This early contract is usable by frontend mocks and does not require HTTP, SSE/WebSocket, a daemon, or cloud infrastructure. Local and cloud executors later implement that protocol and advertise capabilities. The frontend selects a supported target but does not branch on backend internals. Jobs share revision hashes, idempotency, progress events, cancellation semantics, results, and verification contracts.
 
 The POC keeps browser capture, uploaded-media analysis, editing, and rendering local. A later bounded cloud-render spike may accept uploaded media. Authenticated cloud browser capture is deferred.
 
@@ -18,6 +18,7 @@ The POC keeps browser capture, uploaded-media analysis, editing, and rendering l
 - Local use does not require cloud accounts or uploads.
 - Cloud workers may use queues/object storage while preserving project semantics.
 - The service layer must resolve local paths versus object references behind the same asset contract.
+- Revision-mutating commands require a base revision; derived jobs reference an explicit immutable revision.
 - Capability mismatch fails before a job starts.
 - Cloud browser capture needs a separate security ADR before implementation.
 

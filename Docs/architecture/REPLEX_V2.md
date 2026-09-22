@@ -4,11 +4,18 @@
 
 **Date:** 19 September 2026
 
-**Source baseline:** `b9b383692b7829ef9ce15e244ae65ba6e8591681`
+**Source/content baseline:** `b9b383692b7829ef9ce15e244ae65ba6e8591681` via
+`origin/backup/pre-replex-v2-2026-09-19`. This recovery branch preserves the
+pre-V2 filesystem content and remains unchanged.
 
-**Recovery branch:** `origin/backup/pre-replex-v2-2026-09-19`
+**Integrated historical baseline:** `82b492858565980f80b323e05a2a58feaced93c2`.
+It has the same Git tree (`b034a5611f207cfd30c87e10d0c3216eef1142e0`) as the
+source/content baseline, but includes the later integrated pre-V2 ancestry. Do
+not treat the two commit histories as interchangeable.
 
-**Integrated audit base:** `82b492858565980f80b323e05a2a58feaced93c2`
+No additional integrated recovery ref is created by this documentation pass;
+the immutable integrated commit remains directly recoverable by SHA and the
+existing recovery branch is not modified.
 
 This is the normative architecture for V2. The historical POC remains documented in [`../poc/technical_poc.md`](../poc/technical_poc.md) and its formal status remains in [`../poc/task.md`](../poc/task.md). The implementation sequence is in [`../v2/implementation-plan.md`](../v2/implementation-plan.md).
 
@@ -135,6 +142,22 @@ interface MediaAsset {
   provenance: BrowserProvenance | UploadProvenance | GeneratedProvenance;
 }
 
+// Immutable source access is authorized by the planner/executor boundary.
+interface AssetHandle {
+  assetId: string;
+  sha256: string;
+  ref: string; // scoped path/object reference, never an arbitrary filesystem path
+}
+
+interface RenderArtifact {
+  outputId: string;
+  ref: string;
+  sha256: string;
+  probe: MediaProbe;
+  sourceRevisionId: string;
+  renderJobHash: string;
+}
+
 interface Clip {
   id: string;
   assetId: string;
@@ -206,7 +229,7 @@ All canonical time values remain integer milliseconds. Clip source ranges are ha
 
 ### Render outputs and verification
 
-A render output references the exact revision, RenderJob hash, backend identity/version, output hash, probe, and verification result. Verification state is derived evidence, not creative approval, and is invalidated by any accepted mutation affecting the revision.
+A render output references the exact revision, RenderJob hash, backend identity/version, output hash, probe, and verification result. It is a derived `RenderArtifact`, not a new immutable source `MediaAsset`. Verification state is derived evidence, not creative approval, and is invalidated by any accepted mutation affecting the revision.
 
 ## 5. V1 compatibility and migration
 
@@ -275,20 +298,60 @@ Bounded tools expose `inspect_project`, `inspect_asset`, `inspect_clip`, `inspec
 
 ## 8. Rendering backends
 
-Canonical state describes composition intent. A planner freezes one revision into a validated `RenderJob`; adapters translate that job into backend contracts.
+Canonical state describes composition intent. A planner freezes one revision into a validated `RenderJob`/`MediaExecutionJob`; adapters translate that immutable plan into backend contracts. Backends do not receive the mutable project or decide what should be rendered.
 
 ```ts
+interface MediaReadContext {
+  resolve(handle: AssetHandle): Promise<ReadableStream>;
+  authorization: string;
+  analysisVersion?: string;
+}
+
+interface MediaExecutionContext {
+  resolve(handle: AssetHandle): Promise<ReadableStream>;
+  outputDirectory: string;
+  cancellation: AbortSignal;
+  authorization: string;
+}
+
 interface MediaBackend {
-  probe(asset: MediaAsset): Promise<MediaProbe>;
-  inspect(asset: MediaAsset, request: MediaInspectionRequest): Promise<MediaEvidence>;
-  execute(project: ProjectV2, job: MediaExecutionJob): Promise<MediaExecutionResult>;
-  verify(output: MediaAsset, requirements: OutputRequirements): Promise<VerificationResult>;
+  probe(input: AssetHandle, context: MediaReadContext): Promise<MediaProbe>;
+  inspect(input: AssetHandle, request: MediaInspectionRequest, context: MediaReadContext): Promise<MediaEvidence>;
+  execute(job: MediaExecutionJob, context: MediaExecutionContext): Promise<MediaExecutionResult>;
+  verify(artifact: RenderArtifact, requirements: OutputRequirements, context: MediaReadContext): Promise<VerificationResult>;
 }
 
 interface MotionBackend {
-  execute(project: ProjectV2, job: MotionExecutionJob): Promise<MotionExecutionResult>;
+  execute(job: MotionExecutionJob, context: MediaExecutionContext): Promise<MotionExecutionResult>;
+}
+
+interface MotionExecutionResult {
+  artifact: RenderArtifact;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  pixelFormat?: string;
+  alpha?: "none" | "straight" | "premultiplied";
+  audio: "present" | "absent";
+  colorSpace?: string;
+  backendId: string;
+  backendVersion: string;
+  presetId: string;
+  presetVersion: string;
+  sourceRevisionId: string;
+  renderJobHash: string;
+  verification: VerificationResult;
 }
 ```
+
+The planner owns conversion from a frozen Replex revision to the execution
+job. Asset handles and resolver contexts are narrow, immutable, and authorized.
+Backends cannot mutate revisions, invent semantic operations, inspect canonical
+state to choose work, or persist renderer-specific commands as project state.
+The final media pipeline rejects motion artifacts whose declared dimensions,
+timing, pixel/alpha/audio, or color-space contract is incompatible with the
+RenderJob unless that transformation is explicitly authorized by the job.
 
 ```text
 Canonical Replex Composition
@@ -304,7 +367,10 @@ native FFmpeg         |
       final media pipeline
 ```
 
-The existing native FFmpeg renderer remains the compatibility backend. `ffmpeg-skill` is a serious candidate for mechanical probe, cut, fit, caption, overlay, audio, analysis, transcode, and delivery checks through an adapter. Replex does not adopt its project format or expose its full MCP surface as the permanent agent API. An early restricted MCP spike may test a small allowlist, but production uses a pinned released version, capability negotiation, structured/dry-run plans, timeouts, output validation, and failure isolation. See [`ADR-004`](ADR-004-ffmpeg-skill.md).
+The existing native FFmpeg renderer remains the compatibility backend. A cheap
+ffmpeg-skill capability/contract spike runs at the Phase 1/2 boundary before
+new media plumbing is duplicated. The later `FfmpegSkillBackend` implementation
+is conditional on that GO or PARTIAL-GO result. See [`ADR-004`](ADR-004-ffmpeg-skill.md).
 
 Ordinary media processing stays separate from motion composition. A motion backend consumes typed presets and keyframes, emits an intermediate or final visual stream, and cannot mutate project state. Remotion is a candidate because it supports programmatic React-based video and server rendering, but the adapter must prove determinism, performance, cancellation, and licensing suitability before adoption. Its current special license can require a company license, so legal/commercial review is an explicit gate rather than an assumption.
 
@@ -312,14 +378,18 @@ The first motion POC proves a small preset set: 3D device/screen tilt, camera pu
 
 ## 9. Local and cloud execution
 
-One service/job protocol supports separate execution targets:
+One service/job protocol supports separate execution targets. Its
+transport-independent domain contracts are stabilized early, after the V2
+schema/reducer, so the frontend can mock against backend-owned types. HTTP,
+SSE/WebSocket, process supervision, and executors remain later implementation
+work:
 
 ```text
 Frontend -> Replex Service API -> Job orchestration -> Local executor
                                              \-----> Cloud executor
 ```
 
-The protocol exposes conceptual commands `createProject`, `importAsset`, `startBrowserCapture`, `requestAgentEdit`, `applyOperations`, `verifyRevision`, `renderPreview`, `renderRevision`, `recaptureBrowserScene`, and `cancelJob`. Each mutating request includes project ID, base revision, idempotency key, execution target when supported, and capability requirements.
+The protocol exposes conceptual commands `createProject`, `importAsset`, `startBrowserCapture`, `requestAgentEdit`, `applyOperations`, `verifyRevision`, `renderPreview`, `renderRevision`, `recaptureBrowserScene`, and `cancelJob`. Revision-mutating requests include a required base revision and idempotency key; derived jobs reference an explicit immutable revision and do not mutate canonical state.
 
 Executors receive the same immutable job envelope and return the same status/events/results. Infrastructure differs: local jobs use local files and processes; cloud jobs use object storage, queues, and isolated workers. Canonical semantics do not differ.
 
@@ -342,7 +412,7 @@ The POC excludes a professional NLE, unrestricted After Effects parity, large ef
 
 ## 12. Open questions requiring evidence
 
-1. Does ffmpeg-skill's released structured contract cover the initial RenderJob without semantic leakage or excessive multi-step overhead?
+1. Does the early ffmpeg-skill capability spike produce a GO, NO-GO, or PARTIAL-GO without semantic leakage or excessive multi-step overhead?
 2. Can Remotion produce the selected motion presets deterministically within local preview and render budgets, and what license applies to the intended company/use case?
 3. What analysis thresholds give useful shot/motion/silence evidence across screen recordings and camera footage without expensive full-video model inspection?
 4. Should V2 store derived evidence references inside the manifest or in a revision-addressed evidence index? Phase 1 must choose one canonical reference pattern.

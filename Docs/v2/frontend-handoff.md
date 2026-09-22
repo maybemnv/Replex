@@ -4,7 +4,7 @@
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
-**Stabilization dependency:** Phase 7 of [`implementation-plan.md`](implementation-plan.md)
+**Contract timing:** The transport-independent domain contract is stabilized early (Phase 1/2) and refined after the agent loop. Local transport/executor implementation remains later (Phase 7). Gurbaaz does not need to wait for Phase 7 to build the mocked workspace.
 
 ## Product experience
 
@@ -71,7 +71,7 @@ The UI may display storyboard/timeline views, but it is never the canonical proj
 
 ## Draft transport types
 
-These are conceptual wire contracts. Backend schemas are authoritative when Phase 7 stabilizes.
+These are conceptual wire contracts. Backend-owned schemas are authoritative; the first version is intended to stabilize early and may evolve only through explicit versioned changes. Transport names and event delivery are later implementation details.
 
 ```ts
 type ID = string;
@@ -80,8 +80,15 @@ type ExecutionTarget = "local" | "cloud";
 
 interface CommandMeta {
   projectId: ID;
-  baseRevisionId?: RevisionID;
   idempotencyKey: string;
+}
+
+interface RevisionCommandMeta extends CommandMeta {
+  baseRevisionId: RevisionID;
+}
+
+interface RevisionReadMeta extends CommandMeta {
+  revisionId: RevisionID;
 }
 
 interface CreateProjectRequest {
@@ -100,18 +107,18 @@ interface ProjectSummary {
   updatedAt: string;
 }
 
-interface ImportAssetRequest extends CommandMeta {
+interface ImportAssetRequest extends RevisionCommandMeta {
   source: { kind: "local_token" | "upload_session"; ref: string };
   declaredFilename: string;
 }
 
-interface StartBrowserCaptureRequest extends CommandMeta {
+interface StartBrowserCaptureRequest extends RevisionCommandMeta {
   flowId: ID;
   approved: true;
   executionTarget: "local";
 }
 
-interface RequestAgentEditRequest extends CommandMeta {
+interface RequestAgentEditRequest extends RevisionCommandMeta {
   prompt: string;
   selectedAssetIds?: ID[];
   selectedClipIds?: ID[];
@@ -119,18 +126,26 @@ interface RequestAgentEditRequest extends CommandMeta {
   preview: boolean;
 }
 
-interface ApplyOperationsRequest extends CommandMeta {
+interface ApplyOperationsRequest extends RevisionCommandMeta {
   operations: SemanticOperation[];
   actor: "user";
 }
 
-interface RenderRequest extends CommandMeta {
+interface RenderRequest extends RevisionReadMeta {
   kind: "preview" | "final";
   presetId: string;
   executionTarget: ExecutionTarget;
 }
 
-interface RecaptureRequest extends CommandMeta {
+interface VerifyRequest extends RevisionReadMeta {
+  requirements?: OutputRequirements;
+}
+
+interface InspectRevisionRequest extends RevisionReadMeta {
+  scope: "project" | "asset" | "clip" | "frames" | "audio" | "browser_provenance";
+}
+
+interface RecaptureRequest extends RevisionCommandMeta {
   assetId: ID;
   changedActionIds: ID[];
   reason: string;
@@ -150,6 +165,15 @@ interface ProjectSnapshot {
 }
 ```
 
+Use `RevisionCommandMeta` for every command that can create a revision:
+accepted asset registration/import, agent edits, manual operations, browser
+recapture replacement, migration persistence, composition changes, and revert.
+Use `RevisionReadMeta` for derived work such as preview/final render,
+verification, or evidence analysis so it cannot silently target a moving
+"current project". `CreateProjectRequest` is a `CommandMeta`-style command
+because it creates the project identity rather than mutating an existing
+revision.
+
 Do not define `SemanticOperation` independently in frontend code. Generate or import it from the backend contract once stable. Early mocks may use only the operation summary fields the UI displays.
 
 ## Conceptual endpoints
@@ -165,7 +189,7 @@ Transport names may change; behavior should not.
 | `POST /projects/:id/browser-captures` | Start approved local capture |
 | `POST /projects/:id/agent-edits` | Start planning/edit job |
 | `POST /projects/:id/operations` | Apply bounded manual operations |
-| `POST /projects/:id/verifications` | Verify current revision |
+| `POST /projects/:id/verifications` | Verify the explicitly referenced immutable revision |
 | `POST /projects/:id/renders` | Start preview/final render |
 | `POST /projects/:id/recaptures` | Start selective browser recapture |
 | `GET /projects/:id/revisions` | List attributable revision summaries |
@@ -201,12 +225,28 @@ interface JobView {
   kind: JobKind;
   state: JobState;
   stage: string;
+  inputRequest?: JobInputRequest;
   progress?: { completed: number; total?: number; unit?: string };
   cancellable: boolean;
   result?: { revisionId?: RevisionID; assetId?: ID; outputId?: ID };
   error?: ReplexError;
   createdAt: string;
   updatedAt: string;
+}
+
+interface JobInputRequest {
+  id: ID;
+  kind:
+    | "browser_approval"
+    | "missing_media"
+    | "user_choice"
+    | "clarification"
+    | "credential_action"
+    | "conflict_resolution";
+  title: string;
+  message: string;
+  options?: Array<{ id: string; label: string; description?: string }>;
+  expiresAt?: string;
 }
 
 type ProjectEvent =
@@ -219,6 +259,12 @@ type ProjectEvent =
 ```
 
 Events are ordered per project and resumable from the last sequence if the transport supports it. Terminal job states never change. Cancellation is a request: show “cancelling” as presentation state while the canonical job remains `running`, then consume `cancelled` or another terminal result.
+
+`waiting_for_input` is not an untyped stage. It must carry `JobInputRequest`,
+which states the accepted choice/action, is attributable to this job, and
+expires or becomes invalid on termination or revision conflict. A credential
+request starts an executor-owned secure flow; raw secrets never enter normal
+project/job event payloads.
 
 ### Agent progress UX
 
@@ -289,7 +335,9 @@ Final export requires current verification and a final render. Do not attempt a 
 
 Each revision row shows actor (`user`, `agent`, `recapture`, `migration`), timestamp, intent summary, operation summary, verification state, and available outputs. Users may inspect or preview an old revision; reverting creates a new attributable revision rather than moving/deleting history. Recapture revisions should show predecessor/replacement provenance and preservation result.
 
-## Mocking plan
+## Frontend work sequencing
+
+### Stable enough to mock now
 
 Gurbaaz can start immediately with generated fixtures for:
 
@@ -302,7 +350,25 @@ Gurbaaz can start immediately with generated fixtures for:
 - local executor offline/capability missing;
 - responsive and keyboard flows.
 
-Mock at the service contract boundary, not inside components. Use deterministic fixtures and a fake event stream with monotonic sequence numbers.
+This includes the project shell, asset browser, browser/upload source cards,
+prompt/agent panel, job state UI, storyboard, revision history, verification
+states, preview lifecycle, conflict handling, capability/offline states, and a
+typed mock event stream. Mock at the backend-owned service-contract boundary,
+not inside components. Use deterministic fixtures and a fake event stream with
+monotonic sequence numbers.
+
+### Contract expected to stabilize early
+
+- `ProjectSnapshot`, `ProjectSummary`, asset/revision views, `CapabilitySet`,
+  `JobView`, `JobInputRequest`, events, errors, and the command metadata types
+  in this handoff;
+- typed operation summaries and revision conflict behavior;
+- preview/render request shapes and explicit immutable revision references.
+
+These are available for mock integration after the early contract phase and
+can evolve only through explicit versioned changes.
+
+### Requires backend implementation later
 
 Wait for backend stabilization before:
 
@@ -313,6 +379,18 @@ Wait for backend stabilization before:
 - enabling local/cloud selection;
 - implementing preview asset URL lifetime/caching rules;
 - promising browser capture steps or editable provenance fields.
+
+Also defer real asynchronous transport, process supervision, local executor
+restart/recovery, cloud targets, real upload tokens, and backend-specific
+motion controls until those services advertise the corresponding capabilities.
+
+### Do not assume yet
+
+- that ffmpeg-skill has been adopted rather than evaluated;
+- that Remotion or any motion backend is selected;
+- that cloud rendering or authenticated cloud browser capture exists;
+- that a documented operation, capability, or output is implemented merely
+  because it appears in this draft.
 
 ## Frontend acceptance checklist
 
