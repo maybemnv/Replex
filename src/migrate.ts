@@ -271,7 +271,7 @@ export function createMigrationReport(sourceInput: ProjectV1, destinationInput: 
     check("scene clips", source.scenes.every((scene) => destination.composition.clips.some((clip) => clip.id === scene.id && clip.assetId === scene.captureId && clip.sourceInMs === scene.sourceInMs && clip.sourceOutMs === scene.sourceOutMs && clip.speed === scene.speed)), "scene identity and timing are preserved as clips"),
     check("overlay layers", Object.values(source.overlays).every((overlay) => destination.composition.layers.some((layer) => layer.id === overlay.id && "text" in layer.properties && layer.properties.text === overlay.text)), "overlay identity and text are preserved as layers"),
     check("revision ancestry", source.revisions.every((revision) => destination.revisions.some((candidate) => candidate.id === revision.id && candidate.parentId === revision.parentId && candidate.operationIds.join("|") === revision.operationIds.join("|"))), "historical revision IDs, parents, and operation references are preserved"),
-    check("outputs", source.outputs.every((output) => destination.outputs.some((candidate) => candidate.outputId === output.id && candidate.sourceRevisionId === output.revisionId && candidate.ref === output.path && candidate.renderJobHash === output.renderJobSha256)), "output references and hashes are preserved"),
+    check("outputs", source.outputs.every((output) => destination.outputs.some((candidate) => candidate.outputId === output.id && candidate.sourceRevisionId === output.revisionId && candidate.ref === output.path.replace(/\\/g, "/") && candidate.renderJobHash === output.renderJobSha256)), "output references and hashes are preserved"),
     check("recapture lineage", source.recaptureLineage.every((lineage) => destination.browser?.recaptureLineage.some((candidate) => candidate.id === lineage.id && candidate.previousAssetId === lineage.previousCaptureId && candidate.replacementAssetId === lineage.replacementCaptureId && candidate.revisionId === lineage.revisionId)), "recapture lineage is preserved"),
   ];
   return {
@@ -324,6 +324,7 @@ export async function migrateProject(sourceRootInput: string, destinationRootInp
   }
   const report = createMigrationReport(source, project);
   report.sourceSha256 = hashText(sourceBytes);
+  if (!report.semanticEquivalence.passed) throw new MigrationError("MIGRATION_FAILED", "migration semantic equivalence checks failed", report);
   const destinationExists = await pathExists(destinationRoot);
   if (destinationExists) return reuseOrCollision(destinationRoot, project, report);
 

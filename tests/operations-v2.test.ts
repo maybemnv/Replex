@@ -170,6 +170,13 @@ describe("V2 operation boundary", () => {
       probe: { durationMs: 4000, width: 1920, height: 1080, fps: 30 },
       provenance: { ...source.assets["asset-browser"].provenance, runId: "run-2", capturedAt: "2026-09-22T00:01:00.000Z" },
     };
+    expect(applyOperationBatch(source, batch(source, [{
+      type: "replace_browser_capture",
+      previousAssetId: "asset-browser",
+      replacementAsset: replacement,
+      changedActionIds: ["unrelated-action"],
+      reason: "updated product state",
+    }]))).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
     const result = applyOperationBatch(source, batch(source, [{
       type: "replace_browser_capture",
       previousAssetId: "asset-browser",

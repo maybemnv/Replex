@@ -356,7 +356,7 @@ function auditRejected(
 }
 
 const SENSITIVE_KEY = /^(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)$/i;
-const SECRET_ASSIGNMENT = /((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)\s*[=:]\s*)(?:Bearer\s+)?[^\s,;}"']+/gi;
+const SECRET_ASSIGNMENT = /(["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:Bearer\s+)?[^\s,;}"']+)/gi;
 
 function redactAuditValue(value: unknown): unknown {
   if (typeof value === "string") return value.replace(SECRET_ASSIGNMENT, "$1[REDACTED]");

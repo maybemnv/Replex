@@ -392,8 +392,10 @@ function replaceBrowserCapture(project: ProjectV2, previousAssetId: string, repl
   const previous = project.assets[previousAssetId];
   if (!previous || previous.provenance.kind !== "browser") return "previous asset is not a browser asset";
   if (replacementAsset.type !== "browser_capture" || replacementAsset.provenance.kind !== "browser") return "replacement asset must be a browser capture";
+  const replacementProvenance = replacementAsset.provenance;
   if (project.assets[replacementAsset.id]) return "replacement asset ID already exists";
-  if (previous.provenance.flowId !== replacementAsset.provenance.flowId || previous.provenance.sceneKey !== replacementAsset.provenance.sceneKey) return "replacement browser provenance is incompatible";
+  if (previous.provenance.flowId !== replacementProvenance.flowId || previous.provenance.sceneKey !== replacementProvenance.sceneKey) return "replacement browser provenance is incompatible";
+  if (changedActionIds.some((actionId) => !replacementProvenance.actionIds.includes(actionId))) return "changed action is not part of replacement browser provenance";
   if (replacementAsset.provenance.predecessorAssetId && replacementAsset.provenance.predecessorAssetId !== previousAssetId) return "replacement lineage predecessor is invalid";
   if (previous.probe.width !== replacementAsset.probe.width || previous.probe.height !== replacementAsset.probe.height || previous.probe.fps !== replacementAsset.probe.fps) return "replacement dimensions or frame rate are incompatible";
   const clips = project.composition.clips.filter((clip) => clip.assetId === previousAssetId);

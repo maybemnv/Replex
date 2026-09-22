@@ -340,7 +340,11 @@ export const ProjectV2Schema = z.object({
         if (steps.length !== provenance.actionIds.length || steps.some((step, index) => step.id !== provenance.actionIds[index])) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "actionIds"], message: "browser provenance actions must match the approved flow" });
         if (provenance.checkpointActionId !== steps.at(-1)?.id) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "checkpointActionId"], message: "browser provenance checkpoint must match the approved flow" });
       }
-      if (provenance.predecessorAssetId && (!assetIds.has(provenance.predecessorAssetId) || provenance.predecessorAssetId === asset.id)) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "predecessorAssetId"], message: "browser predecessor asset does not exist" });
+      if (provenance.predecessorAssetId) {
+        const predecessor = value.assets[provenance.predecessorAssetId];
+        if (!predecessor || predecessor.provenance.kind !== "browser" || provenance.predecessorAssetId === asset.id) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "predecessorAssetId"], message: "browser predecessor asset is invalid" });
+        else if (predecessor.provenance.flowId !== provenance.flowId || predecessor.provenance.sceneKey !== provenance.sceneKey) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "predecessorAssetId"], message: "browser predecessor must belong to the same flow scene" });
+      }
     }
     if (provenance.kind === "generated") {
       for (const [index, inputRef] of provenance.inputRefs.entries()) if (!assetIds.has(inputRef) || inputRef === asset.id) context.addIssue({ code: "custom", path: ["assets", key, "provenance", "inputRefs", index], message: "generated input asset does not exist or cannot self-reference" });
@@ -351,13 +355,22 @@ export const ProjectV2Schema = z.object({
     const asset = value.assets[clip.assetId];
     const track = value.composition.tracks.find((candidate) => candidate.id === clip.trackId);
     if (asset && track && ((asset.type === "audio") !== (track.kind === "audio"))) context.addIssue({ code: "custom", path: ["composition", "clips", index], message: "audio assets require audio tracks and visual assets require video tracks" });
+    if (asset?.probe.durationMs !== undefined && clip.sourceOutMs > asset.probe.durationMs) context.addIssue({ code: "custom", path: ["composition", "clips", index, "sourceOutMs"], message: "clip source range exceeds asset duration" });
   }
   for (const [index, layer] of value.composition.layers.entries()) {
     const properties = layer.properties as { assetId?: string };
-    if (properties.assetId && !assetIds.has(properties.assetId)) context.addIssue({ code: "custom", path: ["composition", "layers", index, "properties", "assetId"], message: "layer asset does not exist" });
+    if (properties.assetId) {
+      const asset = value.assets[properties.assetId];
+      if (!asset) context.addIssue({ code: "custom", path: ["composition", "layers", index, "properties", "assetId"], message: "layer asset does not exist" });
+      else if (layer.kind === "image" && !["image", "generated_graphic"].includes(asset.type)) context.addIssue({ code: "custom", path: ["composition", "layers", index, "properties", "assetId"], message: "image layers require image assets" });
+      else if (layer.kind === "graphic" && asset.type !== "generated_graphic") context.addIssue({ code: "custom", path: ["composition", "layers", index, "properties", "assetId"], message: "graphic layers require generated graphic assets" });
+    }
   }
   const verificationRefs = new Map(value.verification.refs.map((ref) => [ref.id, ref]));
+  const outputIds = new Set<string>();
   for (const [index, output] of value.outputs.entries()) {
+    if (outputIds.has(output.outputId)) context.addIssue({ code: "custom", path: ["outputs", index, "outputId"], message: "output IDs must be unique" });
+    outputIds.add(output.outputId);
     if (!revisionIds.has(output.sourceRevisionId)) context.addIssue({ code: "custom", path: ["outputs", index, "sourceRevisionId"], message: "output source revision does not exist" });
     if (output.revisionId && output.sourceRevisionId !== output.revisionId) context.addIssue({ code: "custom", path: ["outputs", index, "sourceRevisionId"], message: "output source revision must match its revision" });
     const verification = verificationRefs.get(output.verificationRefId);

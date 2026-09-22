@@ -67,6 +67,7 @@ describe("recorded bounded model loop", () => {
     try {
       for (const call of [
         { tool: "shell", input: { command: "ffmpeg" } },
+        { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-secret", sceneId: project.scenes[0].id, kind: "title", text: 'payload "password":"leaked-secret"', placement: "top", startMs: 0, endMs: 1000 } } },
         { tool: "set_title", input: { baseRevisionId: "revision-0", evidenceRefs: [], overlay: { id: "title-1", sceneId: project.scenes[0].id, kind: "title", text: "x", placement: "top", startMs: 0, endMs: 1000 } } },
         { tool: "set_title", input: { baseRevisionId: "revision-stale", evidenceRefs: ["capture:capture-0"], overlay: { id: "title-1", sceneId: project.scenes[0].id, kind: "title", text: "stale request", placement: "top", startMs: 0, endMs: 1000 } } },
       ]) {

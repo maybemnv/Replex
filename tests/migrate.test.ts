@@ -41,6 +41,15 @@ describe("V1 to V2 migration", () => {
     expect(firstReport.warnings.map((warning) => warning.field)).toEqual(expect.arrayContaining(["environment", "operationLog"]));
   });
 
+  it("normalizes Windows separators in semantic equivalence", async () => {
+    const source = await golden();
+    for (const capture of Object.values(source.captures)) capture.path = capture.path.replaceAll("/", "\\\\");
+    for (const output of source.outputs) output.path = output.path.replaceAll("/", "\\\\");
+    const report = createMigrationReport(source, adaptV1ToV2(source));
+    expect(report.semanticEquivalence.passed).toBe(true);
+    expect(report.semanticEquivalence.checks.every((check) => check.passed)).toBe(true);
+  });
+
   it("preserves overlays, output references, revision ancestry, and recapture lineage", () => {
     const source = parseProjectV1({
       schemaVersion: 1,

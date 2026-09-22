@@ -155,6 +155,52 @@ describe("ProjectV2Schema", () => {
     }];
     expect(ProjectV2Schema.parse(project).outputs[0].outputId).toBe("output-1");
     expect(() => ProjectV2Schema.parse({ ...project, outputs: [{ ...project.outputs[0], verificationRefId: "missing" }] })).toThrow();
+    expect(() => ProjectV2Schema.parse({ ...project, outputs: [project.outputs[0], { ...project.outputs[0] }] })).toThrow();
+  });
+
+  it("rejects asset timing and layer type mismatches", () => {
+    const project = validProject();
+    project.composition.durationMs = 6000;
+    expect(() => ProjectV2Schema.parse({
+      ...project,
+      composition: { ...project.composition, clips: [{ ...project.composition.clips[0], sourceOutMs: 5000 }] },
+    })).toThrow();
+    expect(() => ProjectV2Schema.parse({
+      ...project,
+      composition: {
+        ...project.composition,
+        layers: [...project.composition.layers, {
+          id: "layer-image",
+          trackId: "track-overlay",
+          kind: "image",
+          timelineStartMs: 0,
+          durationMs: 100,
+          properties: { assetId: "asset-browser" },
+          keyframes: [],
+        }],
+      },
+    })).toThrow();
+  });
+
+  it("rejects a browser predecessor from another scene", () => {
+    const project = validProject();
+    project.browser!.flows["flow-release"].steps.push({
+      id: "open-other",
+      order: 1,
+      action: "click",
+      target: { kind: "testId", value: "other" },
+      consequential: false,
+      approved: true,
+      checkpoint: { kind: "visible", expected: "Other" },
+      sceneKey: "other",
+    });
+    project.assets["asset-other"] = {
+      ...project.assets["asset-browser"],
+      id: "asset-other",
+      path: "assets/other.mp4",
+      provenance: { kind: "browser", flowId: "flow-release", sceneKey: "other", actionIds: ["open-other"], checkpointActionId: "open-other", runId: "run-other", capturedAt: "2026-09-22T00:00:00.000Z", predecessorAssetId: "asset-browser" },
+    };
+    expect(() => ProjectV2Schema.parse(project)).toThrow();
   });
 
   it("allows historical verification evidence but requires a passed ref for the current revision", () => {
