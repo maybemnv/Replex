@@ -287,6 +287,15 @@ export const CancelJobRequestSchema = ProjectCommandMetaSchema.extend({
 export const ErrorCodeSchema = z.enum([
   "VALIDATION_FAILED",
   "REVISION_CONFLICT",
+  "PROJECT_NOT_FOUND",
+  "ASSET_NOT_FOUND",
+  "REVISION_NOT_FOUND",
+  "INVALID_OPERATION",
+  "INVALID_JOB_STATE",
+  "MEDIA_UNAVAILABLE",
+  "EXECUTION_FAILED",
+  "CANCELLATION",
+  "PATH_FAILURE",
   "STALE_JOB_INPUT",
   "CONTRACT_VERSION_UNSUPPORTED",
   "IDEMPOTENCY_CONFLICT",
@@ -424,6 +433,13 @@ const WaitingForInputJobSchema = z.object({
   inputRequest: JobInputRequestSchema,
 }).strict();
 
+const CancellingJobSchema = z.object({
+  ...jobCommon,
+  state: z.literal("cancelling"),
+  cancellable: z.literal(false),
+  cancellationRequested: z.literal(true),
+}).strict();
+
 const SucceededJobSchema = z.object({
   ...jobCommon,
   state: z.literal("succeeded"),
@@ -455,12 +471,25 @@ export const JobViewSchema = z.discriminatedUnion("state", [
   QueuedJobSchema,
   RunningJobSchema,
   WaitingForInputJobSchema,
+  CancellingJobSchema,
   SucceededJobSchema,
   FailedJobSchema,
   CancelledJobSchema,
 ]).superRefine((job, context) => {
+  const baseRevisionKinds = ["asset_import", "browser_capture", "browser_recapture", "agent_edit", "apply_operations"];
+  const revisionKinds = ["verify_revision", "render_preview", "render_final"];
+  if (baseRevisionKinds.includes(job.kind)) {
+    if (!job.baseRevisionId) context.addIssue({ code: "custom", path: ["baseRevisionId"], message: "job requires a base revision pin" });
+    if (job.revisionId !== undefined) context.addIssue({ code: "custom", path: ["revisionId"], message: "job cannot include both revision pins" });
+  } else if (revisionKinds.includes(job.kind)) {
+    if (!job.revisionId) context.addIssue({ code: "custom", path: ["revisionId"], message: "job requires a revision pin" });
+    if (job.baseRevisionId !== undefined) context.addIssue({ code: "custom", path: ["baseRevisionId"], message: "job cannot include both revision pins" });
+  }
   if (Date.parse(job.updatedAt) < Date.parse(job.createdAt)) {
     context.addIssue({ code: "custom", path: ["updatedAt"], message: "updatedAt must be at or after createdAt" });
+  }
+  if ((job.state === "queued" || job.state === "running" || job.state === "waiting_for_input") && job.cancellationRequested) {
+    context.addIssue({ code: "custom", path: ["cancellationRequested"], message: "requested cancellation must use the cancelling state" });
   }
   if (job.state === "waiting_for_input") {
     const expected = job.baseRevisionId ?? job.revisionId;
@@ -482,19 +511,19 @@ export const JobViewSchema = z.discriminatedUnion("state", [
   }
 });
 
-export const JobStateSchema = z.enum(["queued", "running", "waiting_for_input", "succeeded", "failed", "cancelled"]);
+export const JobSchema = JobViewSchema;
+export const JobStateSchema = z.enum(["queued", "running", "waiting_for_input", "cancelling", "succeeded", "failed", "cancelled"]);
+
+const nonTerminalJobState = JobViewSchema.pipe(z.union([QueuedJobSchema, RunningJobSchema, WaitingForInputJobSchema, CancellingJobSchema]));
 
 const StaleInputTerminalJobSchema = FailedJobSchema.extend({
   error: ErrorSchema.extend({ code: z.literal("STALE_JOB_INPUT") }).strict(),
 }).strict();
+const staleInputTerminalJobState = JobViewSchema.pipe(StaleInputTerminalJobSchema);
 
 export const JobInputSubmissionResultSchema = z.discriminatedUnion("disposition", [
-  z.object({ disposition: z.literal("accepted"), job: JobViewSchema }).strict().superRefine((result, context) => {
-    if (result.job.state === "failed" && result.job.error.code === "STALE_JOB_INPUT") {
-      context.addIssue({ code: "custom", path: ["job"], message: "stale input must use the stale terminal disposition" });
-    }
-  }),
-  z.object({ disposition: z.literal("stale"), job: StaleInputTerminalJobSchema }).strict(),
+  z.object({ disposition: z.literal("accepted"), job: nonTerminalJobState }).strict(),
+  z.object({ disposition: z.literal("stale"), job: staleInputTerminalJobState }).strict(),
 ]);
 
 const eventEnvelope = {
@@ -503,7 +532,7 @@ const eventEnvelope = {
   occurredAt: datetime,
 };
 
-export const ProjectEventSchema = z.discriminatedUnion("type", [
+export const JobEventSchema = z.discriminatedUnion("type", [
   z.object({ ...eventEnvelope, type: z.literal("job.updated"), job: JobViewSchema }).strict(),
   z.object({ ...eventEnvelope, type: z.literal("revision.created"), revision: RevisionViewSchema }).strict(),
   z.object({ ...eventEnvelope, type: z.literal("verification.updated"), revisionId: IdSchema, verification: VerificationViewSchema }).strict(),
@@ -511,14 +540,13 @@ export const ProjectEventSchema = z.discriminatedUnion("type", [
   z.object({ ...eventEnvelope, type: z.literal("render_artifact.created"), artifact: RenderArtifactViewSchema }).strict(),
   z.object({ ...eventEnvelope, type: z.literal("capabilities.updated"), capabilities: CapabilitySetSchema }).strict(),
 ]);
+export const ProjectEventSchema = JobEventSchema;
 
-const activeJobState = z.union([QueuedJobSchema, RunningJobSchema, WaitingForInputJobSchema]);
-const terminalJobState = z.union([SucceededJobSchema, FailedJobSchema, CancelledJobSchema]);
+const cancellingJobState = JobViewSchema.pipe(CancellingJobSchema);
+const terminalJobState = JobViewSchema.pipe(z.union([SucceededJobSchema, FailedJobSchema, CancelledJobSchema]));
 
 export const CancelJobResponseSchema = z.discriminatedUnion("disposition", [
-  z.object({ disposition: z.literal("requested"), job: activeJobState }).strict().superRefine((result, context) => {
-    if (!result.job.cancellationRequested) context.addIssue({ code: "custom", path: ["job", "cancellationRequested"], message: "requested cancellation must be visible on the job" });
-  }),
+  z.object({ disposition: z.literal("requested"), job: cancellingJobState }).strict(),
   z.object({ disposition: z.literal("already_terminal"), job: terminalJobState }).strict(),
 ]);
 
@@ -557,9 +585,11 @@ export type SubmitJobInputRequest = z.infer<typeof SubmitJobInputRequestSchema>;
 export type JobProgress = z.infer<typeof JobProgressSchema>;
 export type JobStage = z.infer<typeof JobStageSchema>;
 export type JobView = z.infer<typeof JobViewSchema>;
+export type Job = z.infer<typeof JobSchema>;
 export type JobState = z.infer<typeof JobStateSchema>;
 export type JobInputSubmissionResult = z.infer<typeof JobInputSubmissionResultSchema>;
-export type ProjectEvent = z.infer<typeof ProjectEventSchema>;
+export type JobEvent = z.infer<typeof JobEventSchema>;
+export type ProjectEvent = JobEvent;
 export type CancelJobResponse = z.infer<typeof CancelJobResponseSchema>;
 export type SemanticOperation = Operation;
 export type SemanticOperationType = OperationType;

@@ -144,9 +144,11 @@ typed mock event stream. Mock at the backend-owned service-contract boundary,
 not inside components. Use deterministic fixtures and a fake event stream with
 monotonic sequence numbers.
 
-### Finalized service contract
+### Contract finalized in this milestone
 
-The domain contract is stable for mock integration. Use the source schemas and deterministic fixtures linked above; changes require an explicit contract version update.
+- [Service contract schemas and types](../../src/service-contract/index.ts)
+- [Deterministic service contract fixtures](../../src/service-contract/fixtures.ts)
+- [Service contract tests](../../tests/service-contract.test.ts)
 
 
 ### Requires backend implementation later
