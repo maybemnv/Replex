@@ -438,6 +438,15 @@ export type Revision = z.infer<typeof RevisionSchema>;
 export type RecaptureLineage = z.infer<typeof RecaptureLineageSchema>;
 export type Project = z.infer<typeof ProjectSchema>;
 
+/** Named exports keep the V1 contract explicit while preserving existing imports. */
+export const ProjectV1Schema = ProjectSchema;
+export const ManifestV1Schema = ManifestSchema;
+export type ProjectV1 = Project;
+
+export function parseProjectV1(input: unknown): ProjectV1 {
+  return ProjectV1Schema.parse(input);
+}
+
 export class ConfigValidationError extends Error {
   readonly code = "CONFIG_INVALID" as const;
   readonly issues: z.ZodIssue[];
