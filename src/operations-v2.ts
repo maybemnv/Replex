@@ -131,7 +131,8 @@ export type OperationBatchResult =
 const DETERMINISTIC_CREATED_AT = "1970-01-01T00:00:00.000Z";
 
 export function semanticHashV2(project: ProjectV2 | Record<string, unknown>): string {
-  const { currentRevisionId: _currentRevisionId, revisions: _revisions, outputs: _outputs, operationLogRef: _operationLogRef, ...semanticProject } = project as Record<string, unknown>;
+  const canonicalProject = ProjectV2Schema.parse(project);
+  const { currentRevisionId: _currentRevisionId, revisions: _revisions, outputs: _outputs, operationLogRef: _operationLogRef, verification: _verification, ...semanticProject } = canonicalProject;
   return digest(canonicalJson(semanticProject));
 }
 
@@ -290,8 +291,7 @@ function applyOperation(project: ProjectV2, operation: Operation): string | unde
     case "set_transition": {
       const clip = findClip(project, operation.clipId);
       if (!clip) return "clip does not exist";
-      clip.transitionOut = structuredClone(operation.transition);
-      return;
+      return replaceClip(project, clip, { ...clip, transitionOut: structuredClone(operation.transition) });
     }
     case "add_text_layer":
       if (operation.layer.kind !== "text") return "text layer operation requires a text layer";
@@ -440,6 +440,19 @@ function validateClipTiming(project: ProjectV2, clip: Clip, replacingClipId?: st
     if (other.id === replacingClipId || other.id === clip.id || other.trackId !== clip.trackId) continue;
     if (clip.timelineStartMs < other.timelineStartMs + clipDuration(other) && other.timelineStartMs < clip.timelineStartMs + duration) return "clip overlaps another clip on the track";
   }
+  const transitionError = validateTransitionPlacement(project, clip, replacingClipId);
+  if (transitionError) return transitionError;
+  return;
+}
+
+function validateTransitionPlacement(project: ProjectV2, clip: Clip, replacingClipId?: string): string | undefined {
+  if (clip.transitionOut?.type !== "crossfade") return;
+  const end = clip.timelineStartMs + clipDuration(clip);
+  const successor = project.composition.clips
+    .filter((other) => other.id !== replacingClipId && other.id !== clip.id && other.trackId === clip.trackId && other.timelineStartMs >= end)
+    .sort((left, right) => left.timelineStartMs - right.timelineStartMs)[0];
+  if (!successor) return "crossfade requires a following clip on the same track";
+  if (clip.transitionOut.durationMs >= clipDuration(successor)) return "crossfade must be shorter than both clips";
   return;
 }
 

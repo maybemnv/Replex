@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { parseProjectV1, type ProjectV1 } from "../src/schema-v1.js";
 import { adaptV1ToV2, createMigrationReport, loadProjectView, migrateProject } from "../src/migrate.js";
 import { ProjectV2Schema } from "../src/schema-v2.js";
-import { loadProjectVersioned } from "../src/project.js";
+import { loadProject, loadProjectVersioned } from "../src/project.js";
 import { runCli } from "../src/cli.js";
+import { semanticHashV2 } from "../src/operations-v2.js";
 
 async function golden(): Promise<ProjectV1> {
   return parseProjectV1(JSON.parse(await readFile(new URL("./golden/project-v1.json", import.meta.url), "utf8")));
@@ -24,6 +25,7 @@ describe("V1 to V2 migration", () => {
     expect(parsed.composition.layers).toHaveLength(0);
     expect(parsed.browser?.flows[source.flow.id]).toEqual(source.flow);
     expect(parsed.currentRevisionId).toBe(`migration-${source.currentRevisionId}`);
+    expect(parsed.revisions.at(-1)?.manifestSha256).toBe(semanticHashV2(parsed));
   });
 
   it("is deterministic and reports semantic equivalence plus deliberate omissions", async () => {
@@ -113,7 +115,8 @@ describe("V1 to V2 migration", () => {
 
     const migrated = adaptV1ToV2(source);
     expect(migrated.composition.layers[0]).toMatchObject({ id: "overlay-id", kind: "text", properties: { text: "Hello" } });
-    expect(migrated.outputs[0]).toMatchObject({ outputId: "output-id", sourceRevisionId: "revision-1", verificationRefId: "verification-1" });
+    expect(migrated.outputs).toEqual([]);
+    expect(migrated.verification.refs).toEqual([]);
     expect(migrated.browser?.recaptureLineage[0]).toMatchObject({ previousAssetId: "capture-old", replacementAssetId: "capture-new", changedActionIds: ["action"] });
     expect(migrated.revisions.map((revision) => revision.id)).toEqual(["revision-0", "revision-1", "migration-revision-1"]);
     expect(ProjectV2Schema.parse(migrated)).toEqual(migrated);
@@ -133,6 +136,10 @@ describe("explicit non-destructive migration", () => {
       await expect(loadProjectVersioned(root)).resolves.toMatchObject({ schemaVersion: 1, project: { schemaVersion: 1 } });
       await expect(loadProjectView(root)).resolves.toMatchObject({ schemaVersion: 2, projectId: source.projectId });
       expect(await readFileBytes(join(root, "project.json"), "utf8")).toBe(sourceBytes);
+
+      await writeFile(join(root, "project.json"), `${JSON.stringify(adaptV1ToV2(source))}\n`);
+      await expect(loadProject(root)).rejects.toMatchObject({ code: "PROJECT_VERSION_MISMATCH" });
+      await expect(loadProjectVersioned(root)).resolves.toMatchObject({ schemaVersion: 2, project: { schemaVersion: 2 } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -241,5 +248,46 @@ describe("explicit non-destructive migration", () => {
       await rm(outsideRoot, { recursive: true, force: true });
       await rm(destinationRoot, { recursive: true, force: true });
     }
+  });
+
+  it("hashes copied render artifacts and omits absent outputs without passed verification", async () => {
+    const { createHash } = await import("node:crypto");
+    const { mkdir, mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const source = await golden();
+    source.outputs = [
+      { id: "output-present", revisionId: source.currentRevisionId, renderJobSha256: "c".repeat(64), path: "renders/present.mp4", ffprobe: { durationMs: 1000, width: 1920, height: 1080, fps: 30, videoCodec: "h264", audioCodec: "aac" }, verificationId: "verification-present" },
+      { id: "output-missing", revisionId: source.currentRevisionId, renderJobSha256: "d".repeat(64), path: "renders/missing.mp4", ffprobe: { durationMs: 1000, width: 1920, height: 1080, fps: 30, videoCodec: "h264", audioCodec: "aac" }, verificationId: "verification-missing" },
+    ];
+    const sourceRoot = await mkdtemp(join(tmpdir(), "replex-output-source-"));
+    const destinationRoot = join(tmpdir(), `replex-output-destination-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const bytes = Buffer.from("actual rendered media bytes");
+    try {
+      await mkdir(join(sourceRoot, "renders"), { recursive: true });
+      await writeFile(join(sourceRoot, "project.json"), JSON.stringify(source));
+      await writeFile(join(sourceRoot, "renders/present.mp4"), bytes);
+      const result = await migrateProject(sourceRoot, destinationRoot);
+      expect(result.project.outputs).toHaveLength(1);
+      expect(result.project.outputs[0]).toMatchObject({ outputId: "output-present", sha256: createHash("sha256").update(bytes).digest("hex"), renderJobHash: "c".repeat(64) });
+      expect(result.project.outputs[0].sha256).not.toBe("c".repeat(64));
+      expect(createHash("sha256").update(await readFile(join(destinationRoot, "renders/present.mp4"))).digest("hex")).toBe(result.project.outputs[0].sha256);
+      expect(result.project.verification.refs.map((ref) => ref.id)).toEqual(["verification-present"]);
+      expect(result.project.verification.refs).not.toContainEqual(expect.objectContaining({ id: "verification-missing" }));
+      expect(result.report.warnings).toContainEqual(expect.objectContaining({ field: "outputs.output-missing", code: "OMITTED" }));
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(destinationRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("maps V1 crossfades to adjacent non-overlapping clips", async () => {
+    const source = await golden();
+    source.scenes[0].transition = { type: "crossfade", durationMs: 500 };
+    const migrated = adaptV1ToV2(source);
+    const [first, second] = migrated.composition.clips;
+    expect(first.timelineStartMs + (first.sourceOutMs - first.sourceInMs) / first.speed).toBe(second.timelineStartMs);
+    expect(second.timelineStartMs).toBe(10000);
+    expect(() => ProjectV2Schema.parse(migrated)).not.toThrow();
   });
 });

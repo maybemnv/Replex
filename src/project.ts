@@ -269,7 +269,12 @@ export async function writeRevision(
 
 export async function loadProject(root: string): Promise<Project> {
   const loaded = await loadProjectVersioned(root);
-  return loaded.project as Project;
+  if (loaded.schemaVersion !== 1) {
+    const error = new Error("loadProject() supports V1 only; use loadProjectVersioned() for Project V2") as Error & { code: string };
+    error.code = "PROJECT_VERSION_MISMATCH";
+    throw error;
+  }
+  return loaded.project;
 }
 
 /** Reads either persisted schema without adapting or writing it. */

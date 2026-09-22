@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "./canonical-json.js";
+import { semanticHashV2 } from "./operations-v2.js";
 import { loadProjectVersioned } from "./project.js";
 import { parseProjectV1, type ProjectV1 } from "./schema-v1.js";
 import {
@@ -145,10 +146,10 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
       ...(focus?.bounds ? { crop: { ...focus.bounds } } : {}),
       opacity: 1,
       audioGainDb: 0,
+      muted: false,
       transitionOut: { ...scene.transition },
     });
     timelineStartMs += durationMs;
-    if (scene.transition.type === "crossfade") timelineStartMs -= scene.transition.durationMs;
     if (timelineStartMs < 0) throw new MigrationError("MIGRATION_FAILED", `scene ${scene.id} transition exceeds the timeline`);
   }
 
@@ -182,12 +183,6 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
   const currentRevision = source.revisions.find((revision) => revision.id === source.currentRevisionId);
   if (!currentRevision) throw new MigrationError("MIGRATION_FAILED", `current V1 revision is missing: ${source.currentRevisionId}`);
 
-  const outputRefs = source.outputs.map((output) => ({
-    id: output.verificationId,
-    revisionId: output.revisionId,
-    status: "passed" as const,
-    evidenceRefs: [`verification/${output.verificationId}.json`],
-  }));
   const draft: Omit<ProjectV2, "revisions" | "currentRevisionId"> & { revisions: ProjectV2["revisions"]; currentRevisionId: string } = {
     schemaVersion: 2,
     projectId: source.projectId,
@@ -217,22 +212,11 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
       },
     ],
     operationLogRef: OPERATION_LOG_REF,
-    outputs: source.outputs.map((output) => ({
-      outputId: output.id,
-      revisionId: output.revisionId,
-      ref: output.path.replace(/\\/g, "/"),
-      sha256: output.renderJobSha256,
-      probe: { ...output.ffprobe },
-      sourceRevisionId: output.revisionId,
-      renderJobHash: output.renderJobSha256,
-      backendId: "native-ffmpeg",
-      backendVersion: "v1",
-      verificationRefId: output.verificationId,
-    })),
+    outputs: [],
     verification: {
       revisionId: migrationRevisionId,
       status: "stale",
-      refs: outputRefs,
+      refs: [],
     },
     browser: {
       flows: { [source.flow.id]: source.flow },
@@ -247,7 +231,7 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
     },
     currentRevisionId: migrationRevisionId,
   };
-  draft.revisions.at(-1)!.manifestSha256 = v2SemanticHash(draft);
+  draft.revisions.at(-1)!.manifestSha256 = semanticHashV2(draft);
   try {
     return parseProjectV2(draft);
   } catch (error) {
@@ -258,7 +242,7 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
 export function createMigrationReport(sourceInput: ProjectV1, destinationInput: ProjectV2): MigrationReport {
   const source = parseProjectV1(sourceInput);
   const destination = parseProjectV2(destinationInput);
-  const warnings = migrationWarnings(source);
+  const warnings = migrationWarnings(source).filter((warning) => !warning.field.startsWith("outputs.") || !destination.outputs.some((output) => warning.field === `outputs.${output.outputId}`));
   const checks: SemanticCheck[] = [
     check("project identity", source.projectId === destination.projectId, "projectId is preserved"),
     check("brief", canonicalJson(source.brief) === canonicalJson(destination.brief), "brief fields are preserved"),
@@ -271,7 +255,12 @@ export function createMigrationReport(sourceInput: ProjectV1, destinationInput: 
     check("scene clips", source.scenes.every((scene) => destination.composition.clips.some((clip) => clip.id === scene.id && clip.assetId === scene.captureId && clip.sourceInMs === scene.sourceInMs && clip.sourceOutMs === scene.sourceOutMs && clip.speed === scene.speed)), "scene identity and timing are preserved as clips"),
     check("overlay layers", Object.values(source.overlays).every((overlay) => destination.composition.layers.some((layer) => layer.id === overlay.id && "text" in layer.properties && layer.properties.text === overlay.text)), "overlay identity and text are preserved as layers"),
     check("revision ancestry", source.revisions.every((revision) => destination.revisions.some((candidate) => candidate.id === revision.id && candidate.parentId === revision.parentId && candidate.operationIds.join("|") === revision.operationIds.join("|"))), "historical revision IDs, parents, and operation references are preserved"),
-    check("outputs", source.outputs.every((output) => destination.outputs.some((candidate) => candidate.outputId === output.id && candidate.sourceRevisionId === output.revisionId && candidate.ref === output.path.replace(/\\/g, "/") && candidate.renderJobHash === output.renderJobSha256)), "output references and hashes are preserved"),
+    check("outputs", source.outputs.every((output) => {
+      const candidate = destination.outputs.find((item) => item.outputId === output.id);
+      return candidate
+        ? candidate.sourceRevisionId === output.revisionId && candidate.ref === output.path.replace(/\\/g, "/") && candidate.renderJobHash === output.renderJobSha256
+        : warnings.some((warning) => warning.code === "OMITTED" && warning.field === `outputs.${output.id}`);
+    }), "available outputs carry their render-job hash and computed artifact hash; missing outputs are reported as omitted"),
     check("recapture lineage", source.recaptureLineage.every((lineage) => destination.browser?.recaptureLineage.some((candidate) => candidate.id === lineage.id && candidate.previousAssetId === lineage.previousCaptureId && candidate.replacementAssetId === lineage.replacementCaptureId && candidate.revisionId === lineage.revisionId)), "recapture lineage is preserved"),
   ];
   return {
@@ -289,7 +278,7 @@ export function createMigrationReport(sourceInput: ProjectV1, destinationInput: 
       overlayIds: Object.keys(source.overlays),
       layerIds: destination.composition.layers.map((layer) => layer.id),
       revisionIds: source.revisions.map((revision) => revision.id),
-      outputIds: source.outputs.map((output) => output.id),
+      outputIds: destination.outputs.map((output) => output.outputId),
       recaptureLineageIds: source.recaptureLineage.map((lineage) => lineage.id),
     },
     warnings,
@@ -322,6 +311,7 @@ export async function migrateProject(sourceRootInput: string, destinationRootInp
     if (error instanceof MigrationError) throw error;
     throw new MigrationError("MIGRATION_FAILED", error instanceof Error ? error.message : String(error));
   }
+  project = await resolveHistoricalOutputs(sourceRoot, source, project);
   const report = createMigrationReport(source, project);
   report.sourceSha256 = hashText(sourceBytes);
   if (!report.semanticEquivalence.passed) throw new MigrationError("MIGRATION_FAILED", "migration semantic equivalence checks failed", report);
@@ -339,7 +329,8 @@ export async function migrateProject(sourceRootInput: string, destinationRootInp
   const stage = await mkdtemp(join(parent, `.${destinationRoot.split(/[\\/]/).at(-1) ?? "replex"}.migration-`));
   let published = false;
   try {
-    await copyReferencedArtifacts(sourceRoot, stage, source, report);
+    await copyReferencedArtifacts(sourceRoot, stage, source, report, project);
+    report.destinationSha256 = hash(project);
     await writeFile(join(stage, "project.json"), `${JSON.stringify(project, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
     parseProjectV2(JSON.parse(await readFile(join(stage, "project.json"), "utf8")));
     await writeFile(join(stage, "migration-report.json"), `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
@@ -372,11 +363,6 @@ function hashBytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function v2SemanticHash(value: Partial<ProjectV2>): string {
-  const { currentRevisionId: _currentRevisionId, revisions: _revisions, outputs: _outputs, ...semantic } = value;
-  return hash(semantic);
-}
-
 function migrationRevisionIdFor(source: ProjectV1): string {
   const ids = new Set(source.revisions.map((revision) => revision.id));
   const base = `migration-${source.currentRevisionId}`;
@@ -398,8 +384,35 @@ function migrationWarnings(source: ProjectV1): MigrationWarning[] {
   for (const scene of source.scenes) if (scene.focus) warnings.push({ code: "DERIVED", field: `scenes.${scene.id}.focus`, detail: "V1 focus bounds become a static V2 crop; temporal focus timing and preset behavior are not represented." });
   for (const overlay of Object.values(source.overlays)) warnings.push({ code: "DERIVED", field: `overlays.${overlay.id}.placement`, detail: "V2 text layers preserve text and timing but do not yet model V1 placement or title/callout styling." });
   for (const revision of source.revisions) if (revision.actor !== "recapture") warnings.push({ code: "DERIVED", field: `revisions.${revision.id}.actor`, detail: `V1 actor ${revision.actor} maps to the closest V2 actor vocabulary.` });
+  for (const output of source.outputs) warnings.push({ code: "OMITTED", field: `outputs.${output.id}`, detail: "The in-memory V1 adapter cannot verify artifact bytes; explicit migration includes this render artifact only when the file exists and records its computed SHA-256." });
   if (source.outputs.length) warnings.push({ code: "DERIVED", field: "outputs.backend", detail: "V1 output records do not carry backend identity/version; native-ffmpeg/v1 is derived." });
   return warnings;
+}
+
+async function resolveHistoricalOutputs(sourceRoot: string, source: ProjectV1, project: ProjectV2): Promise<ProjectV2> {
+  const outputs: ProjectV2["outputs"] = [];
+  const refs: ProjectV2["verification"]["refs"] = [];
+  for (const output of source.outputs) {
+    const artifactPath = await safeContainedPath(sourceRoot, output.path);
+    if (!artifactPath || !(await pathExists(artifactPath))) continue;
+    const verificationSourceRef = `verification/${output.verificationId.replace(/^verification-/, "")}.json`;
+    const verificationPath = await safeContainedPath(sourceRoot, verificationSourceRef);
+    const evidenceRefs = verificationPath && await pathExists(verificationPath) ? [`verification/${output.verificationId}.json`] : [];
+    outputs.push({
+      outputId: output.id,
+      revisionId: output.revisionId,
+      ref: output.path.replace(/\\/g, "/"),
+      sha256: hashBytes(await readFile(artifactPath)),
+      probe: { ...output.ffprobe },
+      sourceRevisionId: output.revisionId,
+      renderJobHash: output.renderJobSha256,
+      backendId: "native-ffmpeg",
+      backendVersion: "v1",
+      verificationRefId: output.verificationId,
+    });
+    refs.push({ id: output.verificationId, revisionId: output.revisionId, status: "passed", evidenceRefs });
+  }
+  return parseProjectV2({ ...project, outputs, verification: { ...project.verification, refs } });
 }
 
 function isSameOrNested(parent: string, candidate: string): boolean {
@@ -431,7 +444,7 @@ function reuseOrCollision(destinationRoot: string, project: ProjectV2, report: M
   })();
 }
 
-async function copyReferencedArtifacts(sourceRoot: string, stageRoot: string, source: ProjectV1, _report: MigrationReport): Promise<void> {
+async function copyReferencedArtifacts(sourceRoot: string, stageRoot: string, source: ProjectV1, report: MigrationReport, project: ProjectV2): Promise<void> {
   const refs = new Map<string, string>([["operations.jsonl", OPERATION_LOG_REF]]);
   const captureHashes = new Map<string, string>();
   for (const capture of Object.values(source.captures)) {
@@ -440,15 +453,21 @@ async function copyReferencedArtifacts(sourceRoot: string, stageRoot: string, so
     if (capture.screenshotPath) refs.set(capture.screenshotPath, capture.screenshotPath);
     if (capture.tracePath) refs.set(capture.tracePath, capture.tracePath);
   }
+  const preservedOutputIds = new Set(report.preservedIds.outputIds);
+  const outputRefs = new Set(source.outputs.filter((output) => preservedOutputIds.has(output.id)).map((output) => output.path.replace(/\\/g, "/")));
   for (const output of source.outputs) {
+    if (!preservedOutputIds.has(output.id)) continue;
     refs.set(output.path, output.path);
     const verificationFile = output.verificationId.replace(/^verification-/, "");
-    refs.set(`verification/${verificationFile}.json`, `verification/${output.verificationId}.json`);
+    const verificationSourceRef = `verification/${verificationFile}.json`;
+    const verificationSourcePath = await safeContainedPath(sourceRoot, verificationSourceRef);
+    if (verificationSourcePath && await pathExists(verificationSourcePath)) refs.set(verificationSourceRef, `verification/${output.verificationId}.json`);
   }
   for (const [sourceRef, destinationRef] of refs) {
     const sourcePath = await safeContainedPath(sourceRoot, sourceRef);
     if (!sourcePath || !(await pathExists(sourcePath))) {
-      _report.warnings.push({ code: "WARNING", field: `artifact.${sourceRef}`, detail: "Referenced V1 artifact is absent; the V2 reference is retained and must be resolved before media execution." });
+      if (outputRefs.has(sourceRef.replace(/\\/g, "/"))) throw new MigrationError("MIGRATION_FAILED", `render artifact disappeared during migration: ${sourceRef}`);
+      report.warnings.push({ code: "WARNING", field: `artifact.${sourceRef}`, detail: "Referenced V1 artifact is absent; the V2 reference is retained and must be resolved before media execution." });
       continue;
     }
     const expectedHash = captureHashes.get(sourceRef);
@@ -459,6 +478,7 @@ async function copyReferencedArtifacts(sourceRoot: string, stageRoot: string, so
     await mkdir(dirname(destinationPath), { recursive: true });
     await copyFile(sourcePath, destinationPath);
   }
+  for (const output of project.outputs) output.sha256 = hashBytes(await readFile(join(stageRoot, output.ref)));
   const operationLogPath = join(stageRoot, OPERATION_LOG_REF);
   if (!(await pathExists(operationLogPath))) {
     await mkdir(dirname(operationLogPath), { recursive: true });

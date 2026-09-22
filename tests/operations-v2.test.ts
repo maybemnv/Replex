@@ -12,7 +12,7 @@ import {
   semanticHashV2,
   type OperationBatchInput,
 } from "../src/operations-v2.js";
-import { type ProjectV2 } from "../src/schema-v2.js";
+import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -59,6 +59,7 @@ function project(): ProjectV2 {
         transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
         opacity: 1,
         audioGainDb: 0,
+        muted: false,
       }],
       layers: [],
     },
@@ -147,6 +148,35 @@ describe("V2 operation boundary", () => {
     }
   });
 
+  it("excludes mutable verification evidence from semantic revision hashes", () => {
+    const source = project();
+    const before = semanticHashV2(source);
+    source.verification = { revisionId: source.currentRevisionId, status: "passed", refs: [{ id: "verification-1", revisionId: source.currentRevisionId, status: "passed", evidenceRefs: ["evidence/check.json"] }] };
+    expect(semanticHashV2(source)).toBe(before);
+    source.verification.status = "failed";
+    expect(semanticHashV2(source)).toBe(before);
+
+    const withoutMute = structuredClone(source);
+    delete (withoutMute.composition.clips[0] as Partial<typeof withoutMute.composition.clips[number]>).muted;
+    expect(semanticHashV2(withoutMute)).toBe(semanticHashV2({ ...withoutMute, composition: { ...withoutMute.composition, clips: [{ ...withoutMute.composition.clips[0], muted: false }, ...withoutMute.composition.clips.slice(1)] } }));
+  });
+
+  it("allows edits on migrated crossfade clips and rejects a transition without a neighbor", () => {
+    const source = project();
+    const first = source.composition.clips[0];
+    first.sourceOutMs = 2000;
+    first.transitionOut = { type: "crossfade", durationMs: 500 };
+    source.composition.clips.push({ ...first, id: "clip-next", timelineStartMs: 2000, sourceInMs: 2000, sourceOutMs: 4000, transitionOut: { type: "cut", durationMs: 0 } });
+    source.revisions[0].manifestSha256 = semanticHashV2(source);
+    const parsed = ProjectV2Schema.parse(source);
+    const trimmed = applyOperationBatch(parsed, batch(parsed, [{ type: "trim_clip", clipId: "clip-hero", sourceInMs: 0, sourceOutMs: 1800 }]));
+    const sped = applyOperationBatch(parsed, batch(parsed, [{ type: "set_speed", clipId: "clip-hero", speed: 1.1 }]));
+    expect(trimmed.ok).toBe(true);
+    expect(sped.ok).toBe(true);
+
+    expect(applyOperationBatch(project(), batch(project(), [{ type: "set_transition", clipId: "clip-hero", transition: { type: "crossfade", durationMs: 500 } }]))).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
+  });
+
   it("keeps prior render evidence immutable while invalidating only current verification", () => {
     const source = project();
     const verificationId = "verification-0";
@@ -233,6 +263,7 @@ describe("V2 operation boundary", () => {
       { type: "trim_clip", clipId: "clip-hero", sourceInMs: 500, sourceOutMs: 3500 },
       { type: "move_clip", clipId: "clip-hero", timelineStartMs: 100 },
       { type: "set_speed", clipId: "clip-hero", speed: 2 },
+      { type: "create_clip", clip: { id: "clip-next", assetId: replacement.id, trackId: "track-video", timelineStartMs: 1600, sourceInMs: 3500, sourceOutMs: 4000, speed: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 }, opacity: 1, audioGainDb: 0, muted: false } },
       { type: "set_transform", clipId: "clip-hero", transform: { x: 2, y: 3, scale: 1.2, rotation: 5, anchorX: 0.5, anchorY: 0.5 }, crop: { x: 0, y: 0, width: 0.8, height: 0.8 } },
       { type: "set_opacity", clipId: "clip-hero", opacity: 0.8 },
       { type: "set_transition", clipId: "clip-hero", transition: { type: "crossfade", durationMs: 250 } },

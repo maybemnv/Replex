@@ -51,6 +51,7 @@ function validProject(): ProjectV2 {
         transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
         opacity: 1,
         audioGainDb: 0,
+        muted: false,
       }],
       layers: [{
         id: "layer-title",
@@ -215,5 +216,42 @@ describe("ProjectV2Schema", () => {
 
     expect(ProjectV2Schema.parse(project).verification.refs[0]).toEqual(historicalRef);
     expect(() => ProjectV2Schema.parse({ ...project, verification: { ...project.verification, refs: [historicalRef] } })).toThrow();
+  });
+
+  it("rejects cyclic revision ancestry and verification refs to unknown revisions", () => {
+    const project = validProject();
+    project.revisions.unshift({ id: "revision-0", parentId: "revision-1", actor: "user", operationIds: [], manifestSha256: sha("old"), createdAt: "2026-09-22T00:00:00.000Z" });
+    project.revisions[1].parentId = "revision-0";
+    expect(() => ProjectV2Schema.parse(project)).toThrow();
+
+    const second = validProject();
+    second.verification.refs = [{ id: "verification-orphan", revisionId: "revision-missing", status: "failed", evidenceRefs: [] }];
+    expect(() => ProjectV2Schema.parse(second)).toThrow();
+  });
+
+  it("defaults missing clip mute state to false and models crossfades without overlap", () => {
+    const project = validProject();
+    delete (project.composition.clips[0] as Partial<typeof project.composition.clips[number]>).muted;
+    expect(ProjectV2Schema.parse(project).composition.clips[0].muted).toBe(false);
+    project.composition.clips[0].sourceOutMs = 2000;
+    project.composition.clips[0].transitionOut = { type: "crossfade", durationMs: 500 };
+    project.composition.clips.push({
+      ...project.composition.clips[0],
+      id: "clip-next",
+      timelineStartMs: 2000,
+      sourceInMs: 2000,
+      sourceOutMs: 4000,
+      transitionOut: { type: "cut", durationMs: 0 },
+    });
+    expect(() => ProjectV2Schema.parse(project)).not.toThrow();
+
+    project.composition.clips[1].timelineStartMs = 1500;
+    expect(() => ProjectV2Schema.parse(project)).toThrow();
+  });
+
+  it("rejects a crossfade without a following same-track clip", () => {
+    const project = validProject();
+    project.composition.clips[0].transitionOut = { type: "crossfade", durationMs: 500 };
+    expect(() => ProjectV2Schema.parse(project)).toThrow();
   });
 });

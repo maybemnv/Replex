@@ -12,10 +12,10 @@ replay and revision hashing incomplete.
 
 ## Decision
 
-Project V2 includes an optional boolean `Clip.muted` field. The V2 reducer
-updates this field for `mute_clip` and includes it in the semantic project
-projection and revision hash. Existing V2 clips remain valid because the
-field defaults to `false` when absent.
+Project V2 includes a boolean `Clip.muted` field. The V2 schema defaults this
+field to `false` when absent, giving parsed projects one canonical value. The
+V2 reducer updates it for `mute_clip` and includes it in the semantic project
+projection and revision hash.
 
 This decision defines canonical intent only. Renderer and backend execution
 for mute remain future work; no renderer command, FFmpeg argument, or backend

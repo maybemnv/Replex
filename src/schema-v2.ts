@@ -153,7 +153,7 @@ export const ClipSchema = z.object({
   crop: CropSchema.optional(),
   opacity: unitInterval,
   audioGainDb: finite,
-  muted: z.boolean().optional(),
+  muted: z.boolean().default(false),
   transitionOut: TransitionV2Schema.optional(),
 }).strict().superRefine((value, context) => {
   if (value.sourceOutMs <= value.sourceInMs) context.addIssue({ code: "custom", path: ["sourceOutMs"], message: "clip source range must be positive" });
@@ -230,6 +230,7 @@ export const CompositionSchema = z.object({
     orders.add(track.order);
   }
   const ids = new Set<string>();
+  const clipsByTrack = new Map<string, Array<{ clip: z.infer<typeof ClipSchema>; index: number }>>();
   for (const [index, clip] of value.clips.entries()) {
     if (ids.has(clip.id)) context.addIssue({ code: "custom", path: ["clips", index, "id"], message: "clip and layer IDs must be globally unique" });
     ids.add(clip.id);
@@ -238,6 +239,27 @@ export const CompositionSchema = z.object({
     else if (track.kind === "overlay") context.addIssue({ code: "custom", path: ["clips", index, "trackId"], message: "clips cannot use overlay tracks" });
     const duration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
     if (clip.timelineStartMs + duration > value.durationMs) context.addIssue({ code: "custom", path: ["clips", index, "timelineStartMs"], message: "clip timing exceeds composition duration" });
+    const trackClips = clipsByTrack.get(clip.trackId) ?? [];
+    trackClips.push({ clip, index });
+    clipsByTrack.set(clip.trackId, trackClips);
+  }
+  for (const clips of clipsByTrack.values()) {
+    clips.sort((left, right) => left.clip.timelineStartMs - right.clip.timelineStartMs);
+    for (let index = 0; index < clips.length; index += 1) {
+      const current = clips[index];
+      const currentEnd = current.clip.timelineStartMs + (current.clip.sourceOutMs - current.clip.sourceInMs) / current.clip.speed;
+      const next = clips[index + 1];
+      if (next) {
+        if (currentEnd > next.clip.timelineStartMs) context.addIssue({ code: "custom", path: ["clips", next.index, "timelineStartMs"], message: "clips on a track must not overlap; transitionOut owns transition timing" });
+      }
+      if (current.clip.transitionOut?.type === "crossfade") {
+        const successor = clips.slice(index + 1).find(({ clip }) => clip.timelineStartMs >= currentEnd);
+        if (!successor) context.addIssue({ code: "custom", path: ["clips", current.index, "transitionOut"], message: "crossfade requires a following clip on the same track" });
+        else if (current.clip.transitionOut.durationMs >= (successor.clip.sourceOutMs - successor.clip.sourceInMs) / successor.clip.speed) {
+          context.addIssue({ code: "custom", path: ["clips", current.index, "transitionOut", "durationMs"], message: "crossfade must be shorter than both clips" });
+        }
+      }
+    }
   }
   for (const [index, layer] of value.layers.entries()) {
     if (ids.has(layer.id)) context.addIssue({ code: "custom", path: ["layers", index, "id"], message: "clip and layer IDs must be globally unique" });
@@ -326,7 +348,24 @@ export const ProjectV2Schema = z.object({
   for (const [index, revision] of value.revisions.entries()) {
     if (revision.parentId && (!revisionIds.has(revision.parentId) || revision.parentId === revision.id)) context.addIssue({ code: "custom", path: ["revisions", index, "parentId"], message: "revision parent must be another existing revision" });
   }
+  const revisionParents = new Map(value.revisions.map((revision) => [revision.id, revision.parentId]));
+  const complete = new Set<string>();
+  const visiting = new Set<string>();
+  const visitRevision = (id: string): void => {
+    if (complete.has(id)) return;
+    if (visiting.has(id)) {
+      context.addIssue({ code: "custom", path: ["revisions"], message: "revision ancestry must be acyclic" });
+      return;
+    }
+    visiting.add(id);
+    const parentId = revisionParents.get(id);
+    if (parentId && revisionParents.has(parentId)) visitRevision(parentId);
+    visiting.delete(id);
+    complete.add(id);
+  };
+  for (const revision of value.revisions) visitRevision(revision.id);
   if (!revisionIds.has(value.verification.revisionId)) context.addIssue({ code: "custom", path: ["verification", "revisionId"], message: "verification revision does not exist" });
+  for (const [index, ref] of value.verification.refs.entries()) if (!revisionIds.has(ref.revisionId)) context.addIssue({ code: "custom", path: ["verification", "refs", index, "revisionId"], message: "verification reference revision does not exist" });
   if (value.verification.status === "passed" && !value.verification.refs.some((ref) => ref.status === "passed" && ref.revisionId === value.verification.revisionId)) context.addIssue({ code: "custom", path: ["verification", "refs"], message: "passed verification state requires a passed verification reference for its revision" });
   const assetIds = new Set(Object.keys(value.assets));
   const flowIds = new Set(Object.keys(value.browser?.flows ?? {}));
