@@ -1,10 +1,10 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** Contract draft for parallel frontend planning; no frontend is implemented
+**Status:** V2-104 service schemas and mock fixtures finalized; frontend, transport, and runtime service are not implemented
 
-**Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
+**Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
-**Contract timing:** The transport-independent domain contract is stabilized early (Phase 1/2) and refined after the agent loop. Local transport/executor implementation remains later (Phase 7). Gurbaaz does not need to wait for Phase 7 to build the mocked workspace.
+**Contract timing:** Gurbaaz can mock against the finalized V2-104 domain contract now. HTTP/SSE/WebSocket, job scheduling, executors, and runtime capability reporting remain later work (Phase 7).
 
 ## Product experience
 
@@ -33,7 +33,7 @@ Agent planning/edit job -> Preview
 Verify -> Render/export
 ```
 
-The UI may display storyboard/timeline views, but it is never the canonical project store. It renders server snapshots and sends commands with `baseRevisionId`. Optimistic display must reconcile to the accepted revision event; the frontend does not patch project JSON.
+The UI may display storyboard/timeline views, but it is never the canonical project store. It renders server snapshots and sends revision mutations with `baseRevisionId`. Optimistic display must reconcile to the accepted revision event; the frontend does not patch project JSON.
 
 ## Ownership
 
@@ -69,245 +69,32 @@ The UI may display storyboard/timeline views, but it is never the canonical proj
 5. **Preview/review:** proxy playback, verification warnings, before/after or revision switch, render controls.
 6. **Jobs/activity:** status, progress, target, cancel action, failure reason, and retry rules.
 
-## Draft transport types
 
-These are conceptual wire contracts. Backend-owned schemas are authoritative; the first version is intended to stabilize early and may evolve only through explicit versioned changes. Transport names and event delivery are later implementation details.
+## Stable service contract (V2-104)
 
-```ts
-type ID = string;
-type RevisionID = string;
-type ExecutionTarget = "local" | "cloud";
+The transport-independent request, response, view, capability, job, event, and error schemas with inferred TypeScript types are maintained in [`src/service-contract/index.ts`](../../src/service-contract/index.ts). Deterministic Gurbaaz examples are in [`src/service-contract/fixtures.ts`](../../src/service-contract/fixtures.ts). Import these sources instead of declaring parallel frontend contract types.
 
-interface CommandMeta {
-  projectId: ID;
-  idempotencyKey: string;
-}
+Create requests carry contract version and idempotency metadata before a project ID exists. Open requests pin snapshots to a concrete revision. Mock capability values are examples for frontend states; only a live runtime capability response describes backend support.
 
-interface RevisionCommandMeta extends CommandMeta {
-  baseRevisionId: RevisionID;
-}
+HTTP endpoints, event delivery/reconnect behavior, executors, and process supervision remain later implementation work (Phase 7).
 
-interface RevisionReadMeta extends CommandMeta {
-  revisionId: RevisionID;
-}
-
-interface CreateProjectRequest {
-  name: string;
-  brief?: { audience?: string; message?: string; targetDurationMs?: number };
-}
-
-interface ProjectSummary {
-  id: ID;
-  name: string;
-  schemaVersion: 2;
-  currentRevisionId: RevisionID;
-  assetCount: number;
-  durationMs: number;
-  verification: "unknown" | "stale" | "passed" | "failed";
-  updatedAt: string;
-}
-
-interface ImportAssetRequest extends RevisionCommandMeta {
-  source: { kind: "local_token" | "upload_session"; ref: string };
-  declaredFilename: string;
-}
-
-interface StartBrowserCaptureRequest extends RevisionCommandMeta {
-  flowId: ID;
-  approved: true;
-  executionTarget: "local";
-}
-
-interface RequestAgentEditRequest extends RevisionCommandMeta {
-  prompt: string;
-  selectedAssetIds?: ID[];
-  selectedClipIds?: ID[];
-  threadId?: ID;
-  preview: boolean;
-}
-
-interface ApplyOperationsRequest extends RevisionCommandMeta {
-  operations: SemanticOperation[];
-  actor: "user";
-}
-
-interface RenderRequest extends RevisionReadMeta {
-  kind: "preview" | "final";
-  presetId: string;
-  executionTarget: ExecutionTarget;
-}
-
-interface VerifyRequest extends RevisionReadMeta {
-  requirements?: OutputRequirements;
-}
-
-interface InspectRevisionRequest extends RevisionReadMeta {
-  scope: "project" | "asset" | "clip" | "frames" | "audio" | "browser_provenance";
-}
-
-interface RecaptureRequest extends RevisionCommandMeta {
-  assetId: ID;
-  changedActionIds: ID[];
-  reason: string;
-  executionTarget: "local";
-}
-
-interface CommandAccepted {
-  jobId: ID;
-  acceptedAt: string;
-}
-
-interface ProjectSnapshot {
-  project: ProjectView;
-  currentRevisionId: RevisionID;
-  availableActions: string[];
-  capabilities: CapabilitySet;
-}
-```
-
-Use `RevisionCommandMeta` for every command that can create a revision:
-accepted asset registration/import, agent edits, manual operations, browser
-recapture replacement, migration persistence, composition changes, and revert.
-Use `RevisionReadMeta` for derived work such as preview/final render,
-verification, or evidence analysis so it cannot silently target a moving
-"current project". `CreateProjectRequest` is a `CommandMeta`-style command
-because it creates the project identity rather than mutating an existing
-revision.
-
-Do not define `SemanticOperation` independently in frontend code. Generate or import it from the backend contract once stable. Early mocks may use only the operation summary fields the UI displays.
-
-## Conceptual endpoints
-
-Transport names may change; behavior should not.
-
-| Command/query | Purpose |
-|---|---|
-| `POST /projects`, `GET /projects`, `GET /projects/:id` | Create, browse, and open projects |
-| `POST /projects/:id/import-sessions` | Create a local-token or resumable upload session |
-| `POST /projects/:id/assets:import` | Begin hash/probe/import job |
-| `GET /projects/:id/assets/:assetId` | Read bounded asset/provenance/analysis view |
-| `POST /projects/:id/browser-captures` | Start approved local capture |
-| `POST /projects/:id/agent-edits` | Start planning/edit job |
-| `POST /projects/:id/operations` | Apply bounded manual operations |
-| `POST /projects/:id/verifications` | Verify the explicitly referenced immutable revision |
-| `POST /projects/:id/renders` | Start preview/final render |
-| `POST /projects/:id/recaptures` | Start selective browser recapture |
-| `GET /projects/:id/revisions` | List attributable revision summaries |
-| `GET /jobs/:jobId`, `DELETE /jobs/:jobId` | Read/cancel a job |
-| `GET /events?projectId=...` | SSE/WebSocket event stream; choose one during Phase 7 |
-
-All mutations require an idempotency key. Revision mutations also require `baseRevisionId`; `409 REVISION_CONFLICT` triggers snapshot refresh and a user-visible retry/review, never silent rebase.
-
-## Job and event model
-
-```ts
-type JobState =
-  | "queued"
-  | "running"
-  | "waiting_for_input"
-  | "succeeded"
-  | "failed"
-  | "cancelled";
-
-type JobKind =
-  | "asset_import"
-  | "asset_analysis"
-  | "browser_capture"
-  | "agent_edit"
-  | "verify_revision"
-  | "render_preview"
-  | "render_final"
-  | "browser_recapture";
-
-interface JobView {
-  id: ID;
-  projectId: ID;
-  kind: JobKind;
-  state: JobState;
-  stage: string;
-  inputRequest?: JobInputRequest;
-  progress?: { completed: number; total?: number; unit?: string };
-  cancellable: boolean;
-  result?: { revisionId?: RevisionID; assetId?: ID; outputId?: ID };
-  error?: ReplexError;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface JobInputRequest {
-  id: ID;
-  kind:
-    | "browser_approval"
-    | "missing_media"
-    | "user_choice"
-    | "clarification"
-    | "credential_action"
-    | "conflict_resolution";
-  title: string;
-  message: string;
-  options?: Array<{ id: string; label: string; description?: string }>;
-  expiresAt?: string;
-}
-
-type ProjectEvent =
-  | { type: "job.updated"; sequence: number; job: JobView }
-  | { type: "revision.created"; sequence: number; revision: RevisionSummary }
-  | { type: "verification.updated"; sequence: number; revisionId: ID; status: VerificationView }
-  | { type: "asset.updated"; sequence: number; asset: AssetView }
-  | { type: "output.created"; sequence: number; output: OutputView }
-  | { type: "capabilities.updated"; sequence: number; capabilities: CapabilitySet };
-```
-
-Events are ordered per project and resumable from the last sequence if the transport supports it. Terminal job states never change. Cancellation is a request: show “cancelling” as presentation state while the canonical job remains `running`, then consume `cancelled` or another terminal result.
-
-`waiting_for_input` is not an untyped stage. It must carry `JobInputRequest`,
-which states the accepted choice/action, is attributable to this job, and
-expires or becomes invalid on termination or revision conflict. A credential
-request starts an executor-owned secure flow; raw secrets never enter normal
-project/job event payloads.
-
-### Agent progress UX
+## Agent progress UX
 
 Show truthful stages such as `inspecting_assets`, `planning`, `validating_operations`, `applying_revision`, `verifying`, and `rendering_preview`. Do not invent percentage precision when the backend only knows a stage. Surface evidence and accepted/rejected operation summaries after completion, not hidden chain-of-thought.
 
-### Browser capture status UX
+## Browser capture status UX
 
 Before start, show the approved flow, target origin, local-only requirement, and credential/session warning. During capture, show current safe stage/checkpoint without exposing secrets. Distinguish user input required, app unreachable, checkpoint mismatch, prohibited action, timeout, and cancellation. Recapture UI must name the affected browser asset/scene and preview what remains preserved.
 
-## Error model
 
-```ts
-interface ReplexError {
-  code:
-    | "VALIDATION_FAILED"
-    | "REVISION_CONFLICT"
-    | "CAPABILITY_UNAVAILABLE"
-    | "ASSET_UNSUPPORTED"
-    | "ASSET_CHANGED"
-    | "UPLOAD_INTERRUPTED"
-    | "STORAGE_FAILED"
-    | "BROWSER_APPROVAL_REQUIRED"
-    | "BROWSER_CAPTURE_FAILED"
-    | "INSUFFICIENT_EVIDENCE"
-    | "AGENT_BUDGET_EXCEEDED"
-    | "OPERATION_REJECTED"
-    | "VERIFICATION_FAILED"
-    | "RENDER_FAILED"
-    | "JOB_NOT_CANCELLABLE"
-    | "EXECUTOR_OFFLINE"
-    | "UNAUTHORIZED";
-  message: string;
-  retryable: boolean;
-  fieldIssues?: Array<{ path: string; message: string }>;
-  evidenceRefs?: string[];
-  requiredCapability?: string;
-}
-```
+## Job, input, and error UX
+
+Use the typed job, input, and error views from the service contract. A waiting job includes its input request; stale input ends as a failed terminal job and clears the pending request. Credential actions refer to an executor-owned secure flow and contain no secret values.
 
 UI rules:
 
 - Validation errors stay next to the relevant control.
-- Revision conflicts refresh and compare; never discard the user's prompt silently.
+- Revision conflicts refresh and compare; do not discard the prompt silently.
 - Verification failure blocks final render but preserves preview/review access and lists actionable checks.
 - Executor offline disables execution while preserving locally cached shell/navigation state.
 - Retry only when `retryable` is true and reuse the same idempotency key for the same intent.
@@ -357,22 +144,16 @@ typed mock event stream. Mock at the backend-owned service-contract boundary,
 not inside components. Use deterministic fixtures and a fake event stream with
 monotonic sequence numbers.
 
-### Contract expected to stabilize early
+### Finalized service contract
 
-- `ProjectSnapshot`, `ProjectSummary`, asset/revision views, `CapabilitySet`,
-  `JobView`, `JobInputRequest`, events, errors, and the command metadata types
-  in this handoff;
-- typed operation summaries and revision conflict behavior;
-- preview/render request shapes and explicit immutable revision references.
+The domain contract is stable for mock integration. Use the source schemas and deterministic fixtures linked above; changes require an explicit contract version update.
 
-These are available for mock integration after the early contract phase and
-can evolve only through explicit versioned changes.
 
 ### Requires backend implementation later
 
-Wait for backend stabilization before:
+Use the finalized contract types now; wait for a live backend before:
 
-- generating/importing `SemanticOperation` types;
+- wiring commands to a live service;
 - wiring real file tokens or resumable upload sessions;
 - assuming event transport or reconnect semantics;
 - rendering exact manual controls from capability schemas;
@@ -389,14 +170,14 @@ motion controls until those services advertise the corresponding capabilities.
 - that ffmpeg-skill has been adopted rather than evaluated;
 - that Remotion or any motion backend is selected;
 - that cloud rendering or authenticated cloud browser capture exists;
-- that a documented operation, capability, or output is implemented merely
-  because it appears in this draft.
+- that an operation or capability in schemas or mock fixtures is implemented merely
+  because it appears in a schema or fixture; read capabilities from the live runtime.
 
 ## Frontend acceptance checklist
 
 - One workspace supports both capture and upload entry points.
 - No component writes or persists canonical project JSON.
-- Every mutation sends `baseRevisionId` and idempotency key.
+- Every revision mutation sends `baseRevisionId`; every command sends an idempotency key.
 - Job, empty, offline, cancelled, conflict, unsupported, verification-failed, and partial-upload states are designed.
 - Keyboard/focus/accessibility behavior covers all core actions.
 - Large files do not enter global client state and object URLs are released.
