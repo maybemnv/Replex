@@ -156,4 +156,18 @@ describe("ProjectV2Schema", () => {
     expect(ProjectV2Schema.parse(project).outputs[0].outputId).toBe("output-1");
     expect(() => ProjectV2Schema.parse({ ...project, outputs: [{ ...project.outputs[0], verificationRefId: "missing" }] })).toThrow();
   });
+
+  it("allows historical verification evidence but requires a passed ref for the current revision", () => {
+    const project = validProject();
+    project.revisions.unshift({ id: "revision-0", actor: "user", operationIds: [], manifestSha256: sha("old"), createdAt: "2026-09-22T00:00:00.000Z" });
+    const historicalRef = { id: "verification-old", revisionId: "revision-0", status: "passed" as const, evidenceRefs: ["evidence/old.json"] };
+    project.verification = {
+      revisionId: "revision-1",
+      status: "passed",
+      refs: [historicalRef, { id: "verification-current", revisionId: "revision-1", status: "passed", evidenceRefs: ["evidence/current.json"] }],
+    };
+
+    expect(ProjectV2Schema.parse(project).verification.refs[0]).toEqual(historicalRef);
+    expect(() => ProjectV2Schema.parse({ ...project, verification: { ...project.verification, refs: [historicalRef] } })).toThrow();
+  });
 });

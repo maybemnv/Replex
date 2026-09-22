@@ -5,7 +5,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { loadProjectVersioned } from "./project.js";
 import { parseProjectV1, type ProjectV1 } from "./schema-v1.js";
 import {
-  ProjectV2Schema,
+  parseProjectV2,
   type Clip,
   type Layer,
   type MediaAsset,
@@ -249,7 +249,7 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
   };
   draft.revisions.at(-1)!.manifestSha256 = v2SemanticHash(draft);
   try {
-    return ProjectV2Schema.parse(draft);
+    return parseProjectV2(draft);
   } catch (error) {
     throw new MigrationError("MIGRATION_FAILED", `V1 project cannot be represented by the V2 schema: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -257,7 +257,7 @@ export function adaptV1ToV2(input: ProjectV1): ProjectV2 {
 
 export function createMigrationReport(sourceInput: ProjectV1, destinationInput: ProjectV2): MigrationReport {
   const source = parseProjectV1(sourceInput);
-  const destination = ProjectV2Schema.parse(destinationInput);
+  const destination = parseProjectV2(destinationInput);
   const warnings = migrationWarnings(source);
   const checks: SemanticCheck[] = [
     check("project identity", source.projectId === destination.projectId, "projectId is preserved"),
@@ -340,7 +340,7 @@ export async function migrateProject(sourceRootInput: string, destinationRootInp
   try {
     await copyReferencedArtifacts(sourceRoot, stage, source, report);
     await writeFile(join(stage, "project.json"), `${JSON.stringify(project, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    ProjectV2Schema.parse(JSON.parse(await readFile(join(stage, "project.json"), "utf8")));
+    parseProjectV2(JSON.parse(await readFile(join(stage, "project.json"), "utf8")));
     await writeFile(join(stage, "migration-report.json"), `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
     if (options.interruptAfterStage) throw new MigrationError("MIGRATION_INTERRUPTED", "migration interrupted before atomic publish", report);
     try {
@@ -418,7 +418,7 @@ async function pathExists(path: string): Promise<boolean> {
 function reuseOrCollision(destinationRoot: string, project: ProjectV2, report: MigrationReport): Promise<MigrateProjectResult> {
   return (async () => {
     try {
-      const existing = ProjectV2Schema.parse(JSON.parse(await readFile(join(destinationRoot, "project.json"), "utf8")));
+      const existing = parseProjectV2(JSON.parse(await readFile(join(destinationRoot, "project.json"), "utf8")));
       if (hash(existing) !== hash(project)) throw new Error("destination contains a different V2 project");
       const existingReportPath = join(destinationRoot, "migration-report.json");
       const existingReport = await readFile(existingReportPath, "utf8").then((text) => JSON.parse(text) as MigrationReport).catch(() => undefined);
