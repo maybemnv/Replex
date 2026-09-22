@@ -280,7 +280,7 @@ function validEvidence(value: unknown): value is string[] {
 }
 
 function containsSecret(value: unknown): boolean {
-  return /(?:token|access_token|refresh_token|api[-_]?key|password|secret)\s*[=:]/i.test(JSON.stringify(value));
+  return /["']?\b(?:token|access_token|refresh_token|api[-_]?key|password|secret)["']?\s*[=:]/i.test(JSON.stringify(value));
 }
 
 function failure(project: Project, toolCalls: number, events: string[], code: Extract<AgentResult, { ok: false }>["code"], detail: string, root = ""): Extract<AgentResult, { ok: false }> {

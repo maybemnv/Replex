@@ -84,5 +84,7 @@ describe("bounded inspection", () => {
     const result = inspectProject({ ...source, brief: { ...source.brief, message: "token=not-for-model" } }, "unused", { kind: "inspect_project" });
     expect(result).toMatchObject({ ok: true });
     if (result.ok) expect(JSON.stringify(result)).not.toContain("not-for-model");
+    const flowResult = inspectProject({ ...source, flow: { ...source.flow, steps: [{ ...source.flow.steps[0], checkpoint: { ...source.flow.steps[0].checkpoint, expected: 'payload "password":"leaked-secret"' } }] } }, "unused", { kind: "inspect_flow" });
+    expect(JSON.stringify(flowResult)).not.toContain("leaked-secret");
   });
 });

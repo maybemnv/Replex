@@ -186,7 +186,7 @@ function auditDisclosure(root: string, result: Extract<InspectionResult, { ok: t
 }
 
 function redact(value: string): string {
-  return value.replace(/\b(?:token|access_token|refresh_token|api[-_]?key|password|secret)\s*[=:]\s*[^\s,;]+/gi, "[REDACTED]");
+  return value.replace(/["']?\b(?:token|access_token|refresh_token|api[-_]?key|password|secret)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, "[REDACTED]");
 }
 
 function safeText(value: string, limit = 180): string {

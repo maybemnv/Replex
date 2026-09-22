@@ -170,6 +170,7 @@ interface Clip {
   crop?: Crop;
   opacity: number;
   audioGainDb: number;
+  muted: boolean; // defaults to false when reading older V2 data
   transitionOut?: Transition;
 }
 
@@ -225,24 +226,24 @@ Three fixed track kinds are the minimum needed to express overlapping video, ind
 
 ### Timing and keyframes
 
-All canonical time values remain integer milliseconds. Clip source ranges are half-open `[sourceInMs, sourceOutMs)`. Timeline position is explicit. Initial keyframes support only an allowlist of numeric properties: position, scale, rotation, opacity, crop, blur, and selected camera properties. Interpolation is an enum such as `linear`, `ease_in`, `ease_out`, or `ease_in_out`; arbitrary expressions and renderer code are forbidden.
+All canonical time values remain integer milliseconds. Clip source ranges are half-open `[sourceInMs, sourceOutMs)`. Timeline position is explicit. Clips on the same track never overlap; `transitionOut` owns transition duration and does not shift the next clip's timeline position. A crossfade requires a following clip on the same track. Initial keyframes support only an allowlist of numeric properties: position, scale, rotation, opacity, crop, blur, and selected camera properties. Interpolation is an enum such as `linear`, `ease_in`, `ease_out`, or `ease_in_out`; arbitrary expressions and renderer code are forbidden.
 
 ### Render outputs and verification
 
-A render output references the exact revision, RenderJob hash, backend identity/version, output hash, probe, and verification result. It is a derived `RenderArtifact`, not a new immutable source `MediaAsset`. Verification state is derived evidence, not creative approval, and is invalidated by any accepted mutation affecting the revision.
+A render output references the exact revision, RenderJob hash, backend identity/version, SHA-256 of the output media bytes, probe, and verification result. The RenderJob hash and artifact hash have distinct meanings. It is a derived `RenderArtifact`, not a new immutable source `MediaAsset`. Verification state is derived evidence, not creative approval, and is invalidated by any accepted mutation affecting the revision. Verification changes do not change the semantic revision hash; outputs, revision history, current revision ID, and the operation-log reference are also outside that hash.
 
 ## 5. V1 compatibility and migration
 
 Use a **read compatibility layer with explicit command-driven persistence**:
 
-1. `loadProject` detects `schemaVersion`.
-2. V1 parses with the frozen V1 schema.
+1. `loadProjectVersioned` detects `schemaVersion`; the V1-only `loadProject` rejects V2 roots.
+2. V1 parses with the frozen V1 schema; V2 callers use the versioned loader or V2 view adapter.
 3. `adaptV1ToV2` creates an in-memory V2 view: each `Capture` becomes a `browser_capture` asset; each scene becomes a clip; overlays become layers; flow and recapture lineage move under `browser`.
 4. Normal reads, inspection, preview, and compatibility tests may use the adapted view without changing disk.
 5. `migrate-project --to 2` writes a new revision and migration report only after validation, semantic comparison, and backup. It never overwrites the V1 file in place.
 6. Once saved as V2, the project remains V2. Exporting a general V2 project back to V1 is unsupported; the preserved V1 project and renderer remain the rollback path.
 
-This is safer than eager migration because opening an old project cannot irreversibly rewrite it. It is simpler than indefinite dual writes, which would create two canonical states. The migration must preserve stable scene/clip IDs where valid, capture hashes, action/checkpoint identity, revision ancestry, outputs, and recapture lineage. Golden V1 fixtures and an end-to-end recapture fixture are release gates.
+This is safer than eager migration because opening an old project cannot irreversibly rewrite it. It is simpler than indefinite dual writes, which would create two canonical states. The migration preserves stable scene/clip IDs where valid, capture hashes, action/checkpoint identity, revision ancestry, and recapture lineage. The pure in-memory adapter omits V1 render artifacts because it cannot inspect their bytes. Explicit migration records an output only when its media file exists and computes its artifact hash from the copied bytes; missing outputs and their verification refs are omitted with a migration warning. V1 render-plan hashes remain separate metadata. Golden V1 fixtures and an end-to-end recapture fixture are release gates.
 
 ## 6. Canonical mutation vocabulary
 

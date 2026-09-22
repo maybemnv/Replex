@@ -1,6 +1,6 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** Plan only; do not execute without a new implementation authorization
+**Status:** V2 Core Foundation implemented and independently validated on `feat/v2-core-foundation`; later phases remain planned.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -11,6 +11,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 ## Phase 0: Freeze V1 and specify migration
 
 ### V2-001: Freeze the V1 compatibility contract
+
+**Implementation status:** Implemented and tested.
 
 - **Objective:** Preserve a parseable V1 schema, golden projects, operation replay, render metadata, and recapture lineage as an explicit compatibility boundary.
 - **Why:** V2 cannot safely evolve while V1 behavior is implicit in mutable modules.
@@ -24,6 +26,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Rollback:** Revert extraction; the pre-V2 branch remains executable.
 
 ### V2-002: Specify migration fixtures and semantic equivalence
+
+**Implementation status:** Implemented and tested.
 
 - **Objective:** Define V1-to-V2 field mapping and an evidence report before implementing the adapter.
 - **Why:** Migration correctness needs a measurable oracle, not visual inspection.
@@ -40,6 +44,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-101: Introduce strict V2 schemas
 
+**Implementation status:** Implemented and tested.
+
 - **Objective:** Add `MediaAsset`, provenance unions, `Composition`, tracks, clips, layers, keyframes, outputs, verification references, and `ProjectV2`.
 - **Why:** Uploaded media must be represented without browser fiction.
 - **Dependencies:** V2-002.
@@ -53,6 +59,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-102: Implement read compatibility and explicit migration
 
+**Implementation status:** Implemented and tested.
+
 - **Objective:** Load V1 as an in-memory V2 view and add an explicit non-destructive migration command.
 - **Why:** Old projects must remain usable without eager rewrite.
 - **Dependencies:** V2-101.
@@ -65,6 +73,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Rollback:** Continue opening the original V1 root with the V1 renderer.
 
 ### V2-103: Add the V2 semantic reducer
+
+**Implementation status:** Implemented and tested.
 
 - **Objective:** Implement the initial operation vocabulary through one pure, atomic reducer used by humans and models.
 - **Why:** One mutation path is the central safety and replay invariant.
