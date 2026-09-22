@@ -153,6 +153,7 @@ export const ClipSchema = z.object({
   crop: CropSchema.optional(),
   opacity: unitInterval,
   audioGainDb: finite,
+  muted: z.boolean().optional(),
   transitionOut: TransitionV2Schema.optional(),
 }).strict().superRefine((value, context) => {
   if (value.sourceOutMs <= value.sourceInMs) context.addIssue({ code: "custom", path: ["sourceOutMs"], message: "clip source range must be positive" });
