@@ -263,7 +263,6 @@ export const VerificationStateSchema = z.object({
   const ids = new Set<string>();
   for (const [index, ref] of value.refs.entries()) {
     if (ids.has(ref.id)) context.addIssue({ code: "custom", path: ["refs", index, "id"], message: "verification reference IDs must be unique" });
-    if (ref.revisionId !== value.revisionId) context.addIssue({ code: "custom", path: ["refs", index, "revisionId"], message: "verification reference revision must match state" });
     ids.add(ref.id);
   }
 });
@@ -327,7 +326,7 @@ export const ProjectV2Schema = z.object({
     if (revision.parentId && (!revisionIds.has(revision.parentId) || revision.parentId === revision.id)) context.addIssue({ code: "custom", path: ["revisions", index, "parentId"], message: "revision parent must be another existing revision" });
   }
   if (!revisionIds.has(value.verification.revisionId)) context.addIssue({ code: "custom", path: ["verification", "revisionId"], message: "verification revision does not exist" });
-  if (value.verification.status === "passed" && !value.verification.refs.some((ref) => ref.status === "passed")) context.addIssue({ code: "custom", path: ["verification", "refs"], message: "passed verification state requires a passed verification reference" });
+  if (value.verification.status === "passed" && !value.verification.refs.some((ref) => ref.status === "passed" && ref.revisionId === value.verification.revisionId)) context.addIssue({ code: "custom", path: ["verification", "refs"], message: "passed verification state requires a passed verification reference for its revision" });
   const assetIds = new Set(Object.keys(value.assets));
   const flowIds = new Set(Object.keys(value.browser?.flows ?? {}));
   for (const [key, asset] of Object.entries(value.assets)) {

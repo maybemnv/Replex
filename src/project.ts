@@ -17,10 +17,16 @@ import {
   type Flow,
   type Project,
 } from "./schema.js";
+import { parseProjectV1, type ProjectV1 } from "./schema-v1.js";
+import { parseProjectV2, type ProjectV2 } from "./schema-v2.js";
 
 export type SourceCapture = ProjectCaptureInput;
 
 export type { Overlay, Project, RecaptureLineage, RenderOutput, Revision, Scene } from "./schema.js";
+
+export type LoadedProject =
+  | { schemaVersion: 1; project: ProjectV1 }
+  | { schemaVersion: 2; project: ProjectV2 };
 
 export type ProjectCaptureInput = {
   id?: string;
@@ -262,9 +268,22 @@ export async function writeRevision(
 }
 
 export async function loadProject(root: string): Promise<Project> {
-  const project = ProjectSchema.parse(JSON.parse(await readFile(join(root, "project.json"), "utf8")));
-  verifyProject(project);
-  return project;
+  const loaded = await loadProjectVersioned(root);
+  return loaded.project as Project;
+}
+
+/** Reads either persisted schema without adapting or writing it. */
+export async function loadProjectVersioned(root: string): Promise<LoadedProject> {
+  const input = JSON.parse(await readFile(join(root, "project.json"), "utf8")) as { schemaVersion?: unknown };
+  if (input.schemaVersion === 1) {
+    const project = parseProjectV1(input);
+    verifyProject(project);
+    return { schemaVersion: 1, project };
+  }
+  if (input.schemaVersion === 2) return { schemaVersion: 2, project: parseProjectV2(input) };
+  const error = new Error(`unsupported project schema version: ${String(input.schemaVersion)}`) as Error & { code: string };
+  error.code = "UNSUPPORTED_PROJECT_VERSION";
+  throw error;
 }
 
 export function verifyProject(project: Project): void {

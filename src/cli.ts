@@ -5,6 +5,7 @@ import { join, relative, resolve } from "node:path";
 import { chromium } from "@playwright/test";
 import { runOpenAIDraft } from "./agent.js";
 import { runCapture } from "./capture.js";
+import { migrateProject } from "./migrate.js";
 import { capturesFromRun, loadProject, materializeCaptureRun, writeRevision } from "./project.js";
 import { reconcileCapture } from "./reconcile.js";
 import { buildRenderJob, executeRenderJob } from "./render.js";
@@ -12,7 +13,7 @@ import { generateReport } from "./report.js";
 import { ConfigValidationError, parseRuntimeConfig } from "./schema.js";
 import { verifyProject } from "./verify.js";
 
-export const COMMANDS = ["capture", "baseline", "agent-draft", "verify", "render", "recapture", "report"] as const;
+export const COMMANDS = ["capture", "baseline", "agent-draft", "verify", "render", "recapture", "report", "migrate-project"] as const;
 export type Command = (typeof COMMANDS)[number];
 export type ToolName = "chromium" | "ffmpeg" | "ffprobe";
 
@@ -69,6 +70,7 @@ interface ParsedArgs {
   inputPath?: string;
   valuesPath?: string;
   valuesInline?: string;
+  toVersion?: string;
 }
 
 const defaultIO: CliIO = {
@@ -76,7 +78,7 @@ const defaultIO: CliIO = {
   stderr: (text) => process.stderr.write(text),
 };
 
-export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [options]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --project <path>  Project directory containing project.json\n  --artifact-root <path>  Capture artifact directory (defaults to project/work/captures)\n  --output <path>  Project-relative render output path\n  --storage-state <path>  Auth state outside the project artifacts\n  --upload-root <path>  Approved upload root (repeatable)\n  --input <path>  Recapture JSON input (required by recapture)\n  --values <json|@path>  Flow values for fill/select/upload steps (required by dynamic/difficult fixtures)\n  --help           Show this help\n`;
+export const HELP_TEXT = `Release Replay POC\n\nUsage: npm run cli -- <command> [options]\n\nCommands:\n  capture      Run an approved browser flow\n  baseline     Build the deterministic baseline\n  agent-draft  Create a bounded agent draft\n  verify       Verify a project or render\n  render       Render a verified draft\n  recapture    Replace one affected scene capture\n  report       Write the local review report\n  migrate-project  Copy a V1 project into a validated V2 destination\n\nOptions:\n  --config <path>  Validate a JSON runtime config before starting\n  --project <path>  Project directory containing project.json\n  --artifact-root <path>  Capture artifact directory (defaults to project/work/captures)\n  --output <path>  Project-relative render output path\n  --storage-state <path>  Auth state outside the project artifacts\n  --upload-root <path>  Approved upload root (repeatable)\n  --input <path>  Recapture JSON input (required by recapture)\n  --to <version>  Migration target version (required by migrate-project; only 2 is supported)\n  --values <json|@path>  Flow values for fill/select/upload steps (required by dynamic/difficult fixtures)\n  --help           Show this help\n`;
 
 function executableStatus(name: ToolName, path: string): StartupToolStatus {
   const args = name === "chromium"
@@ -281,6 +283,22 @@ async function executeCommand(command: Command, args: ParsedArgs, options: RunCl
     printJson(io, { command, status: result.ok ? "completed" : "failed", result });
     return result.ok ? 0 : 1;
   }
+  if (command === "migrate-project") {
+    if (args.toVersion !== "2") throw usageError("migrate-project requires --to 2");
+    const sourceRoot = requiredPath(args.projectRoot, "--project");
+    const destinationRoot = requiredPath(args.outputPath, "--output");
+    const result = await migrateProject(sourceRoot, destinationRoot);
+    printJson(io, {
+      command,
+      status: "completed",
+      sourceRoot,
+      destinationRoot: result.destinationRoot,
+      reportPath: result.reportPath,
+      reused: result.reused,
+      report: result.report,
+    });
+    return 0;
+  }
   throw commandUnavailable(command, "no execution path is registered");
 }
 
@@ -357,6 +375,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
         args.inputPath = argv[index + 1];
         if (!args.inputPath || args.inputPath.startsWith("-")) throw usageError("--input requires a path");
         index += 1;
+      } else if (arg === "--to" || arg.startsWith("--to=")) {
+        const inline = arg.startsWith("--to=") ? arg.slice("--to=".length) : undefined;
+        args.toVersion = inline ?? argv[index + 1];
+        if (!args.toVersion || args.toVersion.startsWith("-")) throw usageError("--to requires a version");
+        if (inline === undefined) index += 1;
       } else if (arg === "--values" || arg.startsWith("--values=")) {
         const inline = arg.startsWith("--values=") ? arg.slice("--values=".length) : undefined;
         if (inline !== undefined) {
@@ -376,14 +399,14 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     }
 
     if (args.configPath) await validateConfig(args.configPath);
-    const startup = checkStartupTools(options.toolPaths);
-    if (!startup.ok) throw new StartupCheckError(startup);
+    const startup = command === "migrate-project" ? undefined : checkStartupTools(options.toolPaths);
+    if (startup && !startup.ok) throw new StartupCheckError(startup);
 
     return await executeCommand(command as Command, args, { ...options, toolPaths: options.toolPaths }, {
       ...io,
       stdout: (text) => {
         const value = JSON.parse(text) as object;
-        printJson(io, value, startup.tools);
+        printJson(io, value, startup?.tools);
       },
     });
   } catch (error) {
