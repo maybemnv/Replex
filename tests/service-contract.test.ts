@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../src/canonical-json.js";
 import {
   ApplyOperationsRequestSchema,
+  AssetViewSchema,
   CancelJobRequestSchema,
   CancelJobResponseSchema,
   CapabilitySetSchema,
@@ -60,7 +61,7 @@ function jobPayload(kind: string, state: string, pins: Record<string, string>) {
     message: "Choose a title",
   };
   const result = {
-    revisionId: "revision-result",
+    revisionId: pins.revisionId ?? "revision-result",
     ...(kind === "asset_import" || kind === "browser_capture" || kind === "browser_recapture" ? { assetId: "asset-1" } : {}),
     ...(kind === "render_preview" || kind === "render_final" ? { outputId: "output-1" } : {}),
   };
@@ -83,7 +84,7 @@ function jobPayload(kind: string, state: string, pins: Record<string, string>) {
     kind,
     ...pins,
     state,
-    stage: state === "waiting_for_input" ? "awaiting_user_input" : "finalizing",
+    stage: state === "queued" ? "queued" : state === "waiting_for_input" ? "awaiting_user_input" : "finalizing",
     createdAt: "2026-09-23T00:00:00.000Z",
     updatedAt: "2026-09-23T00:00:01.000Z",
     ...stateFields[state as keyof typeof stateFields],
@@ -105,6 +106,14 @@ describe("transport-independent service contract", () => {
     historical.verification = { revisionId: "revision-1", status: "unknown", refs: [] };
     historical.renderArtifacts = [];
     expect(ProjectSnapshotSchema.safeParse(historical).success).toBe(true);
+  });
+
+  it("keeps local upload paths out of public asset views", () => {
+    const asset = mockProjectSnapshot.assets[1];
+    expect(AssetViewSchema.safeParse({
+      ...asset,
+      provenance: { ...asset.provenance, originalFilename: "C:\\Users\\Manav\\secret\\logo.png" },
+    }).success).toBe(false);
   });
 
   it("accepts all command and revision read/write request shapes", () => {
@@ -166,6 +175,9 @@ describe("transport-independent service contract", () => {
     const inputRequest = "inputRequest" in mockWaitingInputJob ? mockWaitingInputJob.inputRequest : undefined;
     expect(JobInputSubmissionResultSchema.safeParse({ disposition: "stale", job: { ...mockFailedStaleInputJob, inputRequest } }).success).toBe(false);
     expect(JobInputRequestSchema.safeParse(inputRequest).success).toBe(true);
+    const approval = inputRequest!;
+    expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://user:password@example.test" }).success).toBe(false);
+    expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://example.test/login?token=secret" }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow" } }).success).toBe(true);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow", password: "secret" } }).success).toBe(false);
   });
@@ -188,6 +200,8 @@ describe("transport-independent service contract", () => {
       expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", state, { baseRevisionId: "revision-1" }), inputRequest }).success).toBe(false);
     }
     expect(JobViewSchema.safeParse({ ...mockCancelledJob, stage: "unbounded-stage" }).success).toBe(false);
+    expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", "running", { baseRevisionId: "revision-1" }), stage: "queued" }).success).toBe(false);
+    expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", "queued", { baseRevisionId: "revision-1" }), stage: "finalizing" }).success).toBe(false);
     expect(JobProgressSchema.safeParse({ completed: 4, total: 3, percent: 120 }).success).toBe(false);
   });
 
@@ -202,6 +216,15 @@ describe("transport-independent service contract", () => {
         expect(JobViewSchema.safeParse(jobPayload(kind, state, {})).success, `${kind}/${state} without a pin`).toBe(false);
         expect(JobViewSchema.safeParse(jobPayload(kind, state, { ...correctPin, [pinField === "baseRevisionId" ? "revisionId" : "baseRevisionId"]: "revision-1" })).success, `${kind}/${state} with both pins`).toBe(false);
       }
+    }
+  });
+
+  it("binds verification and render results to the job's pinned revision", () => {
+    for (const kind of ["verify_revision", "render_preview", "render_final"] as const) {
+      const job = JobViewSchema.parse(jobPayload(kind, "succeeded", { revisionId: "revision-pinned" }));
+      if (job.state !== "succeeded") throw new Error("expected successful job fixture");
+      expect(JobViewSchema.safeParse(job).success, kind).toBe(true);
+      expect(JobViewSchema.safeParse({ ...job, result: { ...job.result, revisionId: "revision-other" } }).success, kind).toBe(false);
     }
   });
 

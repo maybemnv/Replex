@@ -20,6 +20,7 @@ function isScopedReference(value: string): boolean {
     && !normalized.startsWith("/")
     && !/^[A-Za-z]:/.test(normalized)
     && !normalized.split("/").includes("..")
+    && !/^file:/i.test(normalized)
     && !normalized.includes("\0");
 }
 

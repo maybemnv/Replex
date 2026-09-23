@@ -2,14 +2,16 @@ import { z } from "zod";
 import { IdSchema } from "../schema.js";
 import {
   AssetTypeSchema,
+  BrowserProvenanceSchema,
   ClipSchema,
+  GeneratedProvenanceSchema,
   LayerSchema,
   MediaProbeV2Schema,
-  MediaProvenanceSchema,
   ProjectBriefV2Schema,
   RenderOutputSchemaV2,
   RevisionV2Schema,
   TrackSchema,
+  UploadProvenanceSchema,
   VerificationStateSchema,
 } from "../schema-v2.js";
 import {
@@ -66,7 +68,13 @@ export const AssetViewSchema = z.object({
   type: AssetTypeSchema,
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   probe: MediaProbeV2Schema,
-  provenance: MediaProvenanceSchema,
+  provenance: z.discriminatedUnion("kind", [
+    BrowserProvenanceSchema,
+    UploadProvenanceSchema.extend({
+      originalFilename: text.max(255).refine((value) => !/[\\/:\0-\x1f]/.test(value), "filename must not contain a path or control characters"),
+    }),
+    GeneratedProvenanceSchema,
+  ]),
 }).strict();
 
 export const ClipViewSchema = ClipSchema;
@@ -348,7 +356,11 @@ export const CredentialActionSchema = z.object({
 }).strict();
 
 export const JobInputRequestSchema = z.discriminatedUnion("kind", [
-  z.object({ ...jobInputBase, kind: z.literal("browser_approval"), flowId: IdSchema, targetOrigin: z.string().url().max(2048) }).strict(),
+  z.object({ ...jobInputBase, kind: z.literal("browser_approval"), flowId: IdSchema, targetOrigin: z.string().url().max(2048).refine((value) => {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password
+      && url.origin === value && url.pathname === "/" && !url.search && !url.hash;
+  }, "targetOrigin must be a credential-free HTTP origin") }).strict(),
   z.object({ ...jobInputBase, kind: z.literal("missing_media"), assetIds: z.array(IdSchema).min(1).max(1000) }).strict(),
   z.object({ ...jobInputBase, kind: z.literal("user_choice"), options: z.array(JobInputOptionSchema).min(1).max(8) }).strict(),
   z.object({ ...jobInputBase, kind: z.literal("clarification"), options: z.array(JobInputOptionSchema).max(8).optional() }).strict(),
@@ -488,6 +500,9 @@ export const JobViewSchema = z.discriminatedUnion("state", [
   if (Date.parse(job.updatedAt) < Date.parse(job.createdAt)) {
     context.addIssue({ code: "custom", path: ["updatedAt"], message: "updatedAt must be at or after createdAt" });
   }
+  if ((job.state === "queued") !== (job.stage === "queued")) {
+    context.addIssue({ code: "custom", path: ["stage"], message: "queued state and queued stage must agree" });
+  }
   if ((job.state === "queued" || job.state === "running" || job.state === "waiting_for_input") && job.cancellationRequested) {
     context.addIssue({ code: "custom", path: ["cancellationRequested"], message: "requested cancellation must use the cancelling state" });
   }
@@ -502,12 +517,15 @@ export const JobViewSchema = z.discriminatedUnion("state", [
   }
   if (job.state === "succeeded") {
     const result = job.result;
-    const requiresRevision = ["asset_import", "browser_capture", "browser_recapture", "agent_edit", "apply_operations", "verify_revision"].includes(job.kind);
+    const requiresRevision = ["asset_import", "browser_capture", "browser_recapture", "agent_edit", "apply_operations", ...revisionKinds].includes(job.kind);
     const requiresAsset = job.kind === "asset_import" || job.kind === "browser_capture" || job.kind === "browser_recapture";
     const requiresOutput = job.kind === "render_preview" || job.kind === "render_final";
     if (requiresRevision && !result.revisionId) context.addIssue({ code: "custom", path: ["result", "revisionId"], message: "successful job requires its resulting or verified revision ID" });
     if (requiresAsset && !result.assetId) context.addIssue({ code: "custom", path: ["result", "assetId"], message: "successful asset job requires an asset ID" });
     if (requiresOutput && !result.outputId) context.addIssue({ code: "custom", path: ["result", "outputId"], message: "successful render job requires an output ID" });
+    if (revisionKinds.includes(job.kind) && result.revisionId !== job.revisionId) {
+      context.addIssue({ code: "custom", path: ["result", "revisionId"], message: "derived job result must match its pinned revision" });
+    }
   }
 });
 
