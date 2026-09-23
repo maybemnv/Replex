@@ -98,6 +98,7 @@ describe("transport-independent service contract", () => {
     expect(ProjectSnapshotSchema.safeParse({ ...mockProjectSnapshot, project: {} }).success).toBe(false);
     expect(ProjectSnapshotSchema.safeParse({ ...mockProjectSnapshot, extra: true }).success).toBe(false);
     expect(ProjectSnapshotSchema.safeParse({ ...mockProjectSnapshot, assets: [{ ...mockProjectSnapshot.assets[0], path: "assets/private.mp4" }, ...mockProjectSnapshot.assets.slice(1)] }).success).toBe(false);
+    expect(ProjectSnapshotSchema.safeParse({ ...mockProjectSnapshot, renderArtifacts: [{ ...mockProjectSnapshot.renderArtifacts[0], ref: "https://user:token@host.example/private" }] }).success).toBe(false);
     const historical = structuredClone(mockProjectSnapshot);
     historical.revisionId = "revision-1";
     historical.isCurrentRevision = false;
@@ -201,6 +202,7 @@ describe("transport-independent service contract", () => {
     }
     expect(JobViewSchema.safeParse({ ...mockCancelledJob, stage: "unbounded-stage" }).success).toBe(false);
     expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", "running", { baseRevisionId: "revision-1" }), stage: "queued" }).success).toBe(false);
+    expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", "running", { baseRevisionId: "revision-1" }), stage: "awaiting_user_input" }).success).toBe(false);
     expect(JobViewSchema.safeParse({ ...jobPayload("browser_capture", "queued", { baseRevisionId: "revision-1" }), stage: "finalizing" }).success).toBe(false);
     expect(JobProgressSchema.safeParse({ completed: 4, total: 3, percent: 120 }).success).toBe(false);
   });
@@ -241,6 +243,11 @@ describe("transport-independent service contract", () => {
     }
     expect(ErrorSchema.safeParse({ ...error, code: "WHATEVER" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, trace: "internal" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, code: "PATH_FAILURE", message: "Cannot open C:\\Users\\Alice\\private\\clip.mp4" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, message: "Request failed access_token=private-token" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "C:\\Users\\Alice\\clip.mp4", message: "invalid" }] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["/home/alice/private/clip.mp4"] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, requiredCapability: "C:\\private\\tool.exe" }).success).toBe(false);
   });
 
   it("keeps capabilities bounded, unique, and honest about target-specific commands", () => {

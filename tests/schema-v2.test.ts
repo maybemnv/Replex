@@ -136,6 +136,7 @@ describe("ProjectV2Schema", () => {
     ["absolute or escaping paths", () => ({ ...validProject(), assets: { ...validProject().assets, "asset-browser": { ...validProject().assets["asset-browser"], path: "../outside.mp4" } } })],
     ["local file URLs in asset refs", () => ({ ...validProject(), assets: { ...validProject().assets, "asset-browser": { ...validProject().assets["asset-browser"], path: "file:///private/video.mp4" } } })],
     ["local file URLs in verification evidence", () => ({ ...validProject(), verification: { revisionId: "revision-1", status: "failed", refs: [{ id: "verification-1", revisionId: "revision-1", status: "failed", evidenceRefs: ["file:///private/evidence.json"] }] } })],
+    ["credential-bearing URLs in verification evidence", () => ({ ...validProject(), verification: { revisionId: "revision-1", status: "failed", refs: [{ id: "verification-1", revisionId: "revision-1", status: "failed", evidenceRefs: ["https://user:token@host.example/private"] }] } })],
     ["provenance union mismatch", () => ({ ...validProject(), assets: { ...validProject().assets, "asset-browser": { ...validProject().assets["asset-browser"], provenance: { kind: "upload", originalFilename: "x.mp4", importedAt: "2026-09-22T00:00:00.000Z", sourceSha256: sha("x"), importMethod: "upload", originalProbe: {} } } } })],
   ])("rejects %s", (_name, makeInvalid) => {
     expect(() => ProjectV2Schema.parse(makeInvalid())).toThrow();

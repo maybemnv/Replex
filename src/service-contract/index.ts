@@ -29,6 +29,8 @@ const text = z.string().trim().min(1);
 const boundedText = text.max(2000);
 const datetime = z.string().datetime({ offset: true });
 const boundedIdempotencyKey = z.string().trim().min(1).max(128);
+const unsafePublicDetail = /(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|(?:^|[\s"'(=])\/(?:[^\s/]+\/)+[^\s/]*|\bhttps?:\/\/[^\s/]*@|(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie)\s*[:=]|\bBearer\s+[A-Za-z0-9._~+/-]+=*)/i;
+const publicErrorText = boundedText.max(4000).refine((value) => !unsafePublicDetail.test(value), "public error text must not contain host paths or secret-shaped details");
 
 export const CommandMetaSchema = z.object({
   contractVersion: ContractVersionSchema,
@@ -327,11 +329,11 @@ export const ErrorCodeSchema = z.enum([
 
 export const ErrorSchema = z.object({
   code: ErrorCodeSchema,
-  message: boundedText.max(4000),
+  message: publicErrorText,
   retryable: z.boolean(),
-  fieldIssues: z.array(z.object({ path: text.max(512), message: boundedText }).strict()).max(50).optional(),
-  evidenceRefs: z.array(text.max(512)).max(100).optional(),
-  requiredCapability: text.max(128).optional(),
+  fieldIssues: z.array(z.object({ path: text.max(512).regex(/^[A-Za-z0-9_$.[\]-]+$/), message: publicErrorText }).strict()).max(50).optional(),
+  evidenceRefs: z.array(text.max(512).refine((value) => !unsafePublicDetail.test(value), "evidence reference must not contain a host path or secret-shaped detail")).max(100).optional(),
+  requiredCapability: text.max(128).regex(/^[a-z][a-z0-9_]*$/).optional(),
 }).strict();
 
 export const JobInputOptionSchema = z.object({
@@ -502,6 +504,9 @@ export const JobViewSchema = z.discriminatedUnion("state", [
   }
   if ((job.state === "queued") !== (job.stage === "queued")) {
     context.addIssue({ code: "custom", path: ["stage"], message: "queued state and queued stage must agree" });
+  }
+  if (job.stage === "awaiting_user_input" && job.state !== "waiting_for_input") {
+    context.addIssue({ code: "custom", path: ["stage"], message: "awaiting_user_input stage requires waiting_for_input state" });
   }
   if ((job.state === "queued" || job.state === "running" || job.state === "waiting_for_input") && job.cancellationRequested) {
     context.addIssue({ code: "custom", path: ["cancellationRequested"], message: "requested cancellation must use the cancelling state" });

@@ -16,11 +16,13 @@ const datetime = z.string().datetime({ offset: true });
 
 function isScopedReference(value: string): boolean {
   const normalized = value.replace(/\\/g, "/");
+  const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(normalized);
+  const safeObjectRef = /^object:\/\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(normalized);
   return normalized !== "."
     && !normalized.startsWith("/")
     && !/^[A-Za-z]:/.test(normalized)
     && !normalized.split("/").includes("..")
-    && !/^file:/i.test(normalized)
+    && (!hasScheme || safeObjectRef)
     && !normalized.includes("\0");
 }
 
