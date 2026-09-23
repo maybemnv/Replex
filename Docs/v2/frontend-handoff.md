@@ -1,6 +1,6 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** V2-104 service schemas and mock fixtures finalized; frontend, transport, and runtime service are not implemented
+**Status:** V2-104 service schemas and mock fixtures implemented and independently validated at `ac6e1f8`; frontend, transport, and runtime service are not implemented. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
@@ -149,6 +149,7 @@ monotonic sequence numbers.
 - [Service contract schemas and types](../../src/service-contract/index.ts)
 - [Deterministic service contract fixtures](../../src/service-contract/fixtures.ts)
 - [Service contract tests](../../tests/service-contract.test.ts)
+- [ffmpeg-skill spike and PARTIAL-GO decision](ffmpeg-skill-spike.md) (research only; no runtime dependency or backend adapter)
 
 
 ### Requires backend implementation later

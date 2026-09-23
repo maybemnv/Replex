@@ -1,6 +1,6 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation implemented and independently validated on `feat/v2-core-foundation`; later phases remain planned.
+**Status:** V2 Core Foundation and V2-104 are implemented and tested; V2-150 is complete with a PARTIAL-GO decision. The integrated milestone passed independent validation on `feat/v2-contract-and-media-spike` at `ac6e1f80964cf233bf24f8cdfdb27cf7cdbf4e9a`. Later phases remain planned.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -89,6 +89,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
+**Implementation status:** Implemented, tested, and independently validated at `ac6e1f8` (build passed; full suite 26 files / 192 tests).
+
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
 - **Dependencies:** V2-101 and V2-103.
@@ -103,6 +105,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 ## Phase 1.5: Evaluate ffmpeg-skill before duplicating media plumbing
 
 ### V2-150: Run the ffmpeg-skill capability and contract spike
+
+**Implementation status:** Completed and independently reviewed; decision is **PARTIAL-GO**. Evidence and capability recommendations are in [`ffmpeg-skill-spike.md`](ffmpeg-skill-spike.md); no production adapter or dependency was added.
 
 - **Objective:** Evaluate one released, pinned ffmpeg-skill version and contract version in an isolated research harness and produce a GO/NO-GO/PARTIAL-GO report.
 - **Why:** Probe, contact sheets, scene measurements, cuts, audio analysis, and delivery checks may be cheaper and safer to delegate than to reimplement.
