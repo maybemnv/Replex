@@ -245,8 +245,12 @@ describe("transport-independent service contract", () => {
     expect(ErrorSchema.safeParse({ ...error, trace: "internal" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, code: "PATH_FAILURE", message: "Cannot open C:\\Users\\Alice\\private\\clip.mp4" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Request failed access_token=private-token" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, message: 'Request failed with {"password":"private-token"}' }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, message: "Cloud error AWS_ACCESS_KEY_ID=AKIA1234567890123456" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "C:\\Users\\Alice\\clip.mp4", message: "invalid" }] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "brief.message", message: 'Invalid {"token":"private-token"}' }] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["/home/alice/private/clip.mp4"] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["AWS_SECRET_ACCESS_KEY=private-token"] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, requiredCapability: "C:\\private\\tool.exe" }).success).toBe(false);
   });
 

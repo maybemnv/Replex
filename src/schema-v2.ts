@@ -22,6 +22,7 @@ function isScopedReference(value: string): boolean {
     && !normalized.startsWith("/")
     && !/^[A-Za-z]:/.test(normalized)
     && !normalized.split("/").includes("..")
+    && !/%(?:2e|2f|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(normalized)
     && (!hasScheme || safeObjectRef)
     && !normalized.includes("\0");
 }
