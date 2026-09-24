@@ -6,11 +6,13 @@ import {
   CancelJobRequestSchema,
   CancelJobResponseSchema,
   CapabilitySetSchema,
+  ClipViewSchema,
   ContractVersionSchema,
   CreateProjectRequestSchema,
   ProjectCreatedResponseSchema,
   ErrorSchema,
   ImportAssetRequestSchema,
+  LayerViewSchema,
   JobInputRequestSchema,
   JobInputSubmissionResultSchema,
   JobProgressSchema,
@@ -22,14 +24,23 @@ import {
   ProjectSnapshotSchema,
   ProjectSummarySchema,
   ProjectEventSchema,
+  RenderArtifactViewSchema,
   RecaptureRequestSchema,
   RenderFinalRequestSchema,
   RenderPreviewRequestSchema,
   RequestAgentEditSchema,
   StartBrowserCaptureRequestSchema,
   SubmitJobInputRequestSchema,
+  TrackViewSchema,
   VerifyRevisionRequestSchema,
 } from "../src/service-contract/index.js";
+import { OperationBatchSchema } from "../src/operations-v2.js";
+import {
+  ClipSchema,
+  LayerSchema,
+  RenderOutputSchemaV2,
+  TrackSchema,
+} from "../src/schema-v2.js";
 import {
   mockCancelledJob,
   mockCapabilitySet,
@@ -117,6 +128,36 @@ describe("transport-independent service contract", () => {
     }).success).toBe(false);
   });
 
+  it("keeps v1 view and operation schemas independent from mutable V2 domain schemas", () => {
+    expect(ClipViewSchema).not.toBe(ClipSchema);
+    expect(LayerViewSchema).not.toBe(LayerSchema);
+    expect(TrackViewSchema).not.toBe(TrackSchema);
+    expect(RenderArtifactViewSchema).not.toBe(RenderOutputSchemaV2);
+    expect(ApplyOperationsRequestSchema.shape.operations).not.toBe(OperationBatchSchema);
+    const request = { ...meta, baseRevisionId: "revision-1", actor: "user" as const };
+    const privateImport = {
+      type: "import_asset",
+      asset: {
+        id: "asset-new",
+        type: "uploaded_video",
+        path: "assets/upload.mp4",
+        sha256: "a".repeat(64),
+        probe: { durationMs: 1000, width: 1920, height: 1080, fps: 30 },
+        provenance: {
+          kind: "upload",
+          originalFilename: "upload.mp4",
+          importedAt: "2026-09-23T00:00:00.000Z",
+          sourceSha256: "a".repeat(64),
+          importMethod: "path",
+          originalProbe: { durationMs: 1000, width: 1920, height: 1080, fps: 30 },
+        },
+      },
+    };
+    expect(ApplyOperationsRequestSchema.safeParse({ ...request, operations: [privateImport] }).success).toBe(false);
+    expect(ApplyOperationsRequestSchema.safeParse({ ...request, operations: [{ type: "recapture_browser_asset", assetId: "asset-1", reason: "Refresh" }] }).success).toBe(false);
+    expect(ApplyOperationsRequestSchema.safeParse({ ...request, operations: [{ type: "replace_browser_capture", previousAssetId: "asset-1", replacementAsset: privateImport.asset, changedActionIds: ["action-1"], reason: "Refresh" }] }).success).toBe(false);
+  });
+
   it("accepts all command and revision read/write request shapes", () => {
     expect(ContractVersionSchema.parse("v1")).toBe("v1");
     expect(CreateProjectRequestSchema.safeParse({ contractVersion: "v1", idempotencyKey: "create-1", name: "Launch", brief: {} }).success).toBe(true);
@@ -179,8 +220,10 @@ describe("transport-independent service contract", () => {
     const approval = inputRequest!;
     expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://user:password@example.test" }).success).toBe(false);
     expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://example.test/login?token=secret" }).success).toBe(false);
+    expect(JobInputRequestSchema.safeParse({ ...approval, message: "Use access_token=private-token" }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow" } }).success).toBe(true);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow", password: "secret" } }).success).toBe(false);
+    expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text: "The access_token=private-token value was provided" } }).success).toBe(false);
   });
 
   it("validates cancellation as a request and a terminal cancelled state", () => {
