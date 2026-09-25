@@ -423,7 +423,7 @@ interface PublishedFile { path: string; device: number; inode: number }
 async function publishExclusive(stagedPath: string, outputPath: string, expectedHash: string): Promise<PublishedFile | undefined> {
   const verifyExisting = async (): Promise<undefined> => {
     const existing = await lstat(outputPath);
-    if (!existing.isFile() || existing.isSymbolicLink() || await digestFile(outputPath) !== expectedHash) {
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1 || await digestFile(outputPath) !== expectedHash) {
       throw new Error("render artifact target already contains different or unsafe data");
     }
     return undefined;
