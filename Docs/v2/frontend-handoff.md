@@ -1,6 +1,6 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** PR-A merged at `a8feca9`; its frozen V2-104 wire v1 projection preserves the existing mock fixture shape, and independent validation met Gate A on head `4964747`. The PR-B local import/evidence/render slice met Gate B on candidate head `fa9f42d`. These V2 modules are not wired into a frontend transport or runtime service; the frozen frontend contract and mocks remain unchanged. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
+**Status:** PR-A and PR-B are merged to `main` through `805edbe`; their frozen V2-104 wire v1 and mock fixtures remain unchanged. PR-C code candidate `0dd2b2d` passed deterministic Gate C validation and adds a bounded V2 agent library plus an injected-client OpenAI Responses adapter. The agent is not wired into a frontend transport or runtime service, and no live model call was made. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
