@@ -311,4 +311,54 @@ describe("V2 media render planning", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(!mediaToolsAvailable)("aligns the visible fitted image at each canonical anchor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-v2-render-anchors-"));
+    const source = join(root, "assets", "product.mp4");
+    await mkdir(join(root, "assets"));
+    const fixture = spawnSync(ffmpegPath, [
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "color=c=red:s=320x180:r=24:d=2",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", source,
+    ], { windowsHide: true, shell: false, timeout: 30_000 });
+    expect(fixture.status, fixture.stderr?.toString()).toBe(0);
+    const sourceSha256 = sha(await readFile(source));
+    const localHandle = { ...handle, sha256: sourceSha256 };
+    const firstRedColumns: number[] = [];
+    try {
+      for (const anchorX of [0, 0.5, 1]) {
+        const project = uploadedProject(sourceSha256, false);
+        const clip = project.composition.clips[0];
+        clip.crop = { x: 0, y: 0, width: 0.5, height: 1 };
+        clip.transform = { x: 0, y: 0, scale: 1, rotation: 0, anchorX, anchorY: 0.5 };
+        project.revisions[0].manifestSha256 = semanticHashV2(project);
+        const job = buildMediaExecutionJob(project, [localHandle]);
+        const result = await executeMediaExecutionJob(job, {
+          projectRoot: root,
+          resolvedHandles: [{ ...localHandle, path: source }],
+          isRevisionCurrent: async () => true,
+        }, { ffmpegPath, ffprobePath });
+        const outputPath = join(root, ...result.artifact.ref.split("/"));
+        const frame = spawnSync(ffmpegPath, [
+          "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "0.25", "-i", outputPath,
+          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        ], { windowsHide: true, shell: false, timeout: 15_000, maxBuffer: 1024 * 1024 });
+        expect(frame.status, frame.stderr?.toString()).toBe(0);
+        const pixels = frame.stdout as Buffer;
+        expect(pixels.length).toBe(320 * 180 * 3);
+        let firstRed = -1;
+        for (let x = 0; x < 320; x += 1) {
+          const offset = (90 * 320 + x) * 3;
+          if (pixels[offset] > 100 && pixels[offset + 1] < 100 && pixels[offset + 2] < 100) {
+            firstRed = x;
+            break;
+          }
+        }
+        firstRedColumns.push(firstRed);
+      }
+      expect(firstRedColumns).toEqual([0, 80, 160]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
