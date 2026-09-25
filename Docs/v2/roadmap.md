@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A through PR-D are merged to `main` at `2dc4035`. Gates A-C and Phase 5's technical composition gate passed. Phase 4 closed with NO-GO for runtime ffmpeg-skill adoption. V2-601 returned PARTIAL-GO for two bounded motion candidates behind a separate `MotionBackend`. V2-602 has an unmerged `camera-push.v1` implementation candidate on `feat/v2-602-camera-push`; the local fixture demonstrates typed revisions, a verified motion-to-composition render, and a same-thread strength follow-up. Gate D remains open for independent review and human visual/quality approval; live-provider behavior and production readiness remain unproven.
+**Status:** PR-A through PR-D are merged to `main` at `2dc4035`; corrective PR #16 closed the retrospective Gate A event-identity finding at `517b4f4`. Gates A-C and Phase 5's technical composition gate passed. Phase 4 selected native evidence (NO-GO for the ffmpeg-skill runtime adapter). V2-601 returned PARTIAL-GO for two bounded motion candidates behind a separate `MotionBackend`. PR #15 remains an open draft with a `camera-push.v1` implementation candidate; its local fixture demonstrates typed revisions, verified motion-to-composition rendering, and same-thread follow-up. Gate D remains open pending human review of representative software-product footage. Phase 7 and later phases remain gated. No formal POC result or production authorization exists.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
