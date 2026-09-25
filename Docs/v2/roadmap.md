@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A and PR-B are merged to `main` through `805edbe`. Gates A and B passed. PR-C code candidate `0dd2b2d` passed independent deterministic Gate C technical validation; live-provider behavior, human usefulness, and production readiness remain unproven.
+**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. Gates A, B, and C passed their bounded technical evidence. Live-provider behavior, human usefulness, motion quality, and production readiness remain unproven.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
@@ -13,7 +13,7 @@ The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve t
 | 1.5 | ffmpeg-skill capability/contract spike | External mechanical capabilities are understood before duplication | Pinned-version GO/NO-GO/PARTIAL-GO report with measured gaps and overhead | Cheap research gate; no production dependency |
 | 2 | Local ingestion/analysis/render baseline | Arbitrary media works locally using the spike's ownership map and native fallback where needed | One imported video reaches verified render | Core engineering priority |
 | 3 | Agent inspection/edit loop | Model can ground and revise the same project | Initial and follow-up edits replay | Spend on bounded model calls only |
-| 4 | Chosen media evidence adapter | Approved read-only measurements reduce evidence work safely | Phase 2 advantage plus pinned capability and native-parity/failure tests; mutation requires another review | Adopt only if measurably better than native |
+| 4 | Chosen media evidence adapter | Approved read-only measurements reduce evidence work safely | Native path already covers the useful Phase 2 subset; no measurable advantage was established | **NO-GO for this POC; keep the native provider** |
 | 5 | Rich 2D composition | Output is useful, not merely valid | Multi-asset/audio/caption demo passes | Limit breadth to demo needs |
 | 6 | Motion backend | One or two impressive reusable treatments | Human-reviewed preset demo plus legal gate | Prioritize one strong effect |
 | 7 | Local executor and transport | Early domain contracts become a usable asynchronous local workflow | Same hashes through CLI/service; cancellation works | Implement after frontend can already mock |
@@ -23,7 +23,7 @@ The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve t
 
 ## Recommended POC cut line
 
-The minimum credible POC is Phases 0-3, including the Phase 1.5 capability gate, the useful subset of Phase 5, one motion preset from Phase 6, the local path in Phase 7, and the mixed-media preservation proof in Phase 9. Phase 4 is implemented only after a cheap contract spike. Phase 8 is optional and must not displace local workflow, follow-up editing, motion quality, or human evaluation.
+The minimum credible POC is Phases 0-3, including the Phase 1.5 capability gate, the useful subset of Phase 5, one motion preset from Phase 6, the local path in Phase 7, and the mixed-media preservation proof in Phase 9. Phase 4 selected the existing native evidence provider; no external adapter is planned for this POC. Phase 8 is optional and must not displace local workflow, follow-up editing, motion quality, or human evaluation.
 
 ## Decision gates
 
