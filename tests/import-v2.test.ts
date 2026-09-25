@@ -398,4 +398,26 @@ describe("V2 local asset import", () => {
     expect(await entries(assetsRoot)).toEqual([sha256]);
     expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
   }, 30_000);
+
+  it.skipIf(!mediaAvailable)("rejects a symlinked media store that points outside the project root", async ({ skip }) => {
+    const { root, sourceRoot, projectRoot } = await workspace();
+    const sourcePath = join(sourceRoot, "valid.ppm");
+    await writeFile(sourcePath, ppmFixture());
+    const outsideStore = join(root, "outside-store");
+    await mkdir(outsideStore);
+    try {
+      await symlink(outsideStore, join(projectRoot, "media"), "junction");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes((error as NodeJS.ErrnoException).code ?? "")) return skip();
+      throw error;
+    }
+    const original = emptyProject();
+    const before = JSON.stringify(original);
+
+    await expect(importLocalAssetV2(original, projectRoot, await authorizeLocalImport(sourcePath, [sourceRoot]), { ffprobePath }))
+      .rejects.toMatchObject({ code: "STORAGE_FAILED" });
+    expect(JSON.stringify(original)).toBe(before);
+    expect(await entries(outsideStore)).toEqual([]);
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
+  }, 30_000);
 });
