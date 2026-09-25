@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -233,6 +233,11 @@ describe("V2 media render planning", () => {
       await rm(outputPath);
 
       const first = await executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath });
+      const actualOutputPath = join(root, ...first.artifact.ref.split("/"));
+      const hardLinkPath = join(root, "linked-output.mp4");
+      await link(actualOutputPath, hardLinkPath);
+      await expect(executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath })).rejects.toThrow("different or unsafe data");
+      await unlink(hardLinkPath);
       const second = await executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath });
       expect(first.artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(second.artifact.sha256).toBe(first.artifact.sha256);
@@ -247,7 +252,6 @@ describe("V2 media render planning", () => {
       expect(JSON.stringify(project)).toBe(before);
       expect(first.artifact.ref).toBe(`renders/${job.jobHash}.mp4`);
       expect(await readdir(join(root, ".replex-staging"))).toEqual([]);
-      const actualOutputPath = join(root, ...first.artifact.ref.split("/"));
       const independentProbe = spawnSync(ffprobePath, ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate", "-of", "json", actualOutputPath], { encoding: "utf8", windowsHide: true, shell: false });
       expect(independentProbe.status).toBe(0);
       const probed = JSON.parse(independentProbe.stdout) as { streams: Array<{ codec_type: string; codec_name: string; width?: number; height?: number }> };
