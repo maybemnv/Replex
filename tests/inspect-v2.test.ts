@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalFlow } from "../fixtures/apps/normal/flow.js";
-import { inspectProjectV2, V2InspectRequestSchema, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
+import { checkedEvidenceRoot, inspectProjectV2, V2InspectRequestSchema, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
 import { semanticHashV2, type OperationLogRecord } from "../src/operations-v2.js";
 import { generateMediaEvidence, MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "../src/media-evidence.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
@@ -255,6 +255,23 @@ describe("V2 bounded model inspection", () => {
     }
   });
 
+  it("rejects a symlinked evidence root", async ({ skip }) => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-root-link-"));
+    try {
+      const owned = join(root, "owned");
+      const alias = join(root, "alias");
+      await mkdir(owned);
+      try {
+        await symlink(owned, alias, "junction");
+      } catch (error) {
+        if (["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes((error as NodeJS.ErrnoException).code ?? "")) return skip();
+        throw error;
+      }
+      await expect(checkedEvidenceRoot(alias)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("blocks unsafe refs and symlinked evidence artifacts", async ({ skip }) => {
     const root = await mkdtemp(join(tmpdir(), "replex-inspect-unsafe-"));
     try {

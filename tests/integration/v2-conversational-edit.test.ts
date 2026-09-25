@@ -143,15 +143,15 @@ describe("V2 conversational edit E2E", () => {
 
       const inspections: Array<{ request: V2InspectRequest; result: Awaited<ReturnType<typeof inspectProjectV2>> }> = [];
       let inspectedEvidenceRefs: string[] = [];
-      const inspect = async (project: ProjectV2, request: V2InspectRequest) => {
+      const inspect = async (project: ProjectV2, request: V2InspectRequest, context?: { operationLog: readonly OperationLogRecord[] }) => {
         const result = await inspectProjectV2(request, {
           project,
           evidenceIndexes: [evidence],
           evidenceRoot,
-          operationLog: canonicalLog,
+          operationLog: context?.operationLog ?? [],
         });
         inspections.push({ request, result });
-        if (result.ok) inspectedEvidenceRefs.splice(0, inspectedEvidenceRefs.length, ...result.evidenceRefs);
+        if (result.ok && result.evidenceRefs.length > 0) inspectedEvidenceRefs.splice(0, inspectedEvidenceRefs.length, ...result.evidenceRefs);
         return result;
       };
 
@@ -178,7 +178,10 @@ describe("V2 conversational edit E2E", () => {
           { responseId: "thread-one-final", calls: [], text: "Applied the requested edit." },
         ]],
         [promptTwo, [
-          { responseId: "thread-two-inspect", calls: [call("inspect-two", "inspect_v2", { kind: "media_evidence", assetId: asset.id, image: "selected_frame", frameOffset: 0 })] },
+          { responseId: "thread-two-inspect", calls: [
+            call("inspect-two", "inspect_v2", { kind: "media_evidence", assetId: asset.id, image: "selected_frame", frameOffset: 0 }),
+            call("inspect-history-two", "inspect_v2", { kind: "operation_history" }),
+          ] },
           { responseId: "thread-two-propose", calls: [call("propose-two", "propose_edit_batch", { baseRevisionId: canonicalProject.currentRevisionId, evidenceRefs: inspectedEvidenceRefs, operations: proposedTwo })] },
           { responseId: "thread-two-final", calls: [], text: "Kept the crop and adjusted speed and audio." },
         ]],
@@ -237,7 +240,7 @@ describe("V2 conversational edit E2E", () => {
           || semanticHashV2(applied.project) !== semanticHashV2(request.project)) {
           return { ok: false, code: "INVALID_BATCH", detail: applied.ok ? "reducer result differs from candidate" : applied.detail };
         }
-        canonicalProject = applied.project;
+        canonicalProject = request.project;
         canonicalLog.push(...applied.operationLog);
         commits.push(applied.revisionId);
         return { ok: true, project: canonicalProject };
@@ -253,6 +256,7 @@ describe("V2 conversational edit E2E", () => {
         assetHandles: [assetHandle],
         renderAuthorization,
         commitCanonicalRevision,
+        operationLog: canonicalLog,
         evidenceRoot,
         renderOptions: { ffmpegPath, ffprobePath, timeoutMs: 60_000 },
       });
@@ -324,6 +328,12 @@ describe("V2 conversational edit E2E", () => {
       expect(modelInputs.some(({ prompt, toolResults }) =>
         prompt === promptOne && JSON.stringify(toolResults).includes(evidence.artifacts.find(({ kind }) => kind === "selected_frame")!.ref))).toBe(true);
       expect(inspections.filter(({ request, result }) => request.kind === "media_evidence" && result.ok)).toHaveLength(2);
+      const followUpHistory = inspections.find(({ request }) => request.kind === "operation_history")?.result;
+      expect(followUpHistory).toMatchObject({ ok: true, data: { items: expect.arrayContaining([
+        expect.objectContaining({ revisionId: firstRevision, actor: "agent", operationType: "set_speed" }),
+      ]) } });
+      expect(modelInputs.some(({ prompt, toolResults }) =>
+        prompt === promptTwo && JSON.stringify(toolResults).includes(firstRevision))).toBe(true);
 
       const finalRevision = second.project.currentRevisionId;
       const agentBatches = canonicalLog.filter(({ actor, resultRevisionId }) =>

@@ -47,7 +47,26 @@ vi.mock("../src/render-v2.js", async () => {
         },
       };
     }),
-    registerRenderArtifactV2: vi.fn((project: unknown) => project),
+    registerRenderArtifactV2: vi.fn((project: { outputs: unknown[]; verification: unknown }, artifact: { outputId: string; ref: string; sha256: string; probe: unknown; sourceRevisionId: string; renderJobHash: string; backendId: string; backendVersion: string; verificationRefId: string; verification: { evidenceRefs: string[] } }) => ({
+      ...project,
+      outputs: [...project.outputs, {
+        outputId: artifact.outputId,
+        ref: artifact.ref,
+        sha256: artifact.sha256,
+        probe: artifact.probe,
+        sourceRevisionId: artifact.sourceRevisionId,
+        revisionId: artifact.sourceRevisionId,
+        renderJobHash: artifact.renderJobHash,
+        backendId: artifact.backendId,
+        backendVersion: artifact.backendVersion,
+        verificationRefId: artifact.verificationRefId,
+      }],
+      verification: {
+        revisionId: artifact.sourceRevisionId,
+        status: "passed",
+        refs: [{ id: artifact.verificationRefId, revisionId: artifact.sourceRevisionId, status: "passed", evidenceRefs: artifact.verification.evidenceRefs }],
+      },
+    })),
   };
 });
 
@@ -59,7 +78,7 @@ vi.mock("../src/media-evidence.js", async () => {
     generateMediaEvidence: vi.fn(async (request: { asset: { assetId: string; sha256: string }; evidenceRoot: string }) => {
       const bytes = Buffer.from("bounded preview image");
       const sha256 = createHash("sha256").update(bytes).digest("hex");
-      const ref = "media-evidence/fixture/contact-sheet.png";
+      const ref = "media-evidence/" + "1".repeat(24) + "/" + "2".repeat(24) + "/contact-sheet-" + sha256 + ".png";
       const imagePath = join(request.evidenceRoot, ...ref.split("/"));
       await mkdir(dirname(imagePath), { recursive: true });
       await writeFile(imagePath, bytes);
@@ -71,7 +90,7 @@ vi.mock("../src/media-evidence.js", async () => {
         generatorVersion: "1",
         configHash: "e".repeat(64),
         runHash: "f".repeat(64),
-        indexRef: "media-evidence/fixture/index.json",
+        indexRef: "media-evidence/" + "1".repeat(24) + "/" + "2".repeat(24) + "/index.json",
         artifacts: [{ kind: "contact_sheet", ref, sha256, sizeBytes: bytes.byteLength, contentType: "image/png" }],
       };
     }),
@@ -79,8 +98,9 @@ vi.mock("../src/media-evidence.js", async () => {
 });
 
 import { applyOperationBatch, semanticHashV2 } from "../src/operations-v2.js";
+import { generateMediaEvidence } from "../src/media-evidence.js";
 import { runConversationalEditV2, type V2AgentModelRequest, type V2AgentModelResponse } from "../src/agent-v2.js";
-import { ProjectV2Schema } from "../src/schema-v2.js";
+import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 let tempRoots: string[] = [];
@@ -159,19 +179,140 @@ describe("V2 conversation preview evidence", () => {
       },
     ]);
 
+    const commit = vi.fn(async ({ project: candidate }: { project: ProjectV2 }) => ({ ok: true as const, project: candidate }));
     const result = await runConversationalEditV2({
       project,
       prompt: "Make the opening faster",
       threadId: "thread-preview",
       inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidenceRef] }),
       model,
+      operationLog: [],
       assetHandles: [{ assetId: "asset-1", sha256: project.assets["asset-1"]!.sha256, ref: project.assets["asset-1"]!.path! }],
       renderAuthorization: { projectRoot: root, resolvedHandles: [], isRevisionCurrent: async () => true },
-      commitCanonicalRevision: async ({ project: candidate }) => ({ ok: true, project: candidate }),
+      commitCanonicalRevision: commit,
       evidenceRoot: join(root, "evidence"),
     });
 
     expect(result).toMatchObject({ ok: true, previews: [{ renderJobHash: "a".repeat(64) }] });
+    expect(commit.mock.calls[0]?.[0].project.outputs).toHaveLength(1);
+    expect(result.ok && result.project.outputs).toHaveLength(1);
     expect(model.respond).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not commit an edit when preview evidence generation fails", async () => {
+    const project = makeProject();
+    const root = await mkdtemp(join(tmpdir(), "replex-agent-preview-failure-"));
+    tempRoots.push(root);
+    const evidence = "media-evidence:asset-1";
+    const model = scriptedModel([
+      () => ({ responseId: "response-inspect", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-edit", calls: [{ id: "call-edit", name: "propose_edit_batch", arguments: {
+        baseRevisionId: input.context.currentRevisionId,
+        evidenceRefs: [evidence],
+        operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }],
+      } }] }),
+    ]);
+    const commit = vi.fn(async ({ project: candidate }: { project: ProjectV2 }) => ({ ok: true as const, project: candidate }));
+    vi.mocked(generateMediaEvidence).mockRejectedValueOnce(new Error("evidence provider failed"));
+
+    const result = await runConversationalEditV2({
+      project,
+      prompt: "Make the opening faster",
+      threadId: "thread-preview-failure",
+      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidence] }),
+      model,
+      operationLog: [],
+      assetHandles: [{ assetId: "asset-1", sha256: project.assets["asset-1"]!.sha256, ref: project.assets["asset-1"]!.path! }],
+      renderAuthorization: { projectRoot: root, resolvedHandles: [], isRevisionCurrent: async () => true },
+      commitCanonicalRevision: commit,
+      evidenceRoot: join(root, "evidence"),
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "PREVIEW_FAILED", project: { currentRevisionId: "revision-0" }, operationLog: [], acceptedBatches: [], previews: [] });
+    expect(commit).not.toHaveBeenCalled();
+    expect(semanticHashV2(project)).toBe(project.revisions[0].manifestSha256);
+  });
+
+  it("keeps a verified accepted edit successful if the optional final model response fails", async () => {
+    const project = makeProject();
+    const root = await mkdtemp(join(tmpdir(), "replex-agent-final-response-failure-"));
+    tempRoots.push(root);
+    const evidence = "media-evidence:asset-1";
+    const model = scriptedModel([
+      () => ({ responseId: "response-inspect", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-edit", calls: [{ id: "call-edit", name: "propose_edit_batch", arguments: {
+        baseRevisionId: input.context.currentRevisionId,
+        evidenceRefs: [evidence],
+        operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }],
+      } }] }),
+      () => { throw new Error("final model response unavailable"); },
+    ]);
+    const commit = vi.fn(async ({ project: candidate }: { project: ProjectV2 }) => ({ ok: true as const, project: candidate }));
+
+    const result = await runConversationalEditV2({
+      project,
+      prompt: "Make the opening faster",
+      threadId: "thread-final-response-failure",
+      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidence] }),
+      model,
+      operationLog: [],
+      assetHandles: [{ assetId: "asset-1", sha256: project.assets["asset-1"]!.sha256, ref: project.assets["asset-1"]!.path! }],
+      renderAuthorization: { projectRoot: root, resolvedHandles: [], isRevisionCurrent: async () => true },
+      commitCanonicalRevision: commit,
+      evidenceRoot: join(root, "evidence"),
+    });
+
+    expect(result).toMatchObject({ ok: true, status: "completed", project: { outputs: [{ outputId: "render-preview" }] } });
+    expect(result.ok && result.project.currentRevisionId).not.toBe("revision-0");
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it("reports the host CAS outcome when cancellation arrives after publication starts", async () => {
+    const project = makeProject();
+    const root = await mkdtemp(join(tmpdir(), "replex-agent-cas-cancel-"));
+    tempRoots.push(root);
+    const evidence = "media-evidence:asset-1";
+    const model = scriptedModel([
+      () => ({ responseId: "response-inspect", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-edit", calls: [{ id: "call-edit", name: "propose_edit_batch", arguments: {
+        baseRevisionId: input.context.currentRevisionId,
+        evidenceRefs: [evidence],
+        operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }],
+      } }] }),
+      () => ({ responseId: "response-final", calls: [], text: "Preview ready." }),
+    ]);
+    let canonicalProject = project;
+    let resolveCommitStarted!: () => void;
+    let resolveCommitFinished!: () => void;
+    const commitStarted = new Promise<void>((resolve) => { resolveCommitStarted = resolve; });
+    const commitFinished = new Promise<void>((resolve) => { resolveCommitFinished = resolve; });
+    const commit = vi.fn(async ({ project: candidate }: { project: ProjectV2 }) => {
+      canonicalProject = candidate;
+      resolveCommitStarted();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      resolveCommitFinished();
+      return { ok: true as const, project: canonicalProject };
+    });
+    const controller = new AbortController();
+    const resultPromise = runConversationalEditV2({
+      project,
+      prompt: "Make the opening faster",
+      threadId: "thread-cas-cancel",
+      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidence] }),
+      model,
+      operationLog: [],
+      assetHandles: [{ assetId: "asset-1", sha256: project.assets["asset-1"]!.sha256, ref: project.assets["asset-1"]!.path! }],
+      renderAuthorization: { projectRoot: root, resolvedHandles: [], isRevisionCurrent: async () => true },
+      commitCanonicalRevision: commit,
+      evidenceRoot: join(root, "evidence"),
+      signal: controller.signal,
+    });
+    await commitStarted;
+    controller.abort();
+    const result = await resultPromise;
+    await commitFinished;
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: canonicalProject.currentRevisionId } });
+    expect(canonicalProject.currentRevisionId).not.toBe("revision-0");
   });
 });

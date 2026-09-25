@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { V2InspectRequestSchema, type V2InspectImage, type V2InspectRequest } from "./inspect-v2.js";
+import { checkedEvidenceRoot, readEvidenceFile, V2InspectRequestSchema, type V2InspectImage, type V2InspectRequest } from "./inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "./media-evidence.js";
-import { OperationSchema, applyOperationBatch, semanticHashV2, type Operation, type OperationBatchInput, type OperationLogRecord } from "./operations-v2.js";
+import { OperationLogRecordSchema, OperationSchema, applyOperationBatch, semanticHashV2, type Operation, type OperationBatchInput, type OperationLogRecord } from "./operations-v2.js";
 import { buildMediaExecutionJob, executeMediaExecutionJob, registerRenderArtifactV2, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
 import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type ProjectV2 } from "./schema-v2.js";
 import { IdSchema } from "./schema.js";
@@ -90,8 +90,10 @@ export interface V2ConversationThread {
 export interface V2CanonicalRevisionCommit {
   baseRevisionId: string;
   baseRevisionHash: string;
+  /** Candidate includes the semantic revision and its verified preview registration for atomic persistence. */
   project: ProjectV2;
   operationLog: OperationLogRecord[];
+  /** Host CAS resolves with the publication outcome even if this signal arrives during its atomic write. */
   signal: AbortSignal;
 }
 
@@ -106,6 +108,8 @@ export interface V2ConversationRequest {
   threadState?: V2ConversationThread;
   inspect: V2Inspector;
   model: V2AgentModelClient;
+  /** Host-loaded operation history; inspection keeps only bounded safe summaries. */
+  operationLog: readonly OperationLogRecord[];
   assetHandles: readonly AssetHandle[];
   renderAuthorization: MediaExecutionAuthorization;
   renderOptions?: MediaExecutionOptions;
@@ -325,8 +329,6 @@ const MAX_IMAGE_BYTES_PER_RESULT = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES_PER_INTENT = 4 * 1024 * 1024;
 const MAX_MODEL_CALLS = 4;
 const MAX_TOOL_CALLS = 12;
-const MAX_EDIT_BATCHES = 2;
-const MAX_PREVIEWS = 2;
 const MAX_WALL_TIME_MS = 120_000;
 const MAX_PER_CALL_MS = 20_000;
 const MAX_PREVIEW_CALL_MS = 60_000;
@@ -476,13 +478,11 @@ async function createPreviewEvidence(
     ?? index.artifacts.find(({ kind }) => kind === "selected_frame");
   if (!imageArtifact || imageArtifact.sizeBytes > MAX_IMAGE_BYTES_PER_RESULT
     || !["image/png", "image/jpeg"].includes(imageArtifact.contentType)) throw new Error("preview evidence has no bounded image");
-  const evidenceRealRoot = await realpath(evidenceRoot);
-  const imagePath = resolve(evidenceRealRoot, ...imageArtifact.ref.split("/"));
-  if (!inside(evidenceRealRoot, imagePath)) throw new Error("preview image reference escaped its evidence root");
-  const [imageReal, imageLink, imageBytes, imageInfo] = await Promise.all([realpath(imagePath), lstat(imagePath), readFile(imagePath), stat(imagePath)]);
+  const evidenceRealRoot = await checkedEvidenceRoot(evidenceRoot);
+  if (!inside(root, evidenceRealRoot)) throw new Error("preview evidence root escaped the authorized project root");
+  const imageBytes = await readEvidenceFile(evidenceRealRoot, imageArtifact.ref, MAX_IMAGE_BYTES_PER_RESULT);
   const imageHash = createHash("sha256").update(imageBytes).digest("hex");
-  if (!inside(evidenceRealRoot, imageReal) || imageLink.isSymbolicLink() || !imageInfo.isFile()
-    || imageInfo.size !== imageArtifact.sizeBytes || imageHash !== imageArtifact.sha256) {
+  if (imageBytes.byteLength !== imageArtifact.sizeBytes || imageHash !== imageArtifact.sha256) {
     throw new Error("preview image evidence hash does not match the media evidence index");
   }
   return {
@@ -544,7 +544,7 @@ const instructions = [
   "After a successful preview, inspect the result if useful, then finish with a concise response. A preview is technically verified, not a claim of creative approval.",
 ].join(" ");
 
-/** Runs a bounded typed edit loop; the host commits each reducer result before preview rendering. */
+/** Runs a bounded typed edit loop; the host commits only after its preview and evidence verify. */
 export async function runConversationalEditV2(request: V2ConversationRequest): Promise<V2ConversationResult> {
   const parsedThreadId = IdSchema.safeParse(request.threadId);
   const threadId = parsedThreadId.success ? parsedThreadId.data : "thread-invalid";
@@ -583,6 +583,8 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
 
   const handlesParsed = z.array(AssetHandleSchema).safeParse(request.assetHandles);
   if (!handlesParsed.success) return failure("rejected", "INVALID_REQUEST", "authorized asset handles are invalid", project, threadId, intentId, baseRevisionId, baseRevisionHash, [], [], [], [], savedThread);
+  const priorOperationLog = z.array(OperationLogRecordSchema).max(1_000).safeParse(request.operationLog);
+  if (!priorOperationLog.success) return failure("rejected", "INVALID_REQUEST", "host operation history is invalid or exceeds its limit", project, threadId, intentId, baseRevisionId, baseRevisionHash, [], [], [], [], savedThread);
 
   let previousResponseId = savedThread?.previousResponseId;
   const responseIds: string[] = [];
@@ -607,12 +609,35 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
     status, code, detail, workingProject, threadId, intentId, baseRevisionId, baseRevisionHash,
     responseIds, operationLog, acceptedBatches, previews, makeThreadState(),
   );
+  const complete = (assistantText: string): V2ConversationResult => {
+    const finalHash = canonicalHashForCurrentRevision(workingProject);
+    return {
+      ok: true,
+      status: "completed",
+      project: workingProject,
+      threadState: makeThreadState(),
+      assistantText,
+      attribution: {
+        threadId,
+        intentId,
+        actor: "agent",
+        baseRevisionId,
+        baseRevisionHash,
+        resultRevisionId: workingProject.currentRevisionId,
+        resultRevisionHash: finalHash,
+        responseIds,
+        operationIds: operationLog.map(({ id }) => id),
+      },
+      acceptedBatches,
+      operationLog,
+      previews,
+    };
+  };
 
   try {
     let toolResults: V2AgentToolResult[] = [];
     let modelCalls = 0;
     let toolCalls = 0;
-    let acceptedCount = 0;
     let imageBytesForIntent = 0;
 
     while (true) {
@@ -667,7 +692,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
             const inspected = await withBoundedCall("inspection", request.signal, remainingMs, (signal) => request.inspect(
               structuredClone(workingProject),
               parsedRequest,
-              { evidenceRoot: request.evidenceRoot, operationLog: [...operationLog], signal },
+              { evidenceRoot: request.evidenceRoot, operationLog: [...priorOperationLog.data, ...operationLog], signal },
             ));
             const bounded = validateInspection(inspected);
             const imageBytes = bounded.images.reduce((total, image) => total + image.bytes.byteLength, 0);
@@ -709,8 +734,9 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
             toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "UNSUPPORTED_OPERATION", detail: "one or more operations are outside the preview-supported semantic allowlist" } });
             continue;
           }
-          if (acceptedCount >= MAX_EDIT_BATCHES || previews.length >= MAX_PREVIEWS) {
-            throw new AgentCallError("BUDGET_EXCEEDED", "edit-batch or preview budget exceeded");
+          if (acceptedBatches.length > 0) {
+            toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "EDIT_BATCH_LIMIT", detail: "one accepted edit batch per prompt; use a follow-up prompt for another revision" } });
+            continue;
           }
 
           const batch: OperationBatchInput = {
@@ -736,96 +762,131 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
 
           const beforeCommitHash = semanticHashV2(workingProject);
           if (beforeCommitHash !== currentRevisionHash) throw new Error("project changed while preparing the semantic batch");
-          let commit: V2CanonicalRevisionCommitResult;
+          let rendered: Awaited<ReturnType<typeof executeMediaExecutionJob>>;
+          let registered: ProjectV2;
+          let previewEvidence: Awaited<ReturnType<typeof createPreviewEvidence>>;
           try {
-            commit = await withBoundedCall("canonical revision commit", request.signal, remainingMs, (signal) => request.commitCanonicalRevision({
-              baseRevisionId: workingProject.currentRevisionId,
-              baseRevisionHash: beforeCommitHash,
-              project: structuredClone(predicted.project),
-              operationLog: structuredClone(predicted.operationLog),
-              signal,
-            }));
+            const renderTimeoutMs = Math.min(request.renderOptions?.timeoutMs ?? MAX_PREVIEW_CALL_MS, MAX_PREVIEW_CALL_MS, remainingMs());
+            if (renderTimeoutMs < 1) throw new Error("preview render deadline is exhausted");
+            const renderOptions = { ...request.renderOptions, timeoutMs: renderTimeoutMs };
+            const previewAuthorization: MediaExecutionAuthorization = {
+              ...request.renderAuthorization,
+              isRevisionCurrent: async (revisionId, revisionHash) => revisionId === plannedJob.sourceRevisionId
+                && revisionHash === plannedJob.sourceRevisionHash
+                && await request.renderAuthorization.isRevisionCurrent(workingProject.currentRevisionId, beforeCommitHash),
+            };
+            rendered = await withBoundedCall("preview render", request.signal, remainingMs, (signal) => executeMediaExecutionJob(
+              plannedJob,
+              previewAuthorization,
+              { ...renderOptions, signal },
+            ), MAX_PREVIEW_CALL_MS);
+            registered = registerRenderArtifactV2(predicted.project, rendered.artifact);
+            previewEvidence = await withBoundedCall("preview evidence", request.signal, remainingMs, async () => createPreviewEvidence(request, rendered.artifact, remainingMs), MAX_PREVIEW_EVIDENCE_CALL_MS);
+            const previewImageBytes = previewEvidence.image.bytes.byteLength;
+            if (imageBytesForIntent + previewImageBytes > MAX_IMAGE_BYTES_PER_INTENT) throw new Error("preview image evidence budget exceeded");
+            imageBytesForIntent += previewImageBytes;
           } catch (error) {
             if (error instanceof AgentCallError) throw error;
+            return fail("failed", "PREVIEW_FAILED", "preview render or its bounded image evidence failed; no canonical revision was committed");
+          }
+
+          let commit: V2CanonicalRevisionCommitResult;
+          const commitTimeoutMs = remainingMs();
+          if (commitTimeoutMs < 1) throw new AgentCallError("TIMEOUT", "conversation budget expired before canonical commit");
+          const commitController = new AbortController();
+          const abortCommit = () => commitController.abort();
+          const commitTimer = setTimeout(abortCommit, commitTimeoutMs);
+          request.signal?.addEventListener("abort", abortCommit, { once: true });
+          try {
+            if (request.signal?.aborted) abortCommit();
+            if (commitController.signal.aborted) throw new AgentCallError("CANCELLED", "conversation was cancelled before canonical commit");
+            // ponytail: CAS latency is host-bounded; don't race a write and report failure while it may still publish.
+            commit = await request.commitCanonicalRevision({
+              baseRevisionId: workingProject.currentRevisionId,
+              baseRevisionHash: beforeCommitHash,
+              project: structuredClone(registered),
+              operationLog: structuredClone(predicted.operationLog),
+              signal: commitController.signal,
+            });
+          } catch (error) {
+            if (error instanceof AgentCallError) throw error;
+            if (commitController.signal.aborted) throw new AgentCallError(request.signal?.aborted ? "CANCELLED" : "TIMEOUT", "canonical commit ended after cancellation or timeout");
             toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "COMMIT_REJECTED", detail: "canonical revision compare-and-swap could not be completed" } });
             continue;
+          } finally {
+            clearTimeout(commitTimer);
+            request.signal?.removeEventListener("abort", abortCommit);
           }
           if (!commit || typeof commit !== "object" || typeof commit.ok !== "boolean") {
             return fail("failed", "COMMIT_PROTOCOL_ERROR", "host commit returned an invalid result envelope");
           }
           if (!commit.ok) {
             if (commit.code === "STALE_REVISION") return fail("rejected", "STALE_REVISION", "canonical project changed before this batch could be committed");
+            if (commitController.signal.aborted) return fail("failed", request.signal?.aborted ? "CANCELLED" : "TIMEOUT", "canonical commit stopped without publishing the candidate revision");
             toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "COMMIT_REJECTED", detail: "canonical revision compare-and-swap rejected this batch" } });
             continue;
           }
           const committed = ProjectV2Schema.safeParse(commit.project);
           const committedRevision = committed.success ? committed.data.revisions.find(({ id }) => id === predicted.revisionId) : undefined;
+          const committedOutput = committed.success ? committed.data.outputs.find(({ outputId }) => outputId === rendered.artifact.outputId) : undefined;
+          const committedVerification = committed.success ? committed.data.verification : undefined;
+          const committedVerificationRef = committed.success ? committed.data.verification.refs.find(({ id }) => id === rendered.artifact.verificationRefId) : undefined;
           if (!committed.success || committed.data.projectId !== workingProject.projectId
             || committed.data.currentRevisionId !== predicted.revisionId
             || semanticHashV2(committed.data) !== semanticHashV2(predicted.project)
-            || committedRevision?.manifestSha256 !== semanticHashV2(predicted.project)) {
-            return fail("failed", "COMMIT_PROTOCOL_ERROR", "host commit result did not match the proposed semantic revision");
+            || committedRevision?.manifestSha256 !== semanticHashV2(predicted.project)
+            || committedOutput?.ref !== rendered.artifact.ref
+            || committedOutput?.sha256 !== rendered.artifact.sha256
+            || committedOutput?.sourceRevisionId !== predicted.revisionId
+            || committedOutput?.revisionId !== predicted.revisionId
+            || committedOutput?.renderJobHash !== plannedJob.jobHash
+            || committedOutput?.backendId !== rendered.artifact.backendId
+            || committedOutput?.backendVersion !== rendered.artifact.backendVersion
+            || JSON.stringify(committedOutput?.probe) !== JSON.stringify(rendered.artifact.probe)
+            || committedOutput?.verificationRefId !== rendered.artifact.verificationRefId
+            || committedVerification?.revisionId !== predicted.revisionId
+            || committedVerification.status !== "passed"
+            || committedVerificationRef?.status !== "passed"
+            || JSON.stringify(committedVerificationRef?.evidenceRefs) !== JSON.stringify(rendered.artifact.verification.evidenceRefs)) {
+            return fail("failed", "COMMIT_PROTOCOL_ERROR", "host commit result did not persist the proposed revision and verified preview artifact");
           }
           workingProject = committed.data;
           operationLog.push(...predicted.operationLog);
-          acceptedCount += 1;
-
-          try {
-            const currentJob = buildMediaExecutionJob(workingProject, handlesParsed.data);
-            if (currentJob.jobHash !== plannedJob.jobHash) throw new Error("committed project does not match the frozen preview plan");
-            const renderTimeoutMs = Math.min(request.renderOptions?.timeoutMs ?? MAX_PREVIEW_CALL_MS, MAX_PREVIEW_CALL_MS, remainingMs());
-            if (renderTimeoutMs < 1) throw new Error("preview render deadline is exhausted");
-            const renderOptions = { ...request.renderOptions, timeoutMs: renderTimeoutMs };
-            const rendered = await withBoundedCall("preview render", request.signal, remainingMs, (signal) => executeMediaExecutionJob(
-              currentJob,
-              request.renderAuthorization,
-              { ...renderOptions, signal },
-            ), MAX_PREVIEW_CALL_MS);
-            const registered = registerRenderArtifactV2(workingProject, rendered.artifact);
-            workingProject = registered;
-            previews.push(rendered.artifact);
-            const batchResult: V2AcceptedBatch = {
-              baseRevisionId: batch.baseRevisionId,
-              resultRevisionId: predicted.revisionId,
-              operationIds: predicted.operationLog.map(({ id }) => id),
-              evidenceRefs: [...batch.evidenceRefs],
-              renderJobHash: currentJob.jobHash,
+          previews.push(rendered.artifact);
+          const batchResult: V2AcceptedBatch = {
+            baseRevisionId: batch.baseRevisionId,
+            resultRevisionId: predicted.revisionId,
+            operationIds: predicted.operationLog.map(({ id }) => id),
+            evidenceRefs: [...batch.evidenceRefs],
+            renderJobHash: plannedJob.jobHash,
+            verificationRefId: rendered.artifact.verificationRefId,
+          };
+          acceptedBatches.push(batchResult);
+          const previewEvidenceRefs = [previewEvidence.index.indexRef, previewEvidence.image.ref];
+          for (const ref of previewEvidenceRefs) disclosedEvidenceRefs.add(ref);
+          toolResults.push({ callId: call.id, name: call.name, output: {
+            ok: true,
+            baseRevisionId: batch.baseRevisionId,
+            revisionId: predicted.revisionId,
+            operationIds: batchResult.operationIds,
+            preview: {
+              renderJobHash: rendered.artifact.renderJobHash,
+              outputId: rendered.artifact.outputId,
+              ref: rendered.artifact.ref,
+              sha256: rendered.artifact.sha256,
+              probe: rendered.artifact.probe,
               verificationRefId: rendered.artifact.verificationRefId,
-            };
-            acceptedBatches.push(batchResult);
-            const previewEvidence = await withBoundedCall("preview evidence", request.signal, remainingMs, async () => createPreviewEvidence(request, rendered.artifact, remainingMs), MAX_PREVIEW_EVIDENCE_CALL_MS);
-            const previewImageBytes = previewEvidence.image.bytes.byteLength;
-            if (imageBytesForIntent + previewImageBytes > MAX_IMAGE_BYTES_PER_INTENT) throw new Error("preview image evidence budget exceeded");
-            imageBytesForIntent += previewImageBytes;
-            const previewEvidenceRefs = [previewEvidence.index.indexRef, previewEvidence.image.ref];
-            for (const ref of previewEvidenceRefs) disclosedEvidenceRefs.add(ref);
-            toolResults.push({ callId: call.id, name: call.name, output: {
-              ok: true,
-              baseRevisionId: batch.baseRevisionId,
-              revisionId: predicted.revisionId,
-              operationIds: batchResult.operationIds,
-              preview: {
-                renderJobHash: rendered.artifact.renderJobHash,
-                outputId: rendered.artifact.outputId,
-                ref: rendered.artifact.ref,
-                sha256: rendered.artifact.sha256,
-                probe: rendered.artifact.probe,
-                verificationRefId: rendered.artifact.verificationRefId,
-                checks: rendered.artifact.verification.checks,
-                creativeApproval: "not_assessed",
-              },
-              previewEvidence: {
-                indexRef: previewEvidence.index.indexRef,
-                sourceAssetSha256: previewEvidence.index.sourceSha256,
-                imageRef: previewEvidence.image.ref,
-                imageSha256: previewEvidence.index.artifacts.find(({ ref }) => ref === previewEvidence.image.ref)?.sha256,
-              },
-              evidenceRefs: previewEvidenceRefs,
-            }, images: [previewEvidence.image] });
-          } catch (error) {
-            if (error instanceof AgentCallError) throw error;
-            return fail("failed", "PREVIEW_FAILED", "preview render or its bounded image evidence failed; the accepted semantic revision remains current");
-          }
+              checks: rendered.artifact.verification.checks,
+              creativeApproval: "not_assessed",
+            },
+            previewEvidence: {
+              indexRef: previewEvidence.index.indexRef,
+              sourceAssetSha256: previewEvidence.index.sourceSha256,
+              imageRef: previewEvidence.image.ref,
+              imageSha256: previewEvidence.index.artifacts.find(({ ref }) => ref === previewEvidence.image.ref)?.sha256,
+            },
+            evidenceRefs: previewEvidenceRefs,
+          }, images: [previewEvidence.image] });
           continue;
         }
 
@@ -833,37 +894,9 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
       }
     }
 
-    const finalHash = canonicalHashForCurrentRevision(workingProject);
-    const threadState: V2ConversationThread = {
-      threadId,
-      projectId: workingProject.projectId,
-      currentRevisionId: workingProject.currentRevisionId,
-      currentRevisionHash: finalHash,
-      ...(previousResponseId ? { previousResponseId } : {}),
-      operationIds: [...(savedThread?.operationIds ?? []), ...operationLog.map(({ id }) => id)],
-    };
-    return {
-      ok: true,
-      status: "completed",
-      project: workingProject,
-      threadState,
-      assistantText: finalAssistantText || (acceptedBatches.length ? "The edit preview is ready." : "I inspected the project and made no changes."),
-      attribution: {
-        threadId,
-        intentId,
-        actor: "agent",
-        baseRevisionId,
-        baseRevisionHash,
-        resultRevisionId: workingProject.currentRevisionId,
-        resultRevisionHash: finalHash,
-        responseIds,
-        operationIds: operationLog.map(({ id }) => id),
-      },
-      acceptedBatches,
-      operationLog,
-      previews,
-    };
+    return complete(finalAssistantText || (acceptedBatches.length ? "The edit preview is ready." : "I inspected the project and made no changes."));
   } catch (error) {
+    if (acceptedBatches.length > 0) return complete("The edit preview is ready; an optional follow-up response could not be completed.");
     const code = error instanceof AgentCallError ? error.code : error instanceof Error && error.message.includes("current project revision") ? "INVALID_PROJECT" : "MODEL_ERROR";
     const status: FailureStatus = code === "INVALID_PROJECT" ? "rejected" : "failed";
     return fail(status, code, error instanceof AgentCallError ? errorDetail(error) : "model or agent operation failed");

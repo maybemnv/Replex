@@ -6,7 +6,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "./media-evidence.js";
 import { OperationLogRecordSchema, type OperationLogRecord } from "./operations-v2.js";
-import { ProjectV2Schema, type MediaAsset, type ProjectV2 } from "./schema-v2.js";
+import { ProjectV2Schema, type MediaAsset, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
 
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 const pageOffset = z.number().int().nonnegative().max(1_000_000);
@@ -184,8 +184,7 @@ function safeFilename(value: string): string {
   return safeText(leaf, 100);
 }
 
-function projectProbe(asset: MediaAsset): Record<string, unknown> {
-  const probe = asset.probe;
+function projectProbe(probe: MediaProbeV2): Record<string, unknown> {
   return {
     ...(probe.durationMs !== undefined ? { durationMs: probe.durationMs } : {}),
     ...(probe.width !== undefined ? { width: probe.width } : {}),
@@ -218,16 +217,7 @@ function provenanceProjection(asset: MediaAsset): Record<string, unknown> {
       importedAt: provenance.importedAt,
       sourceSha256: provenance.sourceSha256,
       importMethod: provenance.importMethod,
-      originalProbe: {
-        ...(provenance.originalProbe.durationMs !== undefined ? { durationMs: provenance.originalProbe.durationMs } : {}),
-        ...(provenance.originalProbe.width !== undefined ? { width: provenance.originalProbe.width } : {}),
-        ...(provenance.originalProbe.height !== undefined ? { height: provenance.originalProbe.height } : {}),
-        ...(provenance.originalProbe.fps !== undefined ? { fps: provenance.originalProbe.fps } : {}),
-        ...(provenance.originalProbe.videoCodec ? { videoCodec: safeText(provenance.originalProbe.videoCodec, 40) } : {}),
-        ...(provenance.originalProbe.audioCodec ? { audioCodec: safeText(provenance.originalProbe.audioCodec, 40) } : {}),
-        ...(provenance.originalProbe.channels !== undefined ? { channels: provenance.originalProbe.channels } : {}),
-        ...(provenance.originalProbe.sampleRateHz !== undefined ? { sampleRateHz: provenance.originalProbe.sampleRateHz } : {}),
-      },
+      originalProbe: projectProbe(provenance.originalProbe),
     };
   }
   return {
@@ -271,7 +261,7 @@ function projectSummary(project: ProjectV2): Record<string, unknown> {
 }
 
 function assetSummary(asset: MediaAsset): Record<string, unknown> {
-  return { assetId: safeId(asset.id), type: asset.type, sha256: asset.sha256, probe: projectProbe(asset), provenance: provenanceProjection(asset) };
+  return { assetId: safeId(asset.id), type: asset.type, sha256: asset.sha256, probe: projectProbe(asset.probe), provenance: provenanceProjection(asset) };
 }
 
 function clipSummary(clip: ProjectV2["composition"]["clips"][number]): Record<string, unknown> {
@@ -419,7 +409,7 @@ async function inspectMediaEvidence(
   const base = {
     assetId: safeId(asset.id),
     type: asset.type,
-    probe: projectProbe(asset),
+    probe: projectProbe(asset.probe),
     provenance: provenanceProjection(asset),
     transcriptStatus: "unavailable",
   };
@@ -572,7 +562,7 @@ function validateArtifactNames(index: MediaEvidenceIndex): void {
   }
 }
 
-async function checkedEvidenceRoot(evidenceRoot: string): Promise<string> {
+export async function checkedEvidenceRoot(evidenceRoot: string): Promise<string> {
   const info = await lstat(evidenceRoot);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe evidence root");
   const canonical = await realpath(evidenceRoot);
@@ -580,7 +570,7 @@ async function checkedEvidenceRoot(evidenceRoot: string): Promise<string> {
   return canonical;
 }
 
-async function readEvidenceFile(root: string, ref: string, maximumBytes: number): Promise<Buffer> {
+export async function readEvidenceFile(root: string, ref: string, maximumBytes: number): Promise<Buffer> {
   const parts = ref.split("/");
   if (parts.length < 4 || parts[0] !== "media-evidence" || parts.some((part) => !part || part === "." || part === ".." || part.includes("\\"))) {
     throw new Error("unsafe evidence reference");

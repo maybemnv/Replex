@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runConversationalEditV2, V2_AGENT_TOOLS, type V2AgentModelRequest, type V2AgentModelResponse, type V2CanonicalRevisionCommit, type V2ConversationRequest } from "../src/agent-v2.js";
-import { semanticHashV2 } from "../src/operations-v2.js";
+import { runConversationalEditV2, V2_AGENT_TOOLS, type V2AgentModelRequest, type V2AgentModelResponse, type V2CanonicalRevisionCommit, type V2ConversationRequest, type V2InspectorCallContext, type V2InspectRequest } from "../src/agent-v2.js";
+import { applyOperationBatch, semanticHashV2 } from "../src/operations-v2.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -97,6 +97,7 @@ function requestFor(project: ProjectV2, model: V2ConversationRequest["model"], o
     threadId: "thread-1",
     inspect: async () => ({ ok: false, code: "unexpected inspection" }),
     model,
+    operationLog: [],
     assetHandles: project.assets["asset-1"] ? [{ assetId: "asset-1", sha256: project.assets["asset-1"].sha256, ref: project.assets["asset-1"].path! }] : [],
     renderAuthorization: { projectRoot: ".", resolvedHandles: [], isRevisionCurrent: vi.fn() },
     renderOptions: { ffmpegPath: "missing-ffmpeg", ffprobePath: "missing-ffprobe", timeoutMs: 1000 },
@@ -232,6 +233,38 @@ describe("V2 conversational edit thread", () => {
     expect(inspect).toHaveBeenCalledOnce();
   });
 
+  it("supplies host-owned prior operation history to bounded inspection", async () => {
+    const project = projectWithClip();
+    const applied = applyOperationBatch(project, {
+      baseRevisionId: project.currentRevisionId,
+      actor: "user",
+      intentId: "prior-edit",
+      evidenceRefs: ["evidence:prior"],
+      operations: [{ type: "set_volume", clipId: "clip-1", audioGainDb: -3 }],
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    const inspect = vi.fn(async (_project: ProjectV2, _request: V2InspectRequest, context?: V2InspectorCallContext) => ({
+      ok: true as const,
+      data: { total: context?.operationLog.length ?? 0 },
+      evidenceRefs: [],
+    }));
+    const model = scriptedModel([
+      () => ({ responseId: "response-history", calls: [{ id: "call-history", name: "inspect_v2", arguments: { kind: "operation_history" } }] }),
+      (input) => {
+        expect(input.toolResults[0]?.output).toMatchObject({ ok: true, data: { total: 1 } });
+        return finalResponse("response-history-final");
+      },
+    ]);
+    const result = await runConversationalEditV2(requestFor(applied.project, model, {
+      operationLog: applied.operationLog,
+      inspect,
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(inspect.mock.calls[0]?.[2]?.operationLog).toEqual(applied.operationLog);
+  });
+
   it("redacts unsafe inspector output before returning a tool result to the model", async () => {
     const model = scriptedModel([
       () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "project_summary" } }] }),
@@ -347,7 +380,7 @@ describe("V2 conversational edit thread", () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
-  it("requires the host CAS commit to succeed before it starts any render", async () => {
+  it("leaves canonical state unchanged when preview generation fails", async () => {
     const project = projectWithClip();
     const model = scriptedModel([
       () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
@@ -362,7 +395,7 @@ describe("V2 conversational edit thread", () => {
         }] },
       }] }),
     ]);
-    const isRevisionCurrent = vi.fn();
+    const isRevisionCurrent = vi.fn(async () => true);
     const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: false as const, code: "STALE_REVISION", detail: "host CAS lost" }));
     const result = await runConversationalEditV2(requestFor(project, model, {
       inspect: async () => ({ ok: true, data: { summary: "clip 1" }, evidenceRefs: [evidenceRef] }),
@@ -370,33 +403,9 @@ describe("V2 conversational edit thread", () => {
       commitCanonicalRevision: commit,
     }));
 
-    expect(result).toMatchObject({ ok: false, status: "rejected", code: "STALE_REVISION", project: { currentRevisionId: "revision-0" }, operationLog: [], previews: [] });
-    expect(commit).toHaveBeenCalledOnce();
-    expect(commit.mock.calls[0][0]).toMatchObject({ baseRevisionId: "revision-0", baseRevisionHash: semanticHashV2(project) });
-    expect(isRevisionCurrent).not.toHaveBeenCalled();
-  });
-
-  it("reports an invalid successful host commit as a protocol error", async () => {
-    const project = projectWithClip();
-    const model = scriptedModel([
-      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
-      (input) => ({ responseId: "response-2", calls: [{
-        id: "call-edit",
-        name: "propose_edit_batch",
-        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "set_volume", clipId: "clip-1", audioGainDb: -6 }] },
-      }] }),
-    ]);
-    const isRevisionCurrent = vi.fn();
-    const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: true as const, project: emptyProject() }));
-    const result = await runConversationalEditV2(requestFor(project, model, {
-      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidenceRef] }),
-      renderAuthorization: { projectRoot: ".", resolvedHandles: [], isRevisionCurrent },
-      commitCanonicalRevision: commit,
-    }));
-
-    expect(result).toMatchObject({ ok: false, code: "COMMIT_PROTOCOL_ERROR", project: { currentRevisionId: "revision-0" } });
-    expect(commit).toHaveBeenCalledOnce();
-    expect(isRevisionCurrent).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, status: "failed", code: "PREVIEW_FAILED", project: { currentRevisionId: "revision-0" }, operationLog: [], acceptedBatches: [], previews: [] });
+    expect(commit).not.toHaveBeenCalled();
+    expect(isRevisionCurrent).toHaveBeenCalled();
   });
 
   it("honors cancellation while waiting for the model", async () => {
