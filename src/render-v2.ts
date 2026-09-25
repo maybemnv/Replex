@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { semanticHashV2 } from "./operations-v2.js";
-import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
+import { resolveRenderFont } from "./render.js";
+import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, TransitionV2Schema, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const positiveInt = z.number().int().finite().positive();
@@ -33,10 +35,44 @@ const jobPayloadSchema = z.object({
   }).strict(),
 }).strict();
 
+const compositionVideoClipSchema = jobPayloadSchema.shape.clip.extend({
+  assetId: z.string().min(1),
+  timelineStartMs: z.number().int().nonnegative(),
+  transitionOut: TransitionV2Schema.optional(),
+});
+const compositionLayerSchema = z.discriminatedUnion("kind", [
+  z.object({
+    id: z.string().min(1), kind: z.literal("text"), timelineStartMs: z.number().int().nonnegative(), durationMs: positiveInt,
+    text: z.string().min(1).max(1024), fontSize: z.number().int().min(8).max(96), color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  }).strict(),
+  z.object({
+    id: z.string().min(1), kind: z.literal("image"), timelineStartMs: z.number().int().nonnegative(), durationMs: positiveInt, assetId: z.string().min(1),
+  }).strict(),
+]);
+const compositionJobPayloadSchema = z.object({
+  jobVersion: z.literal(2),
+  projectId: z.string().min(1),
+  sourceRevisionId: z.string().min(1),
+  sourceRevisionHash: sha256Schema,
+  assetInputs: z.array(z.object({
+    assetId: z.string().min(1),
+    handle: AssetHandleSchema,
+    kind: z.enum(["video", "audio", "image"]),
+    source: z.object({ width: positiveInt.optional(), height: positiveInt.optional(), durationMs: positiveInt.optional(), hasAudio: z.boolean() }).strict(),
+  }).strict()).min(1).max(4),
+  composition: z.object({ width: positiveInt, height: positiveInt, fps: z.number().positive().finite(), durationMs: positiveInt, outputDurationMs: positiveInt }).strict(),
+  videoClips: z.array(compositionVideoClipSchema).min(1).max(2),
+  audioClip: z.object({ id: z.string().min(1), assetId: z.string().min(1), sourceInMs: z.number().int().nonnegative(), sourceOutMs: positiveInt, speed: z.number().min(0.25).max(4), audioGainDb: finite, muted: z.boolean() }).strict().optional(),
+  layers: z.array(compositionLayerSchema).max(2),
+  fontSha256: sha256Schema.optional(),
+}).strict();
+
 type JobPayload = z.infer<typeof jobPayloadSchema>;
+type CompositionJobPayload = z.infer<typeof compositionJobPayloadSchema>;
 type DeepReadonly<T> = T extends (...args: never[]) => unknown ? T : T extends readonly unknown[] ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 
 export type MediaExecutionJob = DeepReadonly<JobPayload & { jobHash: string }>;
+export type CompositionExecutionJob = DeepReadonly<CompositionJobPayload & { jobHash: string }>;
 
 export interface ResolvedAssetHandle {
   assetId: string;
@@ -236,6 +272,139 @@ export function buildMediaExecutionJob(projectInput: ProjectV2, handles: readonl
     },
   });
   return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as MediaExecutionJob;
+}
+
+function compositionFontSha256(): string {
+  const { file } = resolveRenderFont();
+  const info = lstatSync(file);
+  if (info.isSymbolicLink() || !info.isFile() || info.size > 32 * 1024 * 1024) throw new Error("composition font must be a bounded regular file");
+  return digest(readFileSync(file));
+}
+
+/** Plans the bounded native 2D profile without exposing ProjectV2 or host paths to the backend. */
+export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: readonly AssetHandle[]): CompositionExecutionJob {
+  const project = ProjectV2Schema.parse(projectInput);
+  const { width, height, fps, durationMs } = project.composition;
+  if (width < 16 || height < 16 || width % 2 !== 0 || height % 2 !== 0 || width > 4096 || height > 4096 || fps < 1 || fps > 60 || durationMs > 120_000) {
+    throw new Error("composition exceeds native V2 render limits");
+  }
+  const revision = project.revisions.find(({ id }) => id === project.currentRevisionId);
+  const sourceRevisionHash = semanticHashV2(project);
+  if (!revision || revision.manifestSha256 !== sourceRevisionHash) throw new Error("current revision manifest hash does not match semantic project state");
+
+  const authorized = new Map<string, AssetHandle>();
+  for (const handleInput of handles) {
+    const handle = AssetHandleSchema.parse(handleInput);
+    const previous = authorized.get(handle.assetId);
+    if (previous && canonicalJson(previous) !== canonicalJson(handle)) throw new Error("authorized handles contain conflicting identity for one asset");
+    authorized.set(handle.assetId, handle);
+  }
+  const inputs = new Map<string, CompositionJobPayload["assetInputs"][number]>();
+  const addInput = (assetId: string, kind: "video" | "audio" | "image") => {
+    const asset = project.assets[assetId];
+    if (!asset || !(kind === "video" ? ["uploaded_video", "browser_capture"].includes(asset.type) : kind === "audio" ? asset.type === "audio" : ["image", "generated_graphic"].includes(asset.type))) {
+      throw new Error(`composition asset ${assetId} has an unsupported media type`);
+    }
+    const handle = authorized.get(assetId);
+    if (!handle || handle.sha256 !== asset.sha256 || handle.ref !== (asset.path ?? asset.objectRef)) throw new Error("authorized asset handle does not match the selected immutable asset");
+    const existing = inputs.get(assetId);
+    if (existing) {
+      if (existing.kind !== kind) throw new Error("one asset cannot be used with conflicting composition media types");
+      return existing;
+    }
+    const source = kind === "video"
+      ? { width: asset.probe.width, height: asset.probe.height, durationMs: asset.probe.durationMs, hasAudio: asset.probe.audioCodec !== undefined }
+      : kind === "audio"
+        ? { durationMs: asset.probe.durationMs, hasAudio: true }
+        : { width: asset.probe.width, height: asset.probe.height, hasAudio: false };
+    if (kind !== "audio" && (!source.width || source.width < 2 || !source.height || source.height < 2)) throw new Error("composition visual asset requires valid dimensions");
+    const planned = { assetId, handle, kind, source };
+    inputs.set(assetId, planned);
+    return planned;
+  };
+
+  const videoEntries = project.composition.clips
+    .filter((clip) => project.assets[clip.assetId]?.type !== "audio")
+    .sort((left, right) => left.timelineStartMs - right.timelineStartMs);
+  const audioEntries = project.composition.clips.filter((clip) => project.assets[clip.assetId]?.type === "audio");
+  if (videoEntries.length < 1 || videoEntries.length > 2 || audioEntries.length > 1) throw new Error("native composition supports one or two video clips and at most one audio clip");
+  const primaryTrackId = videoEntries[0]!.trackId;
+  const primaryTrack = project.composition.tracks.find(({ id }) => id === primaryTrackId);
+  if (!primaryTrack || primaryTrack.kind !== "video" || videoEntries.some(({ trackId }) => trackId !== primaryTrackId)) throw new Error("native composition video clips must use one video track");
+  if (videoEntries[0]!.timelineStartMs !== 0) throw new Error("native composition video must start at timeline zero");
+
+  const videoClips = videoEntries.map((clip, index) => {
+    const asset = project.assets[clip.assetId]!;
+    const track = project.composition.tracks.find(({ id }) => id === clip.trackId)!;
+    const input = addInput(clip.assetId, "video");
+    if (!input.source.durationMs || clip.sourceOutMs > input.source.durationMs) throw new Error("video clip source range exceeds its immutable asset");
+    if (Math.abs(clip.transform.x) > width * 2 || Math.abs(clip.transform.y) > height * 2 || clip.transform.scale > 8
+      || Math.max(width, height) * clip.transform.scale > 8192 || Math.abs(clip.transform.rotation) > 360 || clip.audioGainDb < -60 || clip.audioGainDb > 24) {
+      throw new Error("clip transform or audio gain exceeds native V2 render limits");
+    }
+    if (asset.type !== "uploaded_video" && asset.type !== "browser_capture") throw new Error("native composition video input is unsupported");
+    const planned = {
+      id: clip.id, assetId: clip.assetId, timelineStartMs: clip.timelineStartMs, sourceInMs: clip.sourceInMs, sourceOutMs: clip.sourceOutMs,
+      speed: clip.speed, transform: clip.transform, ...(clip.crop ? { crop: clip.crop } : {}), opacity: clip.opacity,
+      audioGainDb: clip.audioGainDb, muted: clip.muted || track.muted,
+      ...(clip.transitionOut ? { transitionOut: clip.transitionOut } : {}),
+    };
+    return compositionVideoClipSchema.parse(planned);
+  });
+  if (videoClips.at(-1)!.transitionOut) throw new Error("the final video clip cannot have an outgoing transition");
+  const clipDurations = videoClips.map((clip) => (clip.sourceOutMs - clip.sourceInMs) / clip.speed);
+  if (videoClips.length === 2 && Math.abs(videoClips[1]!.timelineStartMs - clipDurations[0]!) > 1) throw new Error("native composition video clips must be contiguous");
+  const canonicalDuration = clipDurations.reduce((total, duration) => total + duration, 0);
+  if (Math.abs(canonicalDuration - durationMs) > 1) throw new Error("native composition video clips must fill the canonical duration");
+  const transition = videoClips[0]!.transitionOut;
+  const transitionMs = transition?.type === "crossfade" ? transition.durationMs : 0;
+  const outputDurationMs = Math.round(canonicalDuration - transitionMs);
+  if (outputDurationMs <= 0) throw new Error("native composition render duration must be positive");
+
+  let audioClip: CompositionJobPayload["audioClip"];
+  if (audioEntries.length) {
+    const clip = audioEntries[0]!;
+    const track = project.composition.tracks.find(({ id }) => id === clip.trackId);
+    const input = addInput(clip.assetId, "audio");
+    if (!track || track.kind !== "audio" || clip.timelineStartMs !== 0 || clip.audioGainDb < -60 || clip.audioGainDb > 24
+      || (clip.sourceOutMs - clip.sourceInMs) / clip.speed < outputDurationMs) throw new Error("native audio clip must be a bounded full-length clip on an audio track");
+    audioClip = { id: clip.id, assetId: clip.assetId, sourceInMs: clip.sourceInMs, sourceOutMs: clip.sourceOutMs, speed: clip.speed, audioGainDb: clip.audioGainDb, muted: clip.muted || track.muted };
+    if (input.source.durationMs && clip.sourceOutMs > input.source.durationMs) throw new Error("audio clip source range exceeds its immutable asset");
+  }
+
+  const activeLayers = project.composition.layers.filter((layer) => !project.composition.tracks.find(({ id }) => id === layer.trackId)?.muted);
+  if (activeLayers.length > 2 || activeLayers.filter(({ kind }) => kind === "text").length > 1 || activeLayers.filter(({ kind }) => kind === "image").length > 1
+    || activeLayers.some(({ kind }) => kind === "graphic")) throw new Error("native composition supports one timed text layer and one timed image layer");
+  const layers = activeLayers.map((layer) => {
+    if (layer.keyframes.length || layer.timelineStartMs + layer.durationMs > outputDurationMs) throw new Error("native composition layers must be static and fit the rendered duration");
+    if (layer.kind === "text" && "text" in layer.properties) {
+      if (layer.properties.fontFamily && layer.properties.fontFamily !== "Replex Sans") throw new Error("native composition supports only the Replex Sans font preset");
+      const text = layer.properties.text;
+      if (Buffer.byteLength(text, "utf8") > 2048) throw new Error("composition text exceeds the local render limit");
+      return compositionLayerSchema.parse({
+        id: layer.id, kind: "text", timelineStartMs: layer.timelineStartMs, durationMs: layer.durationMs,
+        text, fontSize: layer.properties.fontSize ?? 36, color: layer.properties.color ?? "#ffffff",
+      });
+    }
+    if (layer.kind !== "image" || !("assetId" in layer.properties)) throw new Error("native composition does not support this layer kind");
+    const assetId = layer.properties.assetId;
+    addInput(assetId, "image");
+    return compositionLayerSchema.parse({ id: layer.id, kind: "image", timelineStartMs: layer.timelineStartMs, durationMs: layer.durationMs, assetId });
+  });
+
+  const payload = compositionJobPayloadSchema.parse({
+    jobVersion: 2,
+    projectId: project.projectId,
+    sourceRevisionId: project.currentRevisionId,
+    sourceRevisionHash,
+    assetInputs: [...inputs.values()],
+    composition: { width, height, fps, durationMs, outputDurationMs },
+    videoClips,
+    ...(audioClip ? { audioClip } : {}),
+    layers,
+    ...(layers.some(({ kind }) => kind === "text") ? { fontSha256: compositionFontSha256() } : {}),
+  });
+  return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as CompositionExecutionJob;
 }
 
 function pathInside(root: string, candidate: string): boolean {

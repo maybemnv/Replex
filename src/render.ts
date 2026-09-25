@@ -346,7 +346,7 @@ function escapeFontPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/:/g, "\\:");
 }
 
-function resolveRenderFont(): { directory: string; file: string } {
+export function resolveRenderFont(): { directory: string; file: string } {
   const candidates = [process.env.REPLEX_FONT_FILE, "C:\\Windows\\Fonts\\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"].filter((candidate): candidate is string => Boolean(candidate));
   const fontPath = candidates.find((candidate) => existsSync(candidate));
   if (!fontPath) throw new Error("overlay asset generation requires a TrueType font; set REPLEX_FONT_FILE to an accessible .ttf file");
