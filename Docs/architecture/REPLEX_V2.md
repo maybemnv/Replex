@@ -142,6 +142,22 @@ interface MediaAsset {
   provenance: BrowserProvenance | UploadProvenance | GeneratedProvenance;
 }
 
+interface Transform {
+  x: number; // canvas-pixel offset after automatic fit/alignment
+  y: number; // canvas-pixel offset after automatic fit/alignment
+  scale: number; // multiplier after aspect-preserving contain fit
+  rotation: number; // clockwise degrees around the clip center
+  anchorX: number; // 0..1 alignment across available horizontal canvas space
+  anchorY: number; // 0..1 alignment across available vertical canvas space
+}
+
+interface Crop {
+  x: number; // normalized source left edge
+  y: number; // normalized source top edge
+  width: number; // normalized source width
+  height: number; // normalized source height
+}
+
 // Immutable source access is authorized by the planner/executor boundary.
 interface AssetHandle {
   assetId: string;
@@ -223,6 +239,8 @@ interface ProjectV2 {
 ### Why tracks exist
 
 Three fixed track kinds are the minimum needed to express overlapping video, independent audio, and visual overlays. They are ordering containers, not an unrestricted NLE graph. Phase 1 supports one primary video track and one overlay track; additional video/audio tracks arrive only with the multi-asset phase.
+
+Transform and crop units are backend-independent canonical semantics. Crop is a normalized source rectangle applied before contain-fit. Scale follows contain-fit, rotation is clockwise around the transformed clip center, and the normalized anchors align within the remaining canvas space before pixel x/y offsets are added. Opacity is applied before compositing; audio gain is in dB after trim/speed. See [`ADR-008`](ADR-008-v2-transform-geometry.md).
 
 ### Timing and keyframes
 

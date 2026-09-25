@@ -1,8 +1,10 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation and the PR-A candidate are implemented. Gate A passed independent validation on `e38b792`; PR-A is ready for review and merge is pending. Phase 2 has not started and remains gated on PR-A merge and Gate B.
+**Status:** V2 Core Foundation and PR-A are merged to `main` at `a8feca95c26373467fc300c1b01eac583cb74e89`. PR-B Phase 2 is complete on candidate head `fa9f42d850a20eb23b0ee5cb297c045da96e3634`; Gate B passed local E2E, full serial tests, and independent review. Phase 3 has not started.
 
-**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed; no GitHub CI result was available during this review.
+**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
+
+**PR-B validation (25 September 2026):** `tsc -p tsconfig.json --noEmit` passed. The final serial full suite passed 30/30 files and 226/226 tests with zero skips in 253.89 seconds using direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Independent validation reviewed head `fa9f42d`, passed build, 11/11 focused renderer/E2E tests, and `git diff --check`; the render-anchor finding was fixed and retested with actual output pixels. Gate B is met. No GitHub CI result was available during this validation.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -91,7 +93,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
-**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A at `e38b792`; see the PR-A validation record above.
+**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A on PR-A head `4964747`; the merge commit is `a8feca9`. See the PR-A validation record above.
 
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
@@ -126,46 +128,58 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ## Phase 2: Local media ingestion and baseline render
 
-Phase 2 starts only after PR-A passes Gate A. The PARTIAL-GO permits a small internal, read-only `MediaEvidenceProvider` study if it helps V2-202. It may use only the approved V2-150 subset, pinned-version capability checks, authorized asset handles, private Replex staging/evidence roots, strict known-JSON parsing, command-field stripping, and owned deadlines. It never mutates canonical state. Keep a native provider/fallback; ffmpeg-skill availability is not required for product operation. This provider is not `FfmpegSkillBackend` and adds no public service command.
+Phase 2 started after PR-A passed Gate A. PR-B uses the native FFmpeg/FFprobe path for import checks, bounded evidence, and a single-clip deterministic renderer. The V2-150 ffmpeg-skill PARTIAL-GO remains research only: no runtime dependency, adapter, or public service command was added. Reconsider a read-only adapter only if later evidence demonstrates a measurable advantage over this native path.
 
 ### V2-201: Import immutable local assets
 
+**Implementation status:** Complete in `src/import-v2.ts`; the integrated import tests and final PR-B serial suite pass.
+
 - **Objective:** Import video/image/audio by copy, hash, probe, and atomic asset registration.
 - **Why:** Uploaded media is the first new source type and trust boundary.
-- **Dependencies:** V2-103; V2-150 for analysis/render capability selection.
-- **Likely files:** new `src/ingest.ts`, `src/media-store.ts`; `src/cli.ts`; tests.
-- **Contracts:** `ImportAssetRequest`, `ImportResult`, typed import errors; `import_asset` only after file persistence and probe succeed.
+- **Dependencies:** V2-103 and Gate A; installed local FFmpeg/FFprobe for media validation.
+- **Files:** `src/import-v2.ts`, `tests/import-v2.test.ts`.
+- **Contracts:** `authorizeLocalImport` produces an opaque host-authorized file token; `importLocalAssetV2` stages, hashes, probes, fully decodes, persists, then applies one `import_asset` operation.
 - **Migration concerns:** Deduplicate by hash without merging provenance records; never mutate originals.
-- **Tests:** video/image/audio, duplicate content, corrupt/unsupported media, changed source during import, path escape, disk failure, cancellation cleanup.
+- **Tests:** video/image/audio, duplicate content, corrupt/truncated media, changed source during import, path/symlink/junction escape, cancellation and cleanup, reducer rollback.
 - **Acceptance:** Imported source is immutable, hash-matched, probed, project-scoped, and attributable; failure leaves no canonical asset.
 - **Non-goals:** Remote URLs, cloud upload, transcoding on import.
 - **Rollback:** Remove unreferenced staged artifact; canonical revision remains unchanged on failure.
 
+**Implemented bounds:** 256 MiB per input; 60 seconds total import, 15 seconds for probe, and 30 seconds for full decode; 10-minute duration, 4096-pixel dimension/16-megapixel frame, 60-fps, 8-channel, and 192-kHz sample-rate caps. Video, image, and audio imports retain separate provenance even when identical bytes deduplicate.
+
 ### V2-202: Produce deterministic bounded media evidence
 
-- **Objective:** Generate versioned shot ranges, selected frames/contact sheets, motion/audio measurements, and optional transcript references.
+**Implementation status:** Complete in `src/media-evidence.ts`. The native provider writes probe metadata, up to four selected frames, a contact sheet, scene boundaries, and audio peaks/mean, silence, and loudness when audio exists. No transcript, motion proxy, model call, ffmpeg-skill adapter, or canonical mutation is included.
+
+- **Objective:** Generate a versioned evidence index with technical probe, selected frames/contact sheet, scene boundaries, and bounded audio measurements.
 - **Why:** Models need compact evidence rather than full video context.
-- **Dependencies:** V2-201, the PR-A/Gate A pass, and V2-150's bounded PARTIAL-GO; retain the native path unless the approved read-only provider is measurably cheaper or safer.
-- **Likely files:** new `src/analyze.ts`, `src/evidence.ts`, inspection extensions; tests and small media fixtures.
-- **Contracts:** Internal `MediaEvidenceProvider` methods `probe`, `contactSheet`, `scenes`, `silence`, `loudness`, and `check`; versioned `MediaEvidenceIndex` with per-artifact hashes, generator/config version, and source hash. The provider returns evidence only; it cannot write operations or revisions.
+- **Dependencies:** V2-201 and Gate A. The approved ffmpeg-skill PARTIAL-GO remains advisory; PR-B uses native FFmpeg/FFprobe.
+- **Files:** `src/media-evidence.ts`, `tests/media-evidence.test.ts`.
+- **Contracts:** `generateMediaEvidence` accepts an `AssetHandle`, host resolver, and Replex evidence root; it returns a source-hash-bound `MediaEvidenceIndex` with per-artifact hashes and generator/config versions. It never receives ProjectV2 or writes operations/revisions.
 - **Migration concerns:** Derived evidence is regenerable and must not change asset identity.
-- **Tests:** deterministic fixture outputs/tolerances, silent/no-audio media, variable frame rate, invalidation after source mismatch, evidence size limits.
-- **Acceptance:** The same source/config produces equivalent indexed evidence; inspection can request bounded subsets.
+- **Tests:** deterministic bounded real-media evidence, silent/no-audio media, malformed tool output, source mismatch/change, symlinked evidence roots, and byte/frame limits.
+- **Acceptance:** The index is regenerable, source-hash-bound, and each artifact is hash-addressed; bounded inspection consumers are a later Phase 3 task.
 - **Non-goals:** Full semantic understanding, mandatory transcription, model calls.
 - **Rollback:** Delete/rebuild derived evidence index; source and project remain valid.
 
+Evidence is tied to the asset hash and generator/config versions. Each artifact is capped at 8 MiB, the pack at 32 MiB, and analysis at two minutes. A hostile same-user process that changes and restores a source path during analysis is a residual local concurrency risk; the normal host resolver uses the content-addressed, read-only, single-link import store.
+
 ### V2-203: Render a basic uploaded-video composition
+
+**Implementation status:** Complete in `src/render-v2.ts`; the final anchor/rotation pixel regression, renderer tests, and Gate B E2E pass.
 
 - **Objective:** Extend the native backend to render one uploaded clip with trim, speed, transform/crop, opacity, and audio gain.
 - **Why:** Prove V2 state can reach deterministic media before agent or new dependency work.
-- **Dependencies:** V2-103, V2-201, and V2-150.
-- **Likely files:** new V2 RenderJob planner or versioned extension in `src/render.ts`; `src/verify.ts`; render tests.
-- **Contracts:** planner-produced immutable `MediaExecutionJob` from a frozen revision; authorized `AssetHandle`/execution context; `RenderArtifact` output requirements and provenance.
+- **Dependencies:** V2-103, V2-201, and Gate A. The baseline uses the native FFmpeg backend.
+- **Files:** `src/render-v2.ts`, `tests/render-v2.test.ts`, and the Gate B integration test.
+- **Contracts:** `buildMediaExecutionJob` freezes a revision-pinned job; `executeMediaExecutionJob` receives that job and authorized handles but no ProjectV2; `registerRenderArtifactV2` records the verified derived output without changing the semantic hash.
 - **Migration concerns:** Keep V1 RenderJob parsing/execution unchanged.
-- **Tests:** dry plan hash, real FFmpeg fixture, stale revision, missing asset, duration/probe/decode, unsafe path, cancellation/partial output.
+- **Tests:** frozen job hash, real deterministic FFmpeg fixture, anchor/rotation pixels, stale revision, missing asset, duration/probe/decode, unsafe path, cancellation/partial output, and artifact registration.
 - **Acceptance:** A V2 project renders reproducibly, records backend/tool versions and hashes, and cannot render without successful current-revision verification.
 - **Non-goals:** Production ffmpeg-skill adapter, captions, multi-asset, motion; the native path is only a baseline while the capability decision is measured.
 - **Rollback:** Native V2 feature flag/command can be disabled without affecting V1.
+
+The current planner handles one uploaded video clip and supports trim, speed, crop/reframe, scale, rotation, anchor, opacity, gain, and mute on an even-dimension 16–4096-pixel canvas at 1–60 fps and up to two minutes. It emits H.264/AAC, caps outputs at 512 MiB, pins a revision and authorized asset handle, verifies probe/decode/hash, and returns an artifact for host-side registration. Registered outputs and verification refs do not alter the semantic revision hash. V1 renderer files were not changed. Canonical geometry is specified in [ADR-008](../architecture/ADR-008-v2-transform-geometry.md).
 
 ## Phase 3: Multimodal inspection and conversational edits
 

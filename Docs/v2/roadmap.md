@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** Planned; no phase is authorized by this document
+**Status:** PR-A / Gate A passed and merged at `a8feca9`. PR-B Phase 2 met Gate B on candidate head `fa9f42d` after independent review and final serial validation. Phase 3 has not started.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
