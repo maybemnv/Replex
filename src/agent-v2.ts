@@ -2,37 +2,27 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
+import { V2InspectRequestSchema, type V2InspectImage, type V2InspectRequest } from "./inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "./media-evidence.js";
 import { OperationSchema, applyOperationBatch, semanticHashV2, type Operation, type OperationBatchInput, type OperationLogRecord } from "./operations-v2.js";
 import { buildMediaExecutionJob, executeMediaExecutionJob, registerRenderArtifactV2, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
 import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type ProjectV2 } from "./schema-v2.js";
 import { IdSchema } from "./schema.js";
 
-const inspectionLimit = z.number().int().min(1).max(25).optional();
-const offset = z.number().int().nonnegative().optional();
-
-/** Local copy kept structurally aligned with inspect-v2 until both branches integrate. */
-export const V2InspectRequestSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("project_summary") }).strict(),
-  z.object({ kind: z.enum(["assets", "clips"]), offset, limit: inspectionLimit }).strict(),
-  z.object({ kind: z.literal("media_evidence"), assetId: IdSchema, image: z.enum(["contact_sheet", "selected_frame"]).optional(), frameOffset: z.number().int().min(0).max(3).optional() }).strict(),
-  z.object({ kind: z.literal("verification") }).strict(),
-  z.object({ kind: z.literal("operation_history"), limit: inspectionLimit }).strict(),
-]);
-
-export type V2InspectRequest = z.infer<typeof V2InspectRequestSchema>;
-export type V2InspectionImage = { ref: string; mimeType: "image/png" | "image/jpeg"; bytes: Uint8Array };
+export { V2InspectRequestSchema };
+export type { V2InspectRequest };
+export type V2InspectionImage = V2InspectImage;
 export type V2InspectionResult =
-  | { ok: true; data: unknown; evidenceRefs: string[]; images?: V2InspectionImage[] }
+  | { ok: true; kind?: V2InspectRequest["kind"]; data: unknown; evidenceRefs: string[]; images?: V2InspectionImage[] }
   | { ok: false; code: string };
 
-export interface V2InspectionContext {
+export interface V2InspectorCallContext {
   evidenceRoot: string;
   operationLog: readonly OperationLogRecord[];
   signal: AbortSignal;
 }
 
-export type V2Inspector = (project: ProjectV2, request: V2InspectRequest, context?: V2InspectionContext) => Promise<V2InspectionResult>;
+export type V2Inspector = (project: ProjectV2, request: V2InspectRequest, context?: V2InspectorCallContext) => Promise<V2InspectionResult>;
 
 export interface V2AgentToolDefinition {
   name: "inspect_v2" | "propose_edit_batch";
@@ -178,8 +168,8 @@ export type V2ConversationResult =
 
 const nullableInspectionWireSchema = z.object({
   kind: z.enum(["project_summary", "assets", "clips", "media_evidence", "verification", "operation_history"]),
-  assetId: IdSchema.nullable(),
-  offset: z.number().int().nonnegative().nullable(),
+  assetId: IdSchema.max(128).nullable(),
+  offset: z.number().int().nonnegative().max(1_000_000).nullable(),
   limit: z.number().int().min(1).max(25).nullable(),
   image: z.enum(["contact_sheet", "selected_frame"]).nullable(),
   frameOffset: z.number().int().min(0).max(3).nullable(),
@@ -236,7 +226,7 @@ export const V2_AGENT_TOOLS: readonly V2AgentToolDefinition[] = freezeDeep([
       properties: {
         kind: { type: "string", enum: ["project_summary", "assets", "clips", "media_evidence", "verification", "operation_history"] },
         assetId: { type: ["string", "null"] },
-        offset: { type: ["integer", "null"], minimum: 0 },
+        offset: { type: ["integer", "null"], minimum: 0, maximum: 1_000_000 },
         limit: { type: ["integer", "null"], minimum: 1, maximum: 25 },
         image: { type: ["string", "null"], enum: ["contact_sheet", "selected_frame", null] },
         frameOffset: { type: ["integer", "null"], minimum: 0, maximum: 3 },
@@ -281,21 +271,25 @@ function parseInspectRequest(input: unknown): V2InspectRequest | undefined {
   if (direct.success) return direct.data;
   const wire = nullableInspectionWireSchema.safeParse(input);
   if (!wire.success) return undefined;
+  const normalize = (candidate: unknown): V2InspectRequest | undefined => {
+    const parsed = V2InspectRequestSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : undefined;
+  };
   const value = wire.data;
   if (value.kind === "project_summary" || value.kind === "verification") {
     if (value.assetId !== null || value.offset !== null || value.limit !== null || value.image !== null || value.frameOffset !== null) return undefined;
-    return { kind: value.kind };
+    return normalize({ kind: value.kind });
   }
   if (value.kind === "assets" || value.kind === "clips") {
     if (value.assetId !== null || value.image !== null || value.frameOffset !== null) return undefined;
-    return { kind: value.kind, ...(value.offset !== null ? { offset: value.offset } : {}), ...(value.limit !== null ? { limit: value.limit } : {}) };
+    return normalize({ kind: value.kind, ...(value.offset !== null ? { offset: value.offset } : {}), ...(value.limit !== null ? { limit: value.limit } : {}) });
   }
   if (value.kind === "media_evidence") {
     if (!value.assetId || value.offset !== null || value.limit !== null) return undefined;
-    return { kind: value.kind, assetId: value.assetId, ...(value.image !== null ? { image: value.image } : {}), ...(value.frameOffset !== null ? { frameOffset: value.frameOffset } : {}) };
+    return normalize({ kind: value.kind, assetId: value.assetId, ...(value.image !== null ? { image: value.image } : {}), ...(value.frameOffset !== null ? { frameOffset: value.frameOffset } : {}) });
   }
   if (value.offset !== null || value.assetId !== null || value.image !== null || value.frameOffset !== null) return undefined;
-  return { kind: "operation_history", ...(value.limit !== null ? { limit: value.limit } : {}) };
+  return normalize({ kind: "operation_history", ...(value.limit !== null ? { limit: value.limit } : {}) });
 }
 
 function parseProposal(input: unknown): { baseRevisionId: string; evidenceRefs: string[]; operations: Operation[] } | undefined {
