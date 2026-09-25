@@ -137,6 +137,8 @@ describe("V2 conversational edit thread", () => {
       visit(tool.parameters as Record<string, unknown>);
     }
     const proposal = V2_AGENT_TOOLS.find(({ name }) => name === "propose_edit_batch")!.parameters;
+    const inspection = V2_AGENT_TOOLS.find(({ name }) => name === "inspect_v2")!.parameters;
+    expect((inspection.properties as Record<string, { maximum?: number }>).limit?.maximum).toBe(25);
     const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { enum: string[] } } }> } }).items.anyOf;
     expect(operationBranches.map(({ properties }) => properties.type.enum[0]).sort()).toEqual([
       "mute_clip", "set_opacity", "set_speed", "set_transform", "set_volume", "trim_clip",
