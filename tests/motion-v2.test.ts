@@ -81,6 +81,22 @@ async function makeSource(root: string): Promise<{ path: string; hash: string }>
   return { path, hash: sha(bytes) };
 }
 
+function decodeFirstRgbFrame(path: string): Buffer {
+  const decoded = spawnSync(ffmpegPath, [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
+    "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+  ], { windowsHide: true, shell: false, maxBuffer: 1024 * 1024 });
+  if (decoded.status !== 0) throw new Error(decoded.stderr?.toString() ?? "RGB frame decode failed");
+  const frame = Buffer.from(decoded.stdout as Buffer);
+  if (frame.length !== 320 * 180 * 3) throw new Error(`unexpected RGB frame size: ${frame.length}`);
+  return frame;
+}
+
+function rgbAt(frame: Buffer, x: number, y: number): { r: number; g: number; b: number } {
+  const offset = (y * 320 + x) * 3;
+  return { r: frame[offset]!, g: frame[offset + 1]!, b: frame[offset + 2]! };
+}
+
 describe("V2 camera-push execution", () => {
   it("freezes post-trim/post-speed motion inputs with a deterministic job hash", () => {
     const project = motionProject(sha("source"));
@@ -163,7 +179,20 @@ describe("V2 camera-push execution", () => {
     const root = await mkdtemp(join(tmpdir(), "replex-motion-e2e-"));
     try {
       const source = await makeSource(root);
-      const project = motionProject(source.hash);
+      let project = motionProject(source.hash);
+      const originalClip = project.composition.clips.find(({ id }) => id === "clip-product");
+      if (!originalClip) throw new Error("synthetic product clip is missing");
+      project = apply(project, {
+        type: "set_transform",
+        clipId: originalClip.id,
+        transform: { ...originalClip.transform, scale: 1.25 },
+        crop: originalClip.crop,
+      });
+      expect(project.composition.clips[0]).toMatchObject({
+        crop: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 },
+        transform: { scale: 1.25 },
+        opacity: 0.75,
+      });
       const { handles, authorization } = authorized(project, root, source.path);
       const motionJob = buildMotionExecutionJobV1(project, "clip-product", handles[0]!);
       const motion = await executeMotionExecutionJob(motionJob, authorization, { ffmpegPath, ffprobePath, timeoutMs: 120_000 });
@@ -186,17 +215,56 @@ describe("V2 camera-push execution", () => {
       expect(compositionJob.jobVersion).toBe(3);
       expect(compositionJob.jobHash).toBe(repeatedJob.jobHash);
       expect(compositionJob.videoClips[0]).toMatchObject({ id: "clip-product", sourceInMs: 500, sourceOutMs: 3500, speed: 1.5, motionArtifact: { sha256: motion.result.artifactSha256 } });
+      expect(motion.result.sourceRevisionId).toBe(compositionJob.sourceRevisionId);
+      expect(motion.result.sourceRevisionHash).toBe(compositionJob.sourceRevisionHash);
+      expect(motion.result.motionJobHash).toBe(motion.handle.motionJobHash);
+      expect(motion.handle.sha256).toBe(motion.result.artifactSha256);
+      expect(compositionJob.videoClips[0]!.motionArtifact).toMatchObject({
+        sha256: motion.handle.sha256,
+        motionJobHash: motion.handle.motionJobHash,
+        sourceRevisionId: motion.result.sourceRevisionId,
+        sourceRevisionHash: motion.result.sourceRevisionHash,
+      });
 
       const final = await executeCompositionExecutionJobV3(compositionJob, [motion.handle], authorization, { ffmpegPath, ffprobePath, timeoutMs: 120_000 });
       expect(final.artifact).toMatchObject({
         backendVersion: "3",
-        sourceRevisionId: project.currentRevisionId,
-        sourceRevisionHash: semanticHashV2(project),
+        sourceRevisionId: compositionJob.sourceRevisionId,
+        sourceRevisionHash: compositionJob.sourceRevisionHash,
+        renderJobHash: compositionJob.jobHash,
         probe: { width: 320, height: 180, fps: 24, videoCodec: "h264", audioCodec: "aac" },
-        verification: { status: "passed", checks: { probe: true, decode: true, hash: true } },
+        verification: {
+          status: "passed",
+          revisionId: compositionJob.sourceRevisionId,
+          sourceRevisionHash: compositionJob.sourceRevisionHash,
+          renderJobHash: compositionJob.jobHash,
+          artifactSha256: expect.any(String),
+          checks: { probe: true, decode: true, hash: true },
+        },
       });
+      expect(final.artifact.verification.artifactSha256).toBe(final.artifact.sha256);
       expect(Math.abs(final.artifact.probe.durationMs! - 2000)).toBeLessThanOrEqual(1500 / 24);
-      expect(await readFile(join(root, ...final.artifact.ref.split("/")))).toBeDefined();
+      const finalPath = join(root, ...final.artifact.ref.split("/"));
+      expect(await readFile(finalPath)).toBeDefined();
+      const sourceFrame = decodeFirstRgbFrame(source.path);
+      const finalFrame = decodeFirstRgbFrame(finalPath);
+      const sourceMarker = rgbAt(sourceFrame, 169, 140);
+      const renderedMarker = rgbAt(finalFrame, 170, 148);
+      // This sample stays inside the marker only when canonical crop precedes contain-fit and scale.
+      const cropEdgeMarker = rgbAt(finalFrame, 213, 148);
+      // This sample extends past the marker without the 1.25x canonical transform.
+      const transformEdgeMarker = rgbAt(finalFrame, 170, 160);
+      expect(sourceMarker.g).toBeGreaterThan(sourceMarker.r + 80);
+      expect(sourceMarker.g).toBeGreaterThan(sourceMarker.b + 30);
+      expect(renderedMarker.g).toBeGreaterThan(renderedMarker.r + 45);
+      expect(renderedMarker.g).toBeGreaterThan(renderedMarker.b + 20);
+      // The green level is attenuated near the declared 0.75 opacity.
+      expect(renderedMarker.g / sourceMarker.g).toBeGreaterThan(0.6);
+      expect(renderedMarker.g / sourceMarker.g).toBeLessThan(0.9);
+      expect(cropEdgeMarker.g).toBeGreaterThan(cropEdgeMarker.r + 45);
+      expect(cropEdgeMarker.g).toBeGreaterThan(cropEdgeMarker.b + 20);
+      expect(transformEdgeMarker.g).toBeGreaterThan(transformEdgeMarker.r + 45);
+      expect(transformEdgeMarker.g).toBeGreaterThan(transformEdgeMarker.b + 20);
       expect(ProjectV2Schema.parse(project).composition.motionPresets).toHaveLength(1);
       expect(project.outputs).toHaveLength(0);
 
@@ -285,6 +353,12 @@ describe("V2 camera-push execution", () => {
       expect(first.project.composition.motionPresets).toMatchObject([{ targetId: "clip-product", parameters: { strength: 0.04 } }]);
       expect(first.motionExecutions).toHaveLength(1);
       expect(first.previews[0]).toMatchObject({ backendVersion: "3", verification: { status: "passed", checks: { probe: true, decode: true, hash: true } } });
+      expect(first.motionExecutions[0]).toMatchObject({ sourceRevisionId: first.previews[0]!.sourceRevisionId, sourceRevisionHash: first.previews[0]!.sourceRevisionHash });
+      expect(first.project.outputs.at(-1)).toMatchObject({
+        sha256: first.previews[0]!.sha256,
+        renderJobHash: first.previews[0]!.renderJobHash,
+        sourceRevisionId: first.previews[0]!.sourceRevisionId,
+      });
       const replay = applyOperationBatch(motionProject(source.hash, "assets/source.mp4", false), {
         baseRevisionId: initialRevisionId, actor: "agent", intentId: first.attribution.intentId,
         evidenceRefs: first.operationLog[0]!.evidenceRefs, operations: first.operationLog.map(({ input }) => input),
@@ -314,9 +388,14 @@ describe("V2 camera-push execution", () => {
       expect(second.project.composition.motionPresets).toMatchObject([{ targetId: "clip-product", parameters: { strength: 0.06 } }]);
       expect(second.previews[0]).toMatchObject({ backendVersion: "3", verification: { status: "passed", checks: { probe: true, decode: true, hash: true } } });
       expect(second.motionExecutions).toHaveLength(1);
+      expect(second.motionExecutions[0]).toMatchObject({ sourceRevisionId: second.previews[0]!.sourceRevisionId, sourceRevisionHash: second.previews[0]!.sourceRevisionHash });
       expect(second.motionExecutions[0]!.motionJobHash).not.toBe(first.motionExecutions[0]!.motionJobHash);
       const finalOutput = second.project.outputs.at(-1)!;
-      expect(finalOutput.sha256).toBe(second.previews[0]!.sha256);
+      expect(finalOutput).toMatchObject({
+        sha256: second.previews[0]!.sha256,
+        renderJobHash: second.previews[0]!.renderJobHash,
+        sourceRevisionId: second.previews[0]!.sourceRevisionId,
+      });
       const finalPath = join(root, ...finalOutput.ref.split("/"));
       expect(sha(await readFile(finalPath))).toBe(finalOutput.sha256);
       if (keepSample) console.info(`CAMERA_PUSH_SAMPLE_OUTPUT=${finalPath}`);
