@@ -150,8 +150,8 @@ describe("V2 conversation preview evidence", () => {
         const result = input.toolResults[0];
         expect(result?.output).toMatchObject({
           ok: true,
-          preview: { sha256: sha("deterministic mock render"), creativeApproval: "not_assessed" },
-          previewEvidence: { renderJobHash: "a".repeat(64), sourceAssetSha256: sha("deterministic mock render") },
+          preview: { renderJobHash: "a".repeat(64), sha256: sha("deterministic mock render"), creativeApproval: "not_assessed" },
+          previewEvidence: { sourceAssetSha256: sha("deterministic mock render") },
         });
         expect(result?.images).toHaveLength(1);
         expect(Buffer.from(result!.images![0]!.bytes).toString()).toBe("bounded preview image");
