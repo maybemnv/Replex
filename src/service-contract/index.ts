@@ -770,7 +770,14 @@ export const JobEventSchema = z.discriminatedUnion("type", [
   z.object({ ...eventEnvelope, type: z.literal("asset.updated"), asset: AssetViewSchema }).strict(),
   z.object({ ...eventEnvelope, type: z.literal("render_artifact.created"), artifact: RenderArtifactViewSchema }).strict(),
   z.object({ ...eventEnvelope, type: z.literal("capabilities.updated"), capabilities: CapabilitySetSchema }).strict(),
-]);
+]).superRefine((event, context) => {
+  if (event.type === "job.updated" && event.projectId !== event.job.projectId) {
+    context.addIssue({ code: "custom", path: ["job", "projectId"], message: "job projectId must match event projectId" });
+  }
+  if (event.type === "verification.updated" && event.revisionId !== event.verification.revisionId) {
+    context.addIssue({ code: "custom", path: ["verification", "revisionId"], message: "verification revisionId must match event revisionId" });
+  }
+});
 export const ProjectEventSchema = JobEventSchema;
 
 const cancellingJobState = JobViewSchema.pipe(CancellingJobSchema);
