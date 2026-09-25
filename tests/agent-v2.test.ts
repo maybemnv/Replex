@@ -138,7 +138,7 @@ describe("V2 conversational edit thread", () => {
     }
     const proposal = V2_AGENT_TOOLS.find(({ name }) => name === "propose_edit_batch")!.parameters;
     const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { enum: string[] } } }> } }).items.anyOf;
-    expect(operationBranches.map(({ properties }) => properties.type.enum).sort()).toEqual([
+    expect(operationBranches.map(({ properties }) => properties.type.enum[0]).sort()).toEqual([
       "mute_clip", "set_opacity", "set_speed", "set_transform", "set_volume", "trim_clip",
     ]);
   });
@@ -164,6 +164,14 @@ describe("V2 conversational edit thread", () => {
     expect(result.project).toEqual(project);
     expect(respond).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("accepts a valid thread identifier even when it resembles the invalid-input fallback", async () => {
+    const result = await runConversationalEditV2(requestFor(emptyProject(), scriptedModel([() => finalResponse()]), {
+      threadId: "thread-invalid",
+    }));
+
+    expect(result).toMatchObject({ ok: true, threadState: { threadId: "thread-invalid" } });
   });
 
   it("returns unsupported tool calls as bounded errors without exposing a shell path", async () => {
