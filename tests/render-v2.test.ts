@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { link, mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { semanticHashV2 } from "../src/operations-v2.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
-import { buildMediaExecutionJob, executeMediaExecutionJob, verifyMediaExecutionPreflight, type MediaExecutionAuthorization } from "../src/render-v2.js";
+import { buildMediaExecutionJob, executeMediaExecutionJob, MAX_RENDER_ARTIFACT_BYTES, verifyMediaExecutionPreflight, type MediaExecutionAuthorization } from "../src/render-v2.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
@@ -234,6 +234,7 @@ describe("V2 media render planning", () => {
 
       const first = await executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath });
       const actualOutputPath = join(root, ...first.artifact.ref.split("/"));
+      expect((await stat(actualOutputPath)).size).toBeLessThanOrEqual(MAX_RENDER_ARTIFACT_BYTES);
       const hardLinkPath = join(root, "linked-output.mp4");
       await link(actualOutputPath, hardLinkPath);
       await expect(executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath })).rejects.toThrow("different or unsafe data");
