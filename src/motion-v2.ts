@@ -368,6 +368,11 @@ export async function executeMotionExecutionJob(
   authorization: MotionExecutionAuthorization,
   options: MotionExecutionOptions = {},
 ): Promise<{ job: MotionExecutionJobV1; handle: MotionArtifactHandle; result: MotionExecutionResult }> {
+  const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH;
+  const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH;
+  if (!ffmpegPath || !ffprobePath || !isAbsolute(ffmpegPath) || !isAbsolute(ffprobePath)) {
+    throw new Error("motion backend requires absolute FFmpeg and FFprobe executable paths");
+  }
   const timeoutMs = options.timeoutMs ?? 120_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error("motion execution timeout is outside the supported range");
   const payload = assertMotionJob(job);
@@ -378,14 +383,14 @@ export async function executeMotionExecutionJob(
   const jobsRoot = await containedDirectory(root, ".replex-staging/motion/jobs");
   const artifactId = randomUUID();
   const stagingDirectory = join(jobsRoot, artifactId);
-  await mkdir(stagingDirectory, { mode: 0o700 });
-  await chmod(stagingDirectory, 0o700);
   const stagedPath = join(stagingDirectory, "motion.mp4");
   const evidencePath = join(stagingDirectory, "verification.json");
   let durableReceiptDirectory: string | undefined;
+  let stagingDirectoryCreated = false;
   try {
-    const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-    const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
+    await mkdir(stagingDirectory, { mode: 0o700 });
+    stagingDirectoryCreated = true;
+    await chmod(stagingDirectory, 0o700);
     const sampleAspectRatio = await probeSourceSar(sourcePath, payload, ffprobePath, timeoutMs, options.signal);
     await runProcess(ffmpegPath, buildCameraPushArgs(payload, sourcePath, stagedPath, sampleAspectRatio), timeoutMs, options.signal, 1024 * 1024);
     const verified = await verifyIntermediate(stagedPath, payload, sampleAspectRatio, ffprobePath, ffmpegPath, timeoutMs, options.signal);
@@ -444,7 +449,7 @@ export async function executeMotionExecutionJob(
     };
     return { job, handle, result };
   } catch (error) {
-    await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+    if (stagingDirectoryCreated) await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
     if (durableReceiptDirectory) await rm(durableReceiptDirectory, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }

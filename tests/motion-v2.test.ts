@@ -101,6 +101,42 @@ describe("V2 camera-push execution", () => {
     expect(JSON.stringify(job)).not.toContain("-filter_complex");
   });
 
+  it("requires absolute host-configured FFmpeg paths before authorization or file access", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-motion-path-policy-"));
+    try {
+      const sourceBytes = Buffer.from("authorized source fixture bytes");
+      const sourcePath = join(root, "assets", "source.mp4");
+      await mkdir(join(root, "assets"));
+      await writeFile(sourcePath, sourceBytes);
+      const project = motionProject(sha(sourceBytes));
+      const handle = { assetId: "source-video", sha256: sha(sourceBytes), ref: "assets/source.mp4" };
+      const job = buildMotionExecutionJobV1(project, "clip-product", handle);
+      let revisionChecks = 0;
+      const authorization: MediaExecutionAuthorization = {
+        projectRoot: root,
+        resolvedHandles: [{ ...handle, path: sourcePath }],
+        isRevisionCurrent: async () => { revisionChecks += 1; return true; },
+      };
+      const previousFfmpegPath = process.env.REPLEX_FFMPEG_PATH;
+      const previousFfprobePath = process.env.REPLEX_FFPROBE_PATH;
+      delete process.env.REPLEX_FFMPEG_PATH;
+      delete process.env.REPLEX_FFPROBE_PATH;
+      try {
+        await expect(executeMotionExecutionJob(job, authorization)).rejects.toThrow("absolute FFmpeg and FFprobe executable paths");
+        await expect(executeMotionExecutionJob(job, authorization, { ffmpegPath: "relative/ffmpeg", ffprobePath: "relative/ffprobe" })).rejects.toThrow("absolute FFmpeg and FFprobe executable paths");
+        expect(revisionChecks).toBe(0);
+        expect(await readdir(join(root, ".replex-staging", "motion", "jobs")).catch(() => [])).toEqual([]);
+      } finally {
+        if (previousFfmpegPath === undefined) delete process.env.REPLEX_FFMPEG_PATH;
+        else process.env.REPLEX_FFMPEG_PATH = previousFfmpegPath;
+        if (previousFfprobePath === undefined) delete process.env.REPLEX_FFPROBE_PATH;
+        else process.env.REPLEX_FFPROBE_PATH = previousFfprobePath;
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["source width", (job: any) => { job.output.width += 2; }],
     ["source height", (job: any) => { job.output.height += 2; }],
@@ -288,6 +324,87 @@ describe("V2 camera-push execution", () => {
       if (!keepSample) await rm(root, { recursive: true, force: true });
     }
   }, 300_000);
+
+  it.skipIf(!mediaToolsAvailable)("cleans a verified motion handle when cancellation wins before the bounded call returns", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-camera-push-verified-cancel-"));
+    const abort = new AbortController();
+    let enterVerification!: () => void;
+    const verificationReached = new Promise<void>((resolvePromise) => { enterVerification = resolvePromise; });
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>((resolvePromise) => { releaseVerification = resolvePromise; });
+    let resultPromise: ReturnType<typeof runConversationalEditV2> | undefined;
+    try {
+      const source = await makeSource(root);
+      const project = motionProject(source.hash, "assets/source.mp4", false);
+      const asset = project.assets["source-video"]!;
+      const handle: AssetHandle = { assetId: asset.id, sha256: asset.sha256, ref: asset.path! };
+      let revisionChecks = 0;
+      let commitCalls = 0;
+      const result = {
+        async respond(input: V2AgentModelRequest): Promise<V2AgentModelResponse> {
+          return input.toolResults.length === 0
+            ? { responseId: "verified-cancel-inspect", calls: [{ id: "verified-cancel-call-inspect", name: "inspect_v2", arguments: { kind: "clips", offset: 0, limit: 5 } }] }
+            : { responseId: "verified-cancel-propose", calls: [{ id: "verified-cancel-call-propose", name: "propose_edit_batch", arguments: {
+              baseRevisionId: input.context.currentRevisionId,
+              evidenceRefs: ["fixture:verified-cancel-motion"],
+              operations: [{ type: "apply_motion_preset", targetId: "clip-product", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.04 } }],
+            } }] };
+        },
+      };
+      const jobsRoot = join(root, ".replex-staging", "motion", "jobs");
+      resultPromise = runConversationalEditV2({
+        project,
+        prompt: "Add a camera push.",
+        threadId: "verified-cancel-motion-thread",
+        inspect: async (current, request) => {
+          const inspected = await inspectProjectV2(request, { project: current });
+          return inspected.ok ? { ...inspected, evidenceRefs: ["fixture:verified-cancel-motion"] } : inspected;
+        },
+        model: result,
+        operationLog: [],
+        assetHandles: [handle],
+        renderAuthorization: {
+          projectRoot: root,
+          resolvedHandles: [{ ...handle, path: source.path }],
+          isRevisionCurrent: async (revisionId, hash) => {
+            revisionChecks += 1;
+            if (revisionChecks === 2) {
+              enterVerification();
+              await verificationGate;
+            }
+            return revisionId === project.currentRevisionId && hash === semanticHashV2(project);
+          },
+        },
+        renderOptions: { ffmpegPath, ffprobePath, timeoutMs: 120_000 },
+        commitCanonicalRevision: async (_input: V2CanonicalRevisionCommit) => {
+          commitCalls += 1;
+          return { ok: true as const, project };
+        },
+        evidenceRoot: join(root, "evidence"),
+        signal: abort.signal,
+      });
+
+      await Promise.race([
+        verificationReached,
+        new Promise<never>((_resolvePromise, reject) => setTimeout(() => reject(new Error("motion verification did not reach its host revision gate")), 15_000)),
+      ]);
+      const jobIds = await readdir(jobsRoot);
+      expect(jobIds).toHaveLength(1);
+      await expect(readFile(join(jobsRoot, jobIds[0]!, "motion.mp4"))).resolves.toBeTruthy();
+
+      abort.abort();
+      releaseVerification();
+      const cancelled = await resultPromise;
+      expect(cancelled).toMatchObject({ ok: false, code: "CANCELLED", project: { currentRevisionId: project.currentRevisionId } });
+      expect(commitCalls).toBe(0);
+      expect(await readdir(jobsRoot).catch(() => [])).toEqual([]);
+    } finally {
+      abort.abort();
+      releaseVerification();
+      await resultPromise?.catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it.skipIf(!mediaToolsAvailable)("drains an in-flight canceled motion preview before removing staging", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-camera-push-cancel-"));

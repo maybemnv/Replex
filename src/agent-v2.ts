@@ -850,13 +850,16 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
                 && await request.renderAuthorization.isRevisionCurrent(workingProject.currentRevisionId, beforeCommitHash),
             };
             for (const motionJob of motionJobs) {
-              const motion = await withBoundedCall("motion preview", request.signal, remainingMs, (signal) => executeMotionExecutionJob(
-                motionJob,
-                previewAuthorization,
-                { ...renderOptions, signal },
-              ), MAX_PREVIEW_CALL_MS, true);
-              motionArtifacts.push(motion.handle);
-              motionExecutions.push(motion.result);
+              await withBoundedCall("motion preview", request.signal, remainingMs, async (signal) => {
+                const motion = await executeMotionExecutionJob(
+                  motionJob,
+                  previewAuthorization,
+                  { ...renderOptions, signal },
+                );
+                motionArtifacts.push(motion.handle);
+                motionExecutions.push(motion.result);
+                return motion;
+              }, MAX_PREVIEW_CALL_MS, true);
             }
             if (motionArtifacts.length > 0) plannedJob = buildCompositionExecutionJobV3(predicted.project, handlesParsed.data, motionArtifacts);
             if (!plannedJob) throw new Error("preview composition job was not planned");
