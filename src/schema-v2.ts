@@ -216,6 +216,13 @@ export const TrackSchema = z.object({
   locked: z.boolean(),
 }).strict();
 
+export const CameraPushMotionPresetSchema = z.object({
+  targetId: IdSchema,
+  presetId: z.literal("camera-push"),
+  presetVersion: z.literal("1"),
+  parameters: z.object({ strength: finite.min(0.02).max(0.08) }).strict(),
+}).strict();
+
 export const CompositionSchema = z.object({
   width: positiveInteger,
   height: positiveInteger,
@@ -224,6 +231,7 @@ export const CompositionSchema = z.object({
   tracks: z.array(TrackSchema),
   clips: z.array(ClipSchema),
   layers: z.array(LayerSchema),
+  motionPresets: z.array(CameraPushMotionPresetSchema).optional(),
 }).strict().superRefine((value, context) => {
   const trackIds = new Set<string>();
   const orders = new Set<number>();
@@ -400,6 +408,19 @@ export const ProjectV2Schema = z.object({
     if (asset && track && ((asset.type === "audio") !== (track.kind === "audio"))) context.addIssue({ code: "custom", path: ["composition", "clips", index], message: "audio assets require audio tracks and visual assets require video tracks" });
     if (asset?.probe.durationMs !== undefined && clip.sourceOutMs > asset.probe.durationMs) context.addIssue({ code: "custom", path: ["composition", "clips", index, "sourceOutMs"], message: "clip source range exceeds asset duration" });
   }
+  const motionTargets = new Set<string>();
+  for (const [index, preset] of (value.composition.motionPresets ?? []).entries()) {
+    if (motionTargets.has(preset.targetId)) context.addIssue({ code: "custom", path: ["composition", "motionPresets", index, "targetId"], message: "a clip can have only one active motion preset" });
+    motionTargets.add(preset.targetId);
+    const clip = value.composition.clips.find(({ id }) => id === preset.targetId);
+    const track = clip && value.composition.tracks.find(({ id }) => id === clip.trackId);
+    const asset = clip && value.assets[clip.assetId];
+    if (!clip || !track || track.kind !== "video" || !asset || !["uploaded_video", "browser_capture"].includes(asset.type)) {
+      context.addIssue({ code: "custom", path: ["composition", "motionPresets", index, "targetId"], message: "camera-push requires an existing video clip" });
+    } else if (track.locked) {
+      context.addIssue({ code: "custom", path: ["composition", "motionPresets", index, "targetId"], message: "motion presets cannot target a locked track" });
+    }
+  }
   for (const [index, layer] of value.composition.layers.entries()) {
     const properties = layer.properties as { assetId?: string };
     if (properties.assetId) {
@@ -452,6 +473,7 @@ export type GraphicProperties = z.infer<typeof GraphicPropertiesSchema>;
 export type Keyframe = z.infer<typeof KeyframeSchema>;
 export type Layer = z.infer<typeof LayerSchema>;
 export type Track = z.infer<typeof TrackSchema>;
+export type CameraPushMotionPreset = z.infer<typeof CameraPushMotionPresetSchema>;
 export type Composition = z.infer<typeof CompositionSchema>;
 export type VerificationRef = z.infer<typeof VerificationRefSchema>;
 export type VerificationState = z.infer<typeof VerificationStateSchema>;

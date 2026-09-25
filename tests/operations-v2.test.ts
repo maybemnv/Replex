@@ -105,7 +105,7 @@ describe("V2 operation boundary", () => {
     ];
     expect(SCHEMA_RECOGNIZED_OPERATION_TYPES).toEqual(vocabulary);
     expect(Object.keys(OperationSchemas)).toEqual(vocabulary);
-    expect(REDUCER_SUPPORTED_OPERATION_TYPES).toEqual(vocabulary.filter((type) => !["apply_motion_preset", "recapture_browser_asset"].includes(type)));
+    expect(REDUCER_SUPPORTED_OPERATION_TYPES).toEqual(vocabulary.filter((type) => type !== "recapture_browser_asset"));
     expect(BACKEND_SUPPORTED_OPERATION_TYPES).toEqual([]);
   });
 
@@ -130,8 +130,56 @@ describe("V2 operation boundary", () => {
     const before = JSON.stringify(source);
     expect(applyOperationBatch(source, { ...batch(source, [{ type: "set_opacity", clipId: "clip-hero", opacity: 0.5 }]), baseRevisionId: "revision-stale" })).toMatchObject({ ok: false, code: "STALE_REVISION" });
     expect(applyOperationBatch(source, batch(source, [{ type: "set_opacity", clipId: "clip-hero", opacity: 0.5 }, { type: "set_opacity", clipId: "missing", opacity: 0.2 }]))).toMatchObject({ ok: false, code: "INVALID_OPERATION", operationIndex: 1 });
-    expect(applyOperationBatch(source, batch(source, [{ type: "apply_motion_preset", targetId: "clip-hero", presetId: "push", presetVersion: "1" }]))).toMatchObject({ ok: false, code: "UNSUPPORTED_OPERATION", operationType: "apply_motion_preset" });
     expect(applyOperationBatch(source, batch(source, [{ type: "recapture_browser_asset", assetId: "asset-browser", reason: "new product state" }]))).toMatchObject({ ok: false, code: "UNSUPPORTED_OPERATION", operationType: "recapture_browser_asset" });
+    expect(JSON.stringify(source)).toBe(before);
+  });
+
+  it("applies and replays a strict camera-push preset as canonical revision state", () => {
+    const source = project();
+    const operation = { type: "apply_motion_preset", targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.05 } };
+    const first = applyOperationBatch(source, batch(source, [operation]));
+    const second = applyOperationBatch(source, batch(source, [operation]));
+
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) {
+      expect(first.project.composition.motionPresets).toEqual([{ targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.05 } }]);
+      expect(first.project.currentRevisionId).toBe(second.project.currentRevisionId);
+      expect(first.operationLog[0]?.input).toEqual(operation);
+      expect(semanticHashV2(first.project)).toBe(semanticHashV2(second.project));
+    }
+    expect(source.composition).not.toHaveProperty("motionPresets");
+  });
+
+  it("replaces one clip's preset atomically and removes it with the clip", () => {
+    const source = project();
+    const first = applyOperationBatch(source, batch(source, [{ type: "apply_motion_preset", targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.03 } }]));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const updated = applyOperationBatch(first.project, batch(first.project, [{ type: "apply_motion_preset", targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.07 } }]));
+    expect(updated.ok && updated.project.composition.motionPresets).toEqual([{ targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.07 } }]);
+    if (!updated.ok) return;
+    const removed = applyOperationBatch(updated.project, batch(updated.project, [{ type: "remove_clip", clipId: "clip-hero" }]));
+    expect(removed.ok && removed.project.composition.motionPresets).toBeUndefined();
+  });
+
+  it("rejects unsupported motion params, non-video targets, and locked tracks without partial state", () => {
+    const source = project();
+    const operation = (targetId: string, presetId = "camera-push", strength = 0.05, presetVersion = "1") => ({ type: "apply_motion_preset", targetId, presetId, presetVersion, parameters: { strength } });
+    const before = JSON.stringify(source);
+    for (const bad of [
+      operation("clip-hero", "title-reveal"),
+      operation("clip-hero", "camera-push", 0.01),
+      operation("clip-hero", "camera-push", 0.09),
+      operation("clip-hero", "camera-push", 0.05, "2"),
+      { ...operation("clip-hero"), parameters: { strength: 0.05, durationMs: 500 } },
+      operation("missing"),
+    ]) {
+      expect(applyOperationBatch(source, batch(source, [bad]))).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
+    }
+    const locked = structuredClone(source);
+    locked.composition.tracks[0]!.locked = true;
+    locked.revisions[0]!.manifestSha256 = semanticHashV2(locked);
+    expect(applyOperationBatch(locked, batch(locked, [operation("clip-hero")]))).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
     expect(JSON.stringify(source)).toBe(before);
   });
 

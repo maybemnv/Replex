@@ -11,6 +11,7 @@ import {
   TextPropertiesSchema,
   TransformSchema,
   TransitionV2Schema,
+  CameraPushMotionPresetSchema,
   type Clip,
   type Keyframe,
   type Layer,
@@ -88,16 +89,17 @@ export const OperationSchema = z.discriminatedUnion("type", [
   operationSchemas.replace_browser_capture,
 ]);
 export const OperationBatchSchema = z.array(OperationSchema).min(1);
+const cameraPushMotionOperationSchema = CameraPushMotionPresetSchema.extend({ type: z.literal("apply_motion_preset") }).strict();
 
 export type Operation = z.infer<typeof OperationSchema>;
 export type OperationType = Operation["type"];
 
 export const SCHEMA_RECOGNIZED_OPERATION_TYPES = Object.keys(operationSchemas) as OperationType[];
-export const REDUCER_SUPPORTED_OPERATION_TYPES = SCHEMA_RECOGNIZED_OPERATION_TYPES.filter((type) => !["apply_motion_preset", "recapture_browser_asset"].includes(type));
+export const REDUCER_SUPPORTED_OPERATION_TYPES = SCHEMA_RECOGNIZED_OPERATION_TYPES.filter((type) => type !== "recapture_browser_asset");
 export const BACKEND_SUPPORTED_OPERATION_TYPES: OperationType[] = [];
 
-const reducerSupported = new Set(REDUCER_SUPPORTED_OPERATION_TYPES);
-const deferredOperations = new Set<OperationType>(["apply_motion_preset", "recapture_browser_asset"]);
+const reducerSupported = new Set<OperationType>(REDUCER_SUPPORTED_OPERATION_TYPES);
+const deferredOperations = new Set<OperationType>(["recapture_browser_asset"]);
 
 export const OperationLogRecordSchema = z.object({
   id: IdSchema,
@@ -294,6 +296,10 @@ function applyOperation(project: ProjectV2, operation: Operation): string | unde
       const clip = findClip(project, operation.clipId);
       if (!clip) return "clip does not exist";
       project.composition.clips = project.composition.clips.filter((candidate) => candidate.id !== clip.id);
+      if (project.composition.motionPresets) {
+        project.composition.motionPresets = project.composition.motionPresets.filter(({ targetId }) => targetId !== clip.id);
+        if (project.composition.motionPresets.length === 0) delete project.composition.motionPresets;
+      }
       return;
     }
     case "replace_asset": {
@@ -386,7 +392,27 @@ function applyOperation(project: ProjectV2, operation: Operation): string | unde
       layer.keyframes.push(...structuredClone(operation.keyframes));
       return;
     }
-    case "apply_motion_preset":
+    case "apply_motion_preset": {
+      const parsed = cameraPushMotionOperationSchema.safeParse(operation);
+      if (!parsed.success) return "motion preset, version, or parameters are unsupported";
+      const clip = findClip(project, parsed.data.targetId);
+      if (!clip) return "motion preset target clip does not exist";
+      const track = project.composition.tracks.find(({ id }) => id === clip.trackId);
+      const asset = project.assets[clip.assetId];
+      if (!track || track.kind !== "video" || !asset || !["uploaded_video", "browser_capture"].includes(asset.type)) return "camera-push requires a video clip";
+      if (track.locked) return "motion preset target track is locked";
+      const preset = CameraPushMotionPresetSchema.parse({
+        targetId: parsed.data.targetId,
+        presetId: parsed.data.presetId,
+        presetVersion: parsed.data.presetVersion,
+        parameters: parsed.data.parameters,
+      });
+      project.composition.motionPresets = [
+        ...(project.composition.motionPresets ?? []).filter(({ targetId }) => targetId !== preset.targetId),
+        preset,
+      ];
+      return;
+    }
     case "recapture_browser_asset":
       return "operation is deferred";
     case "replace_browser_capture":
