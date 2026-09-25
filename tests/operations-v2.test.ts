@@ -162,6 +162,17 @@ describe("V2 operation boundary", () => {
     expect(removed.ok && removed.project.composition.motionPresets).toBeUndefined();
   });
 
+  it("keeps historical motion state parseable when its track is locked later", () => {
+    const source = project();
+    const applied = applyOperationBatch(source, batch(source, [{ type: "apply_motion_preset", targetId: "clip-hero", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.05 } }]));
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    const laterLocked = structuredClone(applied.project);
+    laterLocked.composition.tracks[0]!.locked = true;
+
+    expect(ProjectV2Schema.safeParse(laterLocked).success).toBe(true);
+  });
+
   it("rejects unsupported motion params, non-video targets, and locked tracks without partial state", () => {
     const source = project();
     const operation = (targetId: string, presetId = "camera-push", strength = 0.05, presetVersion = "1") => ({ type: "apply_motion_preset", targetId, presetId, presetVersion, parameters: { strength } });

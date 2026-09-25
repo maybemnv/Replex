@@ -417,8 +417,6 @@ export const ProjectV2Schema = z.object({
     const asset = clip && value.assets[clip.assetId];
     if (!clip || !track || track.kind !== "video" || !asset || !["uploaded_video", "browser_capture"].includes(asset.type)) {
       context.addIssue({ code: "custom", path: ["composition", "motionPresets", index, "targetId"], message: "camera-push requires an existing video clip" });
-    } else if (track.locked) {
-      context.addIssue({ code: "custom", path: ["composition", "motionPresets", index, "targetId"], message: "motion presets cannot target a locked track" });
     }
   }
   for (const [index, layer] of value.composition.layers.entries()) {
