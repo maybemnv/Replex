@@ -4,8 +4,9 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { checkedEvidenceRoot, readEvidenceFile, V2InspectRequestSchema, type V2InspectImage, type V2InspectRequest } from "./inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "./media-evidence.js";
+import { buildMotionExecutionJobV1, cleanupMotionArtifact, executeMotionExecutionJob, type MotionArtifactHandle, type MotionExecutionResult } from "./motion-v2.js";
 import { OperationLogRecordSchema, OperationSchema, applyOperationBatch, semanticHashV2, type Operation, type OperationBatchInput, type OperationLogRecord } from "./operations-v2.js";
-import { buildCompositionExecutionJob, executeMediaExecutionJob, registerRenderArtifactV2, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
+import { buildCompositionExecutionJob, buildCompositionExecutionJobV3, executeCompositionExecutionJobV3, executeMediaExecutionJob, registerRenderArtifactV2, type CompositionExecutionJob, type CompositionExecutionJobV3, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
 import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type ProjectV2 } from "./schema-v2.js";
 import { IdSchema } from "./schema.js";
 
@@ -158,6 +159,8 @@ export type V2ConversationResult =
     acceptedBatches: V2AcceptedBatch[];
     operationLog: OperationLogRecord[];
     previews: RenderArtifactV2[];
+    /** Host-side execution receipts; omitted from model tool results and service-contract v1. */
+    motionExecutions: MotionExecutionResult[];
   }
   | {
     ok: false;
@@ -197,6 +200,7 @@ const strictCropWireSchema = z.object({
 }).strict();
 const operationWireSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("trim_clip"), clipId: IdSchema, sourceInMs: z.number().int().nonnegative(), sourceOutMs: z.number().int().nonnegative() }).strict(),
+  z.object({ type: z.literal("apply_motion_preset"), targetId: IdSchema, presetId: z.literal("camera-push"), presetVersion: z.literal("1"), parameters: z.object({ strength: z.number().finite().min(0.02).max(0.08) }).strict() }).strict(),
   z.object({ type: z.literal("set_transform"), clipId: IdSchema, transform: strictTransformWireSchema, crop: strictCropWireSchema.nullable() }).strict(),
   z.object({ type: z.literal("set_opacity"), clipId: IdSchema.nullable(), layerId: IdSchema.nullable(), opacity: z.number().finite().min(0).max(1) }).strict(),
   z.object({ type: z.literal("set_speed"), clipId: IdSchema, speed: z.number().finite().min(0.25).max(4) }).strict(),
@@ -265,6 +269,10 @@ export const V2_AGENT_TOOLS: readonly V2AgentToolDefinition[] = freezeDeep([
         operations: { type: "array", minItems: 1, maxItems: 12, items: { anyOf: [
           { type: "object", properties: { type: { enum: ["trim_clip"] }, clipId: { type: "string" }, sourceInMs: { type: "integer", minimum: 0 }, sourceOutMs: { type: "integer", minimum: 0 } }, required: ["type", "clipId", "sourceInMs", "sourceOutMs"], additionalProperties: false },
           { type: "object", properties: {
+            type: { enum: ["apply_motion_preset"] }, targetId: { type: "string" }, presetId: { enum: ["camera-push"] }, presetVersion: { enum: ["1"] },
+            parameters: { type: "object", properties: { strength: { type: "number", minimum: 0.02, maximum: 0.08 } }, required: ["strength"], additionalProperties: false },
+          }, required: ["type", "targetId", "presetId", "presetVersion", "parameters"], additionalProperties: false },
+          { type: "object", properties: {
             type: { enum: ["set_transform"] }, clipId: { type: "string" },
             transform: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, scale: { type: "number", minimum: 0 }, rotation: { type: "number" }, anchorX: { type: "number", minimum: 0, maximum: 1 }, anchorY: { type: "number", minimum: 0, maximum: 1 } }, required: ["x", "y", "scale", "rotation", "anchorX", "anchorY"], additionalProperties: false },
             crop: { anyOf: [
@@ -325,7 +333,10 @@ function parseInspectRequest(input: unknown): V2InspectRequest | undefined {
 
 function parseProposal(input: unknown): { baseRevisionId: string; evidenceRefs: string[]; operations: Operation[] } | undefined {
   const logical = proposalLogicalSchema.safeParse(input);
-  if (logical.success) return logical.data;
+  if (logical.success) {
+    if (logical.data.operations.some((operation) => operation.type === "apply_motion_preset" && !operationWireSchema.safeParse(operation).success)) return undefined;
+    return logical.data;
+  }
   const wire = proposalWireSchema.safeParse(input);
   if (!wire.success) return undefined;
   const operations: Operation[] = [];
@@ -347,7 +358,7 @@ function parseProposal(input: unknown): { baseRevisionId: string; evidenceRefs: 
 }
 
 const allowedAgentOperationTypes = new Set<Operation["type"]>([
-  "trim_clip", "set_transform", "set_opacity", "set_speed", "set_volume", "mute_clip", "set_transition",
+  "trim_clip", "apply_motion_preset", "set_transform", "set_opacity", "set_speed", "set_volume", "mute_clip", "set_transition",
   "add_text_layer", "update_text_layer", "add_image_layer", "remove_layer",
 ]);
 const MAX_PROMPT_BYTES = 8 * 1024;
@@ -362,6 +373,7 @@ const MAX_WALL_TIME_MS = 120_000;
 const MAX_PER_CALL_MS = 20_000;
 const MAX_PREVIEW_CALL_MS = 60_000;
 const MAX_PREVIEW_EVIDENCE_CALL_MS = 30_000;
+const MAX_PREVIEW_MOTION_JOBS = 2;
 
 type FailureStatus = "failed" | "rejected";
 class AgentCallError extends Error {
@@ -389,6 +401,7 @@ async function withBoundedCall<T>(
   remainingMs: () => number,
   operation: (signal: AbortSignal) => Promise<T>,
   callLimitMs = MAX_PER_CALL_MS,
+  drainAfterAbort = false,
 ): Promise<T> {
   if (parentSignal?.aborted) throw new AgentCallError("CANCELLED", "conversation was cancelled");
   const timeoutMs = Math.min(callLimitMs, remainingMs());
@@ -398,6 +411,7 @@ async function withBoundedCall<T>(
   let timedOut = false;
   const abortFromParent = () => controller.abort();
   parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  if (parentSignal?.aborted) abortFromParent();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     const rejectAborted = () => reject(new AgentCallError(timedOut ? "TIMEOUT" : "CANCELLED", timedOut ? `${label} exceeded its call deadline` : "conversation was cancelled"));
@@ -408,8 +422,15 @@ async function withBoundedCall<T>(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  const work = Promise.resolve().then(() => {
+    if (controller.signal.aborted) throw new AgentCallError(timedOut ? "TIMEOUT" : "CANCELLED", timedOut ? `${label} exceeded its call deadline` : "conversation was cancelled");
+    return operation(controller.signal);
+  });
   try {
-    return await Promise.race([operation(controller.signal), aborted]);
+    return await Promise.race([work, aborted]);
+  } catch (error) {
+    if (drainAfterAbort && controller.signal.aborted) await work.then(() => undefined, () => undefined);
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
     parentSignal?.removeEventListener("abort", abortFromParent);
@@ -568,7 +589,8 @@ const instructions = [
   "You edit a Replex ProjectV2 only by proposing typed semantic operations through propose_edit_batch.",
   "Inspect bounded project evidence before editing. Every proposed edit must cite evidence references already returned by inspect_v2.",
   "Use the exact currentRevisionId supplied in context as baseRevisionId. After acceptance, use the new currentRevisionId for a follow-up batch.",
-  "The currently supported edit operations are trim_clip, set_transform, set_opacity, set_speed, set_volume, mute_clip, set_transition, add_text_layer, update_text_layer, add_image_layer, and remove_layer.",
+  "The currently supported edit operations are trim_clip, apply_motion_preset, set_transform, set_opacity, set_speed, set_volume, mute_clip, set_transition, add_text_layer, update_text_layer, add_image_layer, and remove_layer.",
+  "apply_motion_preset supports camera-push version 1 on a video clip with one strength parameter from 0.02 through 0.08; inspect clips to see existing motion state before follow-up edits.",
   "Inspect project_summary for overlay track IDs before adding text or image layers, and inspect assets before selecting an image asset.",
   "Never request paths, shell, JavaScript, FFmpeg commands, arbitrary files, raw project JSON, or backend implementation details.",
   "After a successful preview, inspect the result if useful, then finish with a concise response. A preview is technically verified, not a claim of creative approval.",
@@ -621,6 +643,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
   const operationLog: OperationLogRecord[] = [];
   const acceptedBatches: V2AcceptedBatch[] = [];
   const previews: RenderArtifactV2[] = [];
+  const motionExecutions: MotionExecutionResult[] = [];
   const disclosedEvidenceRefs = new Set<string>();
   let finalAssistantText = "";
   const startedAt = Date.now();
@@ -661,6 +684,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
       acceptedBatches,
       operationLog,
       previews,
+      motionExecutions,
     };
   };
 
@@ -783,9 +807,21 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
             continue;
           }
 
-          let plannedJob;
+          const activeMotion = predicted.project.composition.motionPresets ?? [];
+          if (activeMotion.length > MAX_PREVIEW_MOTION_JOBS) {
+            toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "PREVIEW_UNSUPPORTED", detail: "the bounded preview supports at most two active motion presets" } });
+            continue;
+          }
+          let plannedJob: CompositionExecutionJob | CompositionExecutionJobV3 | undefined;
+          let motionJobs: ReturnType<typeof buildMotionExecutionJobV1>[] = [];
           try {
-            plannedJob = buildCompositionExecutionJob(predicted.project, handlesParsed.data);
+            if (activeMotion.length === 0) plannedJob = buildCompositionExecutionJob(predicted.project, handlesParsed.data);
+            else motionJobs = activeMotion.map(({ targetId }) => {
+              const target = predicted.project.composition.clips.find(({ id }) => id === targetId);
+              const sourceHandle = handlesParsed.data.find(({ assetId }) => assetId === target?.assetId);
+              if (!sourceHandle) throw new Error("motion target has no authorized source handle");
+              return buildMotionExecutionJobV1(predicted.project, targetId, sourceHandle);
+            });
           } catch (error) {
             toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "PREVIEW_UNSUPPORTED", detail: "the proposed state is outside the bounded preview renderer's supported project shape" } });
             continue;
@@ -793,33 +829,67 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
 
           const beforeCommitHash = semanticHashV2(workingProject);
           if (beforeCommitHash !== currentRevisionHash) throw new Error("project changed while preparing the semantic batch");
-          let rendered: Awaited<ReturnType<typeof executeMediaExecutionJob>>;
-          let registered: ProjectV2;
-          let previewEvidence: Awaited<ReturnType<typeof createPreviewEvidence>>;
+          let previewCompletion: {
+            rendered: Awaited<ReturnType<typeof executeMediaExecutionJob>>;
+            registered: ProjectV2;
+            previewEvidence: Awaited<ReturnType<typeof createPreviewEvidence>>;
+            plannedJob: CompositionExecutionJob | CompositionExecutionJobV3;
+          } | undefined;
+          let previewFailure: unknown;
+          let cleanupFailed = false;
+          const motionArtifacts: MotionArtifactHandle[] = [];
           try {
             const renderTimeoutMs = Math.min(request.renderOptions?.timeoutMs ?? MAX_PREVIEW_CALL_MS, MAX_PREVIEW_CALL_MS, remainingMs());
             if (renderTimeoutMs < 1) throw new Error("preview render deadline is exhausted");
             const renderOptions = { ...request.renderOptions, timeoutMs: renderTimeoutMs };
+            const candidateHash = semanticHashV2(predicted.project);
             const previewAuthorization: MediaExecutionAuthorization = {
               ...request.renderAuthorization,
-              isRevisionCurrent: async (revisionId, revisionHash) => revisionId === plannedJob.sourceRevisionId
-                && revisionHash === plannedJob.sourceRevisionHash
+              isRevisionCurrent: async (revisionId, revisionHash) => revisionId === predicted.project.currentRevisionId
+                && revisionHash === candidateHash
                 && await request.renderAuthorization.isRevisionCurrent(workingProject.currentRevisionId, beforeCommitHash),
             };
-            rendered = await withBoundedCall("preview render", request.signal, remainingMs, (signal) => executeMediaExecutionJob(
-              plannedJob,
-              previewAuthorization,
-              { ...renderOptions, signal },
-            ), MAX_PREVIEW_CALL_MS);
-            registered = registerRenderArtifactV2(predicted.project, rendered.artifact);
-            previewEvidence = await withBoundedCall("preview evidence", request.signal, remainingMs, async () => createPreviewEvidence(request, rendered.artifact, remainingMs), MAX_PREVIEW_EVIDENCE_CALL_MS);
+            for (const motionJob of motionJobs) {
+              const motion = await withBoundedCall("motion preview", request.signal, remainingMs, (signal) => executeMotionExecutionJob(
+                motionJob,
+                previewAuthorization,
+                { ...renderOptions, signal },
+              ), MAX_PREVIEW_CALL_MS, true);
+              motionArtifacts.push(motion.handle);
+              motionExecutions.push(motion.result);
+            }
+            if (motionArtifacts.length > 0) plannedJob = buildCompositionExecutionJobV3(predicted.project, handlesParsed.data, motionArtifacts);
+            if (!plannedJob) throw new Error("preview composition job was not planned");
+            const rendered = motionArtifacts.length > 0
+              ? await withBoundedCall("preview render", request.signal, remainingMs, (signal) => executeCompositionExecutionJobV3(
+                plannedJob as CompositionExecutionJobV3,
+                motionArtifacts,
+                previewAuthorization,
+                { ...renderOptions, signal },
+              ), MAX_PREVIEW_CALL_MS, true)
+              : await withBoundedCall("preview render", request.signal, remainingMs, (signal) => executeMediaExecutionJob(
+                plannedJob as CompositionExecutionJob,
+                previewAuthorization,
+                { ...renderOptions, signal },
+              ), MAX_PREVIEW_CALL_MS, true);
+            const registered = registerRenderArtifactV2(predicted.project, rendered.artifact);
+            const previewEvidence = await withBoundedCall("preview evidence", request.signal, remainingMs, async () => createPreviewEvidence(request, rendered.artifact, remainingMs), MAX_PREVIEW_EVIDENCE_CALL_MS);
             const previewImageBytes = previewEvidence.image.bytes.byteLength;
             if (imageBytesForIntent + previewImageBytes > MAX_IMAGE_BYTES_PER_INTENT) throw new Error("preview image evidence budget exceeded");
             imageBytesForIntent += previewImageBytes;
+            previewCompletion = { rendered, registered, previewEvidence, plannedJob };
           } catch (error) {
-            if (error instanceof AgentCallError) throw error;
-            return fail("failed", "PREVIEW_FAILED", "preview render or its bounded image evidence failed; no canonical revision was committed");
+            previewFailure = error;
+          } finally {
+            for (const handle of motionArtifacts) {
+              try { await cleanupMotionArtifact(handle); }
+              catch { cleanupFailed = true; }
+            }
           }
+          if (previewFailure instanceof AgentCallError) throw previewFailure;
+          if (!previewCompletion || previewFailure || cleanupFailed) return fail("failed", "PREVIEW_FAILED", "preview render, bounded evidence, or motion cleanup failed; no canonical revision was committed");
+          const { rendered, registered, previewEvidence } = previewCompletion;
+          plannedJob = previewCompletion.plannedJob;
 
           let commit: V2CanonicalRevisionCommitResult;
           const commitTimeoutMs = remainingMs();

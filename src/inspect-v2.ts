@@ -89,6 +89,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_RESPONSE_BYTES = 256 * 1024;
 const MAX_EVIDENCE_INDEX_BYTES = 64 * 1024;
 const MAX_EVIDENCE_ARTIFACT_BYTES = 8 * 1024 * 1024;
+const MAX_MOTION_PRESET_SUMMARIES = 32;
 const NOFOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 const probeEvidenceSchema = z.object({
   durationMs: z.number().int().positive().max(24 * 60 * 60 * 1000).optional(),
@@ -238,6 +239,7 @@ function page<T, U>(values: T[], project: (value: T) => U, offsetValue?: number,
 }
 
 function projectSummary(project: ProjectV2): Record<string, unknown> {
+  const motionPresets = project.composition.motionPresets ?? [];
   return {
     projectId: safeId(project.projectId),
     currentRevisionId: safeId(project.currentRevisionId),
@@ -252,6 +254,12 @@ function projectSummary(project: ProjectV2): Record<string, unknown> {
       height: project.composition.height,
       fps: project.composition.fps,
       durationMs: project.composition.durationMs,
+      motionPresetCount: motionPresets.length,
+      motionPresets: motionPresets.slice(0, MAX_MOTION_PRESET_SUMMARIES).map((preset) => ({
+        targetId: safeId(preset.targetId), presetId: preset.presetId, presetVersion: preset.presetVersion,
+        parameters: { strength: preset.parameters.strength },
+      })),
+      motionPresetsTruncated: motionPresets.length > MAX_MOTION_PRESET_SUMMARIES,
     },
     assetCount: Object.keys(project.assets).length,
     clipCount: project.composition.clips.length,
@@ -268,7 +276,7 @@ function assetSummary(asset: MediaAsset): Record<string, unknown> {
   return { assetId: safeId(asset.id), type: asset.type, sha256: asset.sha256, probe: projectProbe(asset.probe), provenance: provenanceProjection(asset) };
 }
 
-function clipSummary(clip: ProjectV2["composition"]["clips"][number]): Record<string, unknown> {
+function clipSummary(clip: ProjectV2["composition"]["clips"][number], motionPreset?: NonNullable<ProjectV2["composition"]["motionPresets"]>[number]): Record<string, unknown> {
   return {
     clipId: safeId(clip.id),
     assetId: safeId(clip.assetId),
@@ -283,6 +291,7 @@ function clipSummary(clip: ProjectV2["composition"]["clips"][number]): Record<st
     audioGainDb: clip.audioGainDb,
     muted: clip.muted,
     ...(clip.transitionOut ? { transitionOut: clip.transitionOut } : {}),
+    ...(motionPreset ? { motionPreset: { presetId: motionPreset.presetId, presetVersion: motionPreset.presetVersion, parameters: { strength: motionPreset.parameters.strength } } } : {}),
   };
 }
 
@@ -382,7 +391,8 @@ export async function inspectProjectV2(requestInput: unknown, context: V2Inspect
     case "clips": {
       const clips = [...project.composition.clips]
         .sort((left, right) => left.timelineStartMs - right.timelineStartMs || left.id.localeCompare(right.id));
-      result = { ok: true, kind: request.kind, data: page(clips, clipSummary, request.offset, request.limit), evidenceRefs: [] };
+      const motionByTarget = new Map((project.composition.motionPresets ?? []).map((preset) => [preset.targetId, preset]));
+      result = { ok: true, kind: request.kind, data: page(clips, (clip) => clipSummary(clip, motionByTarget.get(clip.id)), request.offset, request.limit), evidenceRefs: [] };
       break;
     }
     case "media_evidence":

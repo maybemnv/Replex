@@ -140,10 +140,14 @@ describe("V2 conversational edit thread", () => {
     const proposal = V2_AGENT_TOOLS.find(({ name }) => name === "propose_edit_batch")!.parameters;
     const inspection = V2_AGENT_TOOLS.find(({ name }) => name === "inspect_v2")!.parameters;
     expect((inspection.properties as Record<string, { maximum?: number }>).limit?.maximum).toBe(25);
-    const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { enum: string[] } } }> } }).items.anyOf;
+    const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: Record<string, any> }> } }).items.anyOf;
     expect(operationBranches.map(({ properties }) => properties.type.enum[0]).sort()).toEqual([
-      "add_image_layer", "add_text_layer", "mute_clip", "remove_layer", "set_opacity", "set_speed", "set_transform", "set_transition", "set_volume", "trim_clip", "update_text_layer",
+      "add_image_layer", "add_text_layer", "apply_motion_preset", "mute_clip", "remove_layer", "set_opacity", "set_speed", "set_transform", "set_transition", "set_volume", "trim_clip", "update_text_layer",
     ]);
+    const motionBranch = operationBranches.find(({ properties }) => properties.type.enum[0] === "apply_motion_preset")!;
+    expect(motionBranch.properties.presetId.enum).toEqual(["camera-push"]);
+    expect(motionBranch.properties.presetVersion.enum).toEqual(["1"]);
+    expect((motionBranch.properties.parameters as unknown as { properties: { strength: { minimum: number; maximum: number } } }).properties.strength).toMatchObject({ minimum: 0.02, maximum: 0.08 });
   });
 
   it("rejects a follow-up whose saved revision pin is stale before calling model or host", async () => {
@@ -330,7 +334,7 @@ describe("V2 conversational edit thread", () => {
       (input) => ({ responseId: "response-2", calls: [{
         id: "call-edit",
         name: "propose_edit_batch",
-        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "apply_motion_preset", targetId: "clip-1", presetId: "tilt", presetVersion: "1", parameters: {} }] },
+        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "recapture_browser_asset", assetId: "asset-1", reason: "product changed" }] },
       }] }),
       (input) => {
         expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "UNSUPPORTED_OPERATION" });
@@ -344,6 +348,30 @@ describe("V2 conversational edit thread", () => {
     }));
 
     expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" } });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("rejects out-of-range camera-push parameters at the agent wire boundary", async () => {
+    const project = projectWithClip();
+    const model = scriptedModel([
+      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-2", calls: [{
+        id: "call-edit",
+        name: "propose_edit_batch",
+        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "apply_motion_preset", targetId: "clip-1", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.01 } }] },
+      }] }),
+      (input) => {
+        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+        return finalResponse("response-3");
+      },
+    ]);
+    const commit = vi.fn();
+    const result = await runConversationalEditV2(requestFor(project, model, {
+      inspect: async () => ({ ok: true, data: { clipId: "clip-1" }, evidenceRefs: [evidenceRef] }),
+      commitCanonicalRevision: commit,
+    }));
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" }, previews: [] });
     expect(commit).not.toHaveBeenCalled();
   });
 

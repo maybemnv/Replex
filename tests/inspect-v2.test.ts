@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalFlow } from "../fixtures/apps/normal/flow.js";
 import { checkedEvidenceRoot, inspectProjectV2, V2InspectRequestSchema, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
-import { semanticHashV2, type OperationLogRecord } from "../src/operations-v2.js";
+import { applyOperationBatch, semanticHashV2, type OperationLogRecord } from "../src/operations-v2.js";
 import { generateMediaEvidence, MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "../src/media-evidence.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 import { ffmpegPath, mediaAvailable } from "./media.js";
@@ -148,6 +148,29 @@ async function evidenceFixture(root: string, project: ProjectV2, options: { sour
 }
 
 describe("V2 bounded model inspection", () => {
+  it("surfaces bounded canonical motion state in project and clip inspection", async () => {
+    const base = fixtureProject();
+    const applied = applyOperationBatch(base, {
+      baseRevisionId: base.currentRevisionId,
+      actor: "user",
+      intentId: "camera-push-inspection",
+      evidenceRefs: [],
+      operations: [{ type: "apply_motion_preset", targetId: "clip-0", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.06 } }],
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+
+    const summary = success(await inspectProjectV2({ kind: "project_summary" }, context(applied.project)));
+    expect(summary.data).toMatchObject({ composition: {
+      motionPresetCount: 1,
+      motionPresets: [{ targetId: "clip-0", presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.06 } }],
+      motionPresetsTruncated: false,
+    } });
+    const clips = success(await inspectProjectV2({ kind: "clips", offset: 0, limit: 1 }, context(applied.project)));
+    expect(clips.data).toMatchObject({ items: [{ clipId: "clip-0", motionPreset: { presetId: "camera-push", presetVersion: "1", parameters: { strength: 0.06 } } }] });
+    expect(JSON.stringify({ summary, clips })).not.toContain("media/assets");
+  });
+
   it("returns a sanitized project summary without canonical state or session details", async () => {
     const project = fixtureProject();
     const result = success(await inspectProjectV2({ kind: "project_summary" }, context(project)));
