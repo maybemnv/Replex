@@ -1,10 +1,12 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** V2-104 service schemas and mock fixtures implemented and independently validated at `ac6e1f8`; frontend, transport, and runtime service are not implemented. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
+**Status:** PR-A freezes the V2-104 wire v1 projection and preserves the existing mock fixture shape; independent final validation is pending. Frontend, transport, and runtime service are not implemented. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
-**Contract timing:** Gurbaaz can mock against the finalized V2-104 domain contract now. HTTP/SSE/WebSocket, job scheduling, executors, and runtime capability reporting remain later work (Phase 7).
+**Contract/discovery decision:** [`../architecture/ADR-007-service-contract-v1.md`](../architecture/ADR-007-service-contract-v1.md)
+
+**Contract timing:** Gurbaaz can mock against the frozen V2-104 wire v1 types and fixtures. HTTP/SSE/WebSocket, job scheduling, executors, and runtime capability reporting remain later work (Phase 7).
 
 ## Product experience
 
@@ -72,9 +74,13 @@ The UI may display storyboard/timeline views, but it is never the canonical proj
 
 ## Stable service contract (V2-104)
 
-The transport-independent request, response, view, capability, job, event, and error schemas with inferred TypeScript types are maintained in [`src/service-contract/index.ts`](../../src/service-contract/index.ts). Deterministic Gurbaaz examples are in [`src/service-contract/fixtures.ts`](../../src/service-contract/fixtures.ts). Import these sources instead of declaring parallel frontend contract types.
+The transport-independent request, response, view, capability, job, event, and error schemas with inferred TypeScript types are maintained in [`src/service-contract/index.ts`](../../src/service-contract/index.ts). These are explicit wire v1 projections, independent of the evolving V2 domain schemas; new external shapes require a deliberate service-contract version evolution. Deterministic Gurbaaz examples are in [`src/service-contract/fixtures.ts`](../../src/service-contract/fixtures.ts). Import these sources instead of declaring parallel frontend contract types.
 
-Create requests carry contract version and idempotency metadata before a project ID exists. Open requests pin snapshots to a concrete revision. Mock capability values are examples for frontend states; only a live runtime capability response describes backend support.
+Create requests carry contract version and idempotency metadata before a project ID exists. Open requests use the host-supplied project ID and pin snapshots to a concrete revision. Mock capability values are examples for frontend states; only a live runtime capability response describes backend support.
+
+### Project identity and local discovery
+
+Contract v1 has no `list_projects`/`attach_project` command and introduces no database. The local host shell lists only authorized project roots, validates the selected project manifest, and supplies its `projectId` and current `revisionId` to `open_project`; `create_project` returns the new ID. The service contract receives IDs, not host paths or local tokens. A mocked project list is host-shell fixture data, not a service endpoint.
 
 HTTP endpoints, event delivery/reconnect behavior, executors, and process supervision remain later implementation work (Phase 7).
 
@@ -128,7 +134,7 @@ Each revision row shows actor (`user`, `agent`, `recapture`, `migration`), times
 
 Gurbaaz can start immediately with generated fixtures for:
 
-- project list/open and one `ProjectSnapshot`;
+- host-provided project selection/open and one `ProjectSnapshot`;
 - empty/importing/analyzing/ready/failed asset states;
 - browser and uploaded asset cards with distinct provenance;
 - agent job stages and accepted/rejected operation summaries;
@@ -144,7 +150,7 @@ typed mock event stream. Mock at the backend-owned service-contract boundary,
 not inside components. Use deterministic fixtures and a fake event stream with
 monotonic sequence numbers.
 
-### Contract finalized in this milestone
+### Frozen wire v1 snapshot in this milestone
 
 - [Service contract schemas and types](../../src/service-contract/index.ts)
 - [Deterministic service contract fixtures](../../src/service-contract/fixtures.ts)
