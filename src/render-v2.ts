@@ -6,6 +6,7 @@ import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, unlink, writeFi
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
+import { assertIssuedMotionArtifactHandle, buildMotionExecutionJobV1, resolveMotionArtifactHandle, type MotionArtifactHandle } from "./motion-v2.js";
 import { semanticHashV2 } from "./operations-v2.js";
 import { resolveRenderFont } from "./render.js";
 import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, TransitionV2Schema, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
@@ -66,16 +67,33 @@ const compositionJobPayloadSchema = z.object({
   layers: z.array(compositionLayerSchema).max(2),
   fontSha256: sha256Schema.optional(),
 }).strict();
+const compositionMotionArtifactSchema = z.object({
+  artifactId: z.string().uuid(),
+  ref: z.string().regex(/^\.replex-staging\/motion\/jobs\/[0-9a-f-]{36}\/motion\.mp4$/),
+  sha256: sha256Schema,
+  motionJobHash: sha256Schema,
+  sourceRevisionId: z.string().min(1),
+  sourceRevisionHash: sha256Schema,
+  targetClipId: z.string().min(1),
+  sourceAssetId: z.string().min(1),
+}).strict();
+const compositionVideoClipV3Schema = compositionVideoClipSchema.extend({ motionArtifact: compositionMotionArtifactSchema.optional() });
+const motionCompositionJobPayloadSchema = compositionJobPayloadSchema.extend({
+  jobVersion: z.literal(3),
+  videoClips: z.array(compositionVideoClipV3Schema).min(1).max(2),
+});
 
 type JobPayload = z.infer<typeof jobPayloadSchema>;
 type CompositionJobPayload = z.infer<typeof compositionJobPayloadSchema>;
-type FrozenJobPayload = JobPayload | CompositionJobPayload;
-type FrozenRenderJob = MediaExecutionJob | CompositionExecutionJob;
-const frozenJobPayloadSchema = z.discriminatedUnion("jobVersion", [jobPayloadSchema, compositionJobPayloadSchema]);
+type MotionCompositionJobPayload = z.infer<typeof motionCompositionJobPayloadSchema>;
+type FrozenJobPayload = JobPayload | CompositionJobPayload | MotionCompositionJobPayload;
+type FrozenRenderJob = MediaExecutionJob | CompositionExecutionJob | CompositionExecutionJobV3;
+const frozenJobPayloadSchema = z.discriminatedUnion("jobVersion", [jobPayloadSchema, compositionJobPayloadSchema, motionCompositionJobPayloadSchema]);
 type DeepReadonly<T> = T extends (...args: never[]) => unknown ? T : T extends readonly unknown[] ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 
 export type MediaExecutionJob = DeepReadonly<JobPayload & { jobHash: string }>;
 export type CompositionExecutionJob = DeepReadonly<CompositionJobPayload & { jobHash: string }>;
+export type CompositionExecutionJobV3 = DeepReadonly<MotionCompositionJobPayload & { jobHash: string }>;
 
 export interface ResolvedAssetHandle {
   assetId: string;
@@ -91,7 +109,9 @@ export interface MediaExecutionAuthorization {
 }
 
 export interface MediaExecutionOptions {
+  /** Host-owned path to a trusted native direct FFmpeg binary; wrappers are unsupported because cancellation drains this child process. */
   ffmpegPath?: string;
+  /** Host-owned path to a trusted native direct FFprobe binary. */
   ffprobePath?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -227,6 +247,7 @@ function assertJobHash(job: MediaExecutionJob): JobPayload {
 /** Plans only one uploaded-video clip; the backend receives no ProjectV2 object. */
 export function buildMediaExecutionJob(projectInput: ProjectV2, handles: readonly AssetHandle[]): MediaExecutionJob {
   const project = ProjectV2Schema.parse(projectInput);
+  if (project.composition.motionPresets?.length) throw new Error("motion presets require composition execution job v3");
   if (project.composition.clips.length !== 1) throw new Error("native V2 render requires exactly one video clip");
   if (project.composition.layers.length) throw new Error("native V2 render does not support composition layers");
   if (project.composition.width < 16 || project.composition.height < 16 || project.composition.width % 2 !== 0 || project.composition.height % 2 !== 0
@@ -300,7 +321,27 @@ function compositionFontSha256(): string {
 
 /** Plans the bounded native 2D profile without exposing ProjectV2 or host paths to the backend. */
 export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: readonly AssetHandle[]): CompositionExecutionJob {
+  return planCompositionExecutionJob(projectInput, handles) as CompositionExecutionJob;
+}
+
+/** Plans job v3 with executor-issued motion artifacts while retaining original source handles for canonical audio. */
+export function buildCompositionExecutionJobV3(
+  projectInput: ProjectV2,
+  handles: readonly AssetHandle[],
+  motionArtifactHandles: readonly MotionArtifactHandle[],
+): CompositionExecutionJobV3 {
+  return planCompositionExecutionJob(projectInput, handles, motionArtifactHandles) as CompositionExecutionJobV3;
+}
+
+function planCompositionExecutionJob(
+  projectInput: ProjectV2,
+  handles: readonly AssetHandle[],
+  motionArtifactHandles?: readonly MotionArtifactHandle[],
+): CompositionExecutionJob | CompositionExecutionJobV3 {
   const project = ProjectV2Schema.parse(projectInput);
+  const activeMotion = project.composition.motionPresets ?? [];
+  if (activeMotion.length > 0 && motionArtifactHandles === undefined) throw new Error("motion presets require composition execution job v3");
+  if (activeMotion.length === 0 && motionArtifactHandles !== undefined) throw new Error("composition job v3 requires active motion presets");
   const { width, height, fps, durationMs } = project.composition;
   if (width < 16 || height < 16 || width % 2 !== 0 || height % 2 !== 0 || width > 4096 || height > 4096 || fps < 1 || fps > 60 || durationMs > 120_000) {
     throw new Error("composition exceeds native V2 render limits");
@@ -309,6 +350,7 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
   const sourceRevisionHash = semanticHashV2(project);
   if (!revision || revision.manifestSha256 !== sourceRevisionHash) throw new Error("current revision manifest hash does not match semantic project state");
 
+  const motionByTarget = new Map<string, z.infer<typeof compositionMotionArtifactSchema>>();
   const authorized = new Map<string, AssetHandle>();
   for (const handleInput of handles) {
     const handle = AssetHandleSchema.parse(handleInput);
@@ -316,6 +358,18 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
     if (previous && canonicalJson(previous) !== canonicalJson(handle)) throw new Error("authorized handles contain conflicting identity for one asset");
     authorized.set(handle.assetId, handle);
   }
+  for (const input of motionArtifactHandles ?? []) {
+    const handle = assertIssuedMotionArtifactHandle(input);
+    const target = project.composition.clips.find(({ id }) => id === handle.targetClipId);
+    const sourceHandle = target ? authorized.get(target.assetId) : undefined;
+    if (!activeMotion.some(({ targetId }) => targetId === handle.targetClipId) || !target || !sourceHandle || target.assetId !== handle.sourceAssetId
+      || motionByTarget.has(handle.targetClipId) || handle.sourceRevisionId !== project.currentRevisionId || handle.sourceRevisionHash !== sourceRevisionHash
+      || buildMotionExecutionJobV1(project, handle.targetClipId, sourceHandle).jobHash !== handle.motionJobHash) {
+      throw new Error("motion artifact does not match the canonical preset, target, or current source revision");
+    }
+    motionByTarget.set(handle.targetClipId, compositionMotionArtifactSchema.parse(handle));
+  }
+  if (motionArtifactHandles !== undefined && motionByTarget.size !== activeMotion.length) throw new Error("every canonical motion preset requires one authorized motion artifact");
   const inputs = new Map<string, CompositionJobPayload["assetInputs"][number]>();
   const addInput = (assetId: string, kind: "video" | "audio" | "image") => {
     const asset = project.assets[assetId];
@@ -368,8 +422,11 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
       speed: clip.speed, transform: clip.transform, ...(clip.crop ? { crop: clip.crop } : {}), opacity: clip.opacity,
       audioGainDb: clip.audioGainDb, muted: clip.muted || track.muted,
       ...(clip.transitionOut ? { transitionOut: clip.transitionOut } : {}),
+      ...(motionByTarget.has(clip.id) ? { motionArtifact: motionByTarget.get(clip.id)! } : {}),
     };
-    return compositionVideoClipSchema.parse(planned);
+    return motionArtifactHandles === undefined
+      ? compositionVideoClipSchema.parse(planned)
+      : compositionVideoClipV3Schema.parse(planned);
   });
   if (videoClips.at(-1)!.transitionOut) throw new Error("the final video clip cannot have an outgoing transition");
   const clipDurations = videoClips.map((clip) => (clip.sourceOutMs - clip.sourceInMs) / clip.speed);
@@ -416,8 +473,7 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
     return compositionLayerSchema.parse({ id: layer.id, kind: "image", timelineStartMs: layer.timelineStartMs, durationMs: layer.durationMs, assetId });
   });
 
-  const payload = compositionJobPayloadSchema.parse({
-    jobVersion: 2,
+  const payloadInput = {
     projectId: project.projectId,
     sourceRevisionId: project.currentRevisionId,
     sourceRevisionHash,
@@ -427,8 +483,11 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
     ...(audioClip ? { audioClip } : {}),
     layers,
     ...(layers.some(({ kind }) => kind === "text") ? { fontSha256: compositionFontSha256() } : {}),
-  });
-  return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as CompositionExecutionJob;
+  };
+  const payload = motionArtifactHandles === undefined
+    ? compositionJobPayloadSchema.parse({ jobVersion: 2, ...payloadInput })
+    : motionCompositionJobPayloadSchema.parse({ jobVersion: 3, ...payloadInput });
+  return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as CompositionExecutionJob | CompositionExecutionJobV3;
 }
 
 function pathInside(root: string, candidate: string): boolean {
@@ -476,7 +535,7 @@ async function checkPreflight(
 }
 
 async function checkCompositionPreflight(
-  payload: CompositionJobPayload,
+  payload: CompositionJobPayload | MotionCompositionJobPayload,
   authorization: MediaExecutionAuthorization,
 ): Promise<{ result: CompositionExecutionPreflight; sourcePaths: Map<string, string> }> {
   if (!await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) throw new Error("media execution job revision is no longer current");
@@ -645,10 +704,11 @@ function escapeFilterPath(path: string): string {
 }
 
 async function buildCompositionFfmpegArgs(
-  job: CompositionJobPayload,
+  job: CompositionJobPayload | MotionCompositionJobPayload,
   sourcePaths: ReadonlyMap<string, string>,
   stageDir: string,
   stagedPath: string,
+  motionPaths: ReadonlyMap<string, string> = new Map(),
 ): Promise<string[]> {
   const { width, height, fps, outputDurationMs } = job.composition;
   const duration = seconds(outputDurationMs);
@@ -661,7 +721,18 @@ async function buildCompositionFfmpegArgs(
     if (input.kind === "image") args.push("-loop", "1", "-framerate", numberText(fps));
     args.push("-i", path);
   });
-  const backgroundIndex = job.assetInputs.length;
+  const motionInputIndexes = new Map<string, number>();
+  let nextInputIndex = job.assetInputs.length;
+  for (const clip of job.videoClips) {
+    const hasMotion = "motionArtifact" in clip && clip.motionArtifact !== undefined;
+    if (!hasMotion) continue;
+    const path = motionPaths.get(clip.id);
+    if (!path) throw new Error("composition motion artifact was not authorized");
+    args.push("-i", path);
+    motionInputIndexes.set(clip.id, nextInputIndex);
+    nextInputIndex += 1;
+  }
+  const backgroundIndex = nextInputIndex;
   args.push("-f", "lavfi", "-t", duration, "-i", `color=c=black:s=${width}x${height}:r=${numberText(fps)}`);
   const hasAudio = job.videoClips.some((clip) => !clip.muted && job.assetInputs.find(({ assetId }) => assetId === clip.assetId)?.source.hasAudio)
     || Boolean(job.audioClip && !job.audioClip.muted);
@@ -679,7 +750,12 @@ async function buildCompositionFfmpegArgs(
     const cropFilter = crop ? `,crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}` : "";
     const scale = numberText(clip.transform.scale);
     const rotation = numberText(clip.transform.rotation * Math.PI / 180);
-    filters.push(`[${inputIndex}:v]trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=none,colorchannelmixer=aa=${numberText(clip.opacity)}[clip${index}]`);
+    const motionInputIndex = motionInputIndexes.get(clip.id);
+    const visualInput = motionInputIndex ?? inputIndex;
+    const timelineFilter = motionInputIndex === undefined
+      ? `trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}`
+      : "setpts=PTS-STARTPTS";
+    filters.push(`[${visualInput}:v]${timelineFilter}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=none,colorchannelmixer=aa=${numberText(clip.opacity)}[clip${index}]`);
     filters.push(`[bg${index}][clip${index}]overlay=x='(W-w)*${numberText(clip.transform.anchorX)}+${numberText(clip.transform.x)}':y='(H-h)*${numberText(clip.transform.anchorY)}+${numberText(clip.transform.y)}':shortest=1:eof_action=pass:format=auto,format=yuv420p,setsar=1[video${index}]`);
   }
 
@@ -871,11 +947,36 @@ function jobAssetHandles(payload: FrozenJobPayload): AssetHandle[] {
   return payload.jobVersion === 1 ? [payload.assetHandle] : payload.assetInputs.map(({ handle }) => handle);
 }
 
+async function resolveMotionArtifactPaths(
+  payload: FrozenJobPayload,
+  handles: readonly MotionArtifactHandle[],
+  projectRoot: string,
+): Promise<Map<string, string>> {
+  const paths = new Map<string, string>();
+  if (payload.jobVersion !== 3) {
+    if (handles.length) throw new Error("motion artifact handles are only valid for composition job v3");
+    return paths;
+  }
+  const descriptors = payload.videoClips.flatMap((clip) => clip.motionArtifact ? [clip.motionArtifact] : []);
+  if (handles.length !== descriptors.length) throw new Error("composition job v3 requires every authorized motion artifact handle");
+  for (const input of handles) {
+    const handle = assertIssuedMotionArtifactHandle(input);
+    const descriptor = descriptors.find(({ targetClipId }) => targetClipId === handle.targetClipId);
+    if (!descriptor || canonicalJson(descriptor) !== canonicalJson(handle) || paths.has(handle.targetClipId)) {
+      throw new Error("motion artifact handle does not match the frozen composition job");
+    }
+    paths.set(handle.targetClipId, await resolveMotionArtifactHandle(input, projectRoot));
+  }
+  return paths;
+}
+
 async function assertJobSourcesCurrent(
   root: string,
   authorization: MediaExecutionAuthorization,
   payload: FrozenJobPayload,
   sourcePaths: ReadonlyMap<string, string>,
+  motionHandles: readonly MotionArtifactHandle[],
+  motionPaths: ReadonlyMap<string, string>,
   boundary: "before" | "after",
 ): Promise<void> {
   for (const expected of jobAssetHandles(payload)) {
@@ -887,13 +988,39 @@ async function assertJobSourcesCurrent(
   if (!await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
     throw new Error(`media execution revision or source changed ${boundary} output promotion`);
   }
+  for (const handle of motionHandles) {
+    const actual = await resolveMotionArtifactHandle(handle, root);
+    if (actual !== motionPaths.get(handle.targetClipId)) throw new Error(`motion artifact changed ${boundary} output promotion`);
+  }
 }
 
 /** Executes a frozen job and returns a derived artifact without mutating ProjectV2. */
 export async function executeMediaExecutionJob(
-  job: FrozenRenderJob,
+  job: MediaExecutionJob | CompositionExecutionJob,
   authorization: MediaExecutionAuthorization,
   options: MediaExecutionOptions = {},
+): Promise<{ preflight: MediaExecutionPreflight | CompositionExecutionPreflight; artifact: RenderArtifactV2 }> {
+  return executeFrozenMediaJob(job, authorization, options, []);
+}
+
+/** Executes only frozen composition job v3 using the executor-issued handles named by that job. */
+export async function executeCompositionExecutionJobV3(
+  job: CompositionExecutionJobV3,
+  motionArtifactHandles: readonly MotionArtifactHandle[],
+  authorization: MediaExecutionAuthorization,
+  options: MediaExecutionOptions = {},
+): Promise<{ preflight: CompositionExecutionPreflight; artifact: RenderArtifactV2 }> {
+  if (job.jobVersion !== 3) throw new Error("composition execution job v3 is required");
+  const result = await executeFrozenMediaJob(job, authorization, options, motionArtifactHandles);
+  if ("assetId" in result.preflight) throw new Error("composition execution preflight returned the wrong job kind");
+  return { preflight: result.preflight as CompositionExecutionPreflight, artifact: result.artifact };
+}
+
+async function executeFrozenMediaJob(
+  job: FrozenRenderJob,
+  authorization: MediaExecutionAuthorization,
+  options: MediaExecutionOptions,
+  motionArtifactHandles: readonly MotionArtifactHandle[],
 ): Promise<{ preflight: MediaExecutionPreflight | CompositionExecutionPreflight; artifact: RenderArtifactV2 }> {
   const timeoutMs = options.timeoutMs ?? 120_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error("media execution timeout is outside the supported range");
@@ -910,6 +1037,7 @@ export async function executeMediaExecutionJob(
     sourcePaths = checked.sourcePaths;
   }
   const root = await realpath(authorization.projectRoot);
+  const motionPaths = await resolveMotionArtifactPaths(payload, motionArtifactHandles, root);
   const stageRoot = await realContainedDirectory(root, ".replex-staging");
   const stageDir = await mkdtemp(join(stageRoot, `${job.jobHash.slice(0, 16)}-`));
   await chmod(stageDir, 0o700);
@@ -920,7 +1048,7 @@ export async function executeMediaExecutionJob(
   try {
     const args = payload.jobVersion === 1
       ? buildFfmpegArgs(payload, sourcePaths.get(payload.assetHandle.assetId)!, stagedPath)
-      : await buildCompositionFfmpegArgs(payload, sourcePaths, stageDir, stagedPath);
+      : await buildCompositionFfmpegArgs(payload, sourcePaths, stageDir, stagedPath, motionPaths);
     await runProcess(ffmpegPath, args, timeoutMs, options.signal, 8 * 1024 * 1024);
     const verified = await verifyRenderedOutput(stagedPath, payload, ffprobePath, ffmpegPath, timeoutMs, options.signal);
     const version = await runProcess(ffmpegPath, ["-version"], timeoutMs, options.signal, 32 * 1024);
@@ -945,7 +1073,7 @@ export async function executeMediaExecutionJob(
       artifactRef: `renders/${outputName}`,
       artifactSha256: verified.sha256,
       probe: verified.probe,
-      backend: { id: "native-ffmpeg", version: payload.jobVersion === 1 ? "1" : "2", ffmpegVersion },
+      backend: { id: "native-ffmpeg", version: String(payload.jobVersion), ffmpegVersion },
       checks: { probe: true, decode: true, hash: true },
     };
     const receiptBytes = `${canonicalJson(receipt)}\n`;
@@ -953,7 +1081,7 @@ export async function executeMediaExecutionJob(
     const evidenceSha256 = digest(receiptBytes);
 
     // Pin revision and source again at the final publication boundary.
-    await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, "before");
+    await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, motionArtifactHandles, motionPaths, "before");
 
     let promotedOutput: PublishedFile | undefined;
     let promotedEvidence: PublishedFile | undefined;
@@ -961,7 +1089,7 @@ export async function executeMediaExecutionJob(
     try {
       promotedOutput = await publishExclusive(stagedPath, outputPath, verified.sha256);
       promotedEvidence = await publishExclusive(stagedEvidencePath, evidencePath, evidenceSha256);
-      await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, "after");
+      await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, motionArtifactHandles, motionPaths, "after");
       outputSha = (await boundedDigestFile(outputPath)).sha256;
       if (outputSha !== verified.sha256 || await digestFile(evidencePath) !== evidenceSha256) {
         throw new Error("promoted render artifact or verification evidence changed before return");
@@ -993,7 +1121,7 @@ export async function executeMediaExecutionJob(
       sourceRevisionHash: payload.sourceRevisionHash,
       renderJobHash: job.jobHash,
       backendId: "native-ffmpeg",
-      backendVersion: payload.jobVersion === 1 ? "1" : "2",
+      backendVersion: String(payload.jobVersion),
       ffmpegVersion,
       verificationRefId: verificationId,
       verification,
