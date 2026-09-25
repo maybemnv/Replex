@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, open, realpath, rm, rmdir, stat, unlink } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { FileHandle } from "node:fs/promises";
@@ -13,7 +13,7 @@ export interface AuthorizedLocalImport {
   readonly sizeBytes: number;
 }
 
-export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED";
+export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_TOO_LARGE" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "MEDIA_DECODE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED" | "IMPORT_CANCELLED" | "IMPORT_TIMEOUT";
 
 export class LocalImportError extends Error {
   constructor(readonly code: LocalImportErrorCode, message: string) {
@@ -29,9 +29,16 @@ export interface LocalImportResult {
   operationLog: OperationLogRecord[];
 }
 
+export interface LocalImportOptions {
+  ffprobePath?: string;
+  ffmpegPath?: string;
+  signal?: AbortSignal;
+}
+
 interface SourceEntry {
   file: FileHandle;
   filename: string;
+  importMethod: "file_picker" | "path";
   initialStat: BigIntStats;
   consumed: boolean;
 }
@@ -43,6 +50,17 @@ interface ProbeResult {
 
 const authorizedSources = new WeakMap<AuthorizedLocalImport, SourceEntry>();
 const hashLocks = new Map<string, Promise<void>>();
+// POC limits: 256 MiB input, 60 s total, 15 s probe, 30 s decode, 10 min duration, 4K/16 MP, 60 fps.
+const MAX_IMPORT_BYTES = 256 * 1024 * 1024;
+const IMPORT_TIMEOUT_MS = 60_000;
+const FFPROBE_TIMEOUT_MS = 15_000;
+const MEDIA_CHECK_TIMEOUT_MS = 30_000;
+const MAX_MEDIA_DURATION_MS = 10 * 60 * 1_000;
+const MAX_MEDIA_DIMENSION = 4_096;
+const MAX_MEDIA_PIXELS = 16_777_216;
+const MAX_MEDIA_FPS = 60;
+const MAX_AUDIO_CHANNELS = 8;
+const MAX_SAMPLE_RATE_HZ = 192_000;
 const imageCodecs = new Set(["bmp", "gif", "jpeg2000", "mjpeg", "png", "ppm", "tiff", "webp"]);
 const stillImageFormats = new Set(["avif", "bmp_pipe", "gif", "image2", "image2pipe", "jpeg_pipe", "png_pipe", "ppm_pipe", "tiff_pipe", "webp_pipe"]);
 
@@ -72,8 +90,9 @@ function sourceFlags(): number {
 }
 
 /** Called by the local host after a user has selected a file inside an approved root. */
-export async function authorizeLocalImport(sourcePath: string, approvedRoots: string[]): Promise<AuthorizedLocalImport> {
-  if (!sourcePath || approvedRoots.length === 0) fail("SOURCE_NOT_AUTHORIZED", "source is outside approved import roots");
+export async function authorizeLocalImport(sourcePath: string, approvedRoots: string[], importMethod: "file_picker" | "path" = "file_picker"): Promise<AuthorizedLocalImport> {
+  if (typeof sourcePath !== "string" || !sourcePath || !Array.isArray(approvedRoots) || approvedRoots.length === 0 || approvedRoots.some((root) => typeof root !== "string" || !root)
+    || (importMethod !== "file_picker" && importMethod !== "path")) fail("SOURCE_NOT_AUTHORIZED", "source is outside approved import roots");
 
   const lexicalSource = resolve(sourcePath);
   const lexicalRoots = approvedRoots.map((root) => resolve(root));
@@ -96,13 +115,14 @@ export async function authorizeLocalImport(sourcePath: string, approvedRoots: st
     const resolvedStat = await stat(canonicalSource, { bigint: true });
     file = await open(canonicalSource, sourceFlags());
     const openedStat = await file.stat({ bigint: true });
+    if (openedStat.size > BigInt(MAX_IMPORT_BYTES)) fail("SOURCE_TOO_LARGE", "source exceeds the 256 MiB local import limit");
     if (!sameFile(beforeOpen, resolvedStat) || !sameFile(resolvedStat, openedStat) || openedStat.nlink !== 1n || openedStat.size === 0n) {
       fail("SOURCE_NOT_AUTHORIZED", "source changed or is not a regular file");
     }
     if (openedStat.size > BigInt(Number.MAX_SAFE_INTEGER)) fail("SOURCE_NOT_AUTHORIZED", "source is too large to import safely");
 
     const handle = Object.freeze({ token: randomUUID(), filename: basename(lexicalSource), sizeBytes: Number(openedStat.size) });
-    authorizedSources.set(handle, { file, filename: handle.filename, initialStat: openedStat, consumed: false });
+    authorizedSources.set(handle, { file, filename: handle.filename, importMethod, initialStat: openedStat, consumed: false });
     file = undefined;
     return handle;
   } catch (error) {
@@ -125,7 +145,7 @@ export async function importLocalAssetV2(
   project: ProjectV2,
   projectRoot: string,
   source: AuthorizedLocalImport,
-  options: { ffprobePath?: string } = {},
+  options: LocalImportOptions = {},
 ): Promise<LocalImportResult> {
   const entry = authorizedSources.get(source);
   if (!entry || entry.consumed) fail("SOURCE_NOT_AUTHORIZED", "authorized source handle is invalid or already used");
@@ -133,24 +153,41 @@ export async function importLocalAssetV2(
   authorizedSources.delete(source);
 
   let stageDirectory: string | undefined;
+  const timeoutSignal = AbortSignal.timeout(IMPORT_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+  const checkActive = (): void => {
+    if (!signal.aborted) return;
+    if (timeoutSignal.aborted) fail("IMPORT_TIMEOUT", "local import exceeded its 60 second limit");
+    fail("IMPORT_CANCELLED", "local import was cancelled");
+  };
   try {
+    checkActive();
     const initialStat = await entry.file.stat({ bigint: true });
+    checkActive();
     if (!sameSnapshot(entry.initialStat, initialStat)) fail("SOURCE_CHANGED", "source changed after authorization");
 
     const canonicalProjectRoot = await checkedProjectRoot(projectRoot);
+    checkActive();
     const stagingRoot = await ensureDirectory(canonicalProjectRoot, [".replex-staging"]);
     stageDirectory = await mkdtemp(join(stagingRoot, "import-"));
     await chmod(stageDirectory, 0o700);
     const stagePath = join(stageDirectory, "source");
-    const staged = await copyAndHash(entry, stagePath);
+    const staged = await copyAndHash(entry, stagePath, signal, checkActive);
+    checkActive();
 
     const afterCopy = await entry.file.stat({ bigint: true });
+    checkActive();
     if (!sameSnapshot(entry.initialStat, afterCopy) || staged.bytes !== Number(entry.initialStat.size)) fail("SOURCE_CHANGED", "source changed while it was being imported");
-    if (await hashExistingFile(stagePath) !== staged.sha256) fail("STORAGE_FAILED", "staged source bytes failed integrity validation");
+    if (await hashExistingFile(stagePath, signal, checkActive) !== staged.sha256) fail("STORAGE_FAILED", "staged source bytes failed integrity validation");
 
     const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-    const media = probeMedia(stagePath, ffprobePath);
+    const media = probeMedia(stagePath, ffprobePath, signal, checkActive);
+    checkActive();
+    const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
+    decodeMedia(stagePath, ffmpegPath, media.probe, signal, checkActive);
+    checkActive();
     const afterProbe = await entry.file.stat({ bigint: true });
+    checkActive();
     if (!sameSnapshot(entry.initialStat, afterProbe)) fail("SOURCE_CHANGED", "source changed while it was being imported");
 
     const assetRelativePath = `media/assets/${staged.sha256}`;
@@ -159,8 +196,14 @@ export async function importLocalAssetV2(
     return await withLock(lockKey, async () => {
       const assetRoot = await ensureDirectory(canonicalProjectRoot, ["media", "assets"]);
       const finalPath = join(assetRoot, staged.sha256);
-      const promotion = await promoteImmutable(stagePath, finalPath, staged.sha256);
+      checkActive();
+      const promotion = await promoteImmutable(stagePath, finalPath, staged.sha256, signal, checkActive);
       try {
+        if (stageDirectory) {
+          await rmdir(stageDirectory);
+          stageDirectory = undefined;
+        }
+        checkActive();
         const now = new Date().toISOString();
         const asset = MediaAssetSchema.parse({
           id: `asset-${randomUUID()}`,
@@ -173,7 +216,7 @@ export async function importLocalAssetV2(
             originalFilename: entry.filename,
             importedAt: now,
             sourceSha256: staged.sha256,
-            importMethod: "file_picker",
+            importMethod: entry.importMethod,
             originalProbe: media.probe,
           },
         });
@@ -192,8 +235,9 @@ export async function importLocalAssetV2(
         if (promotion.created) await removePromoted(finalPath);
         throw error;
       }
-    });
+    }, checkActive);
   } catch (error) {
+    if (signal.aborted) checkActive();
     if (error instanceof LocalImportError) throw error;
     return fail("STORAGE_FAILED", "local asset import failed before canonical publication");
   } finally {
@@ -201,7 +245,7 @@ export async function importLocalAssetV2(
     if (stageDirectory) {
       const stagePath = join(stageDirectory, "source");
       await chmod(stagePath, 0o600).catch(() => undefined);
-      await rm(stageDirectory, { recursive: true, force: true }).catch(() => undefined);
+      await rm(stageDirectory, { recursive: true, force: true }).catch(() => fail("STORAGE_FAILED", "failed import staging data could not be cleaned"));
     }
   }
 }
@@ -239,14 +283,16 @@ async function ensureDirectory(root: string, segments: string[]): Promise<string
   return current;
 }
 
-async function copyAndHash(entry: SourceEntry, stagePath: string): Promise<{ sha256: string; bytes: number }> {
+async function copyAndHash(entry: SourceEntry, stagePath: string, signal: AbortSignal, checkActive: () => void): Promise<{ sha256: string; bytes: number }> {
   let output: FileHandle | undefined;
   try {
     output = await open(stagePath, "wx", 0o600);
     const hash = createHash("sha256");
     let bytes = 0;
-    for await (const value of entry.file.createReadStream({ autoClose: false, start: 0 })) {
+    for await (const value of entry.file.createReadStream({ autoClose: false, start: 0, signal })) {
+      checkActive();
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      if (bytes + chunk.length > MAX_IMPORT_BYTES) fail("SOURCE_TOO_LARGE", "source exceeds the 256 MiB local import limit");
       hash.update(chunk);
       let offset = 0;
       while (offset < chunk.length) {
@@ -257,10 +303,12 @@ async function copyAndHash(entry: SourceEntry, stagePath: string): Promise<{ sha
       bytes += chunk.length;
     }
     await output.sync();
+    checkActive();
     const copiedStat = await output.stat({ bigint: true });
     if (copiedStat.size !== BigInt(bytes) || bytes === 0) fail("STORAGE_FAILED", "staged source bytes are incomplete");
     return { sha256: hash.digest("hex"), bytes };
   } catch (error) {
+    if (signal.aborted) checkActive();
     if (error instanceof LocalImportError) throw error;
     return fail("STORAGE_FAILED", "source could not be staged safely");
   } finally {
@@ -268,10 +316,13 @@ async function copyAndHash(entry: SourceEntry, stagePath: string): Promise<{ sha
   }
 }
 
-function probeMedia(path: string, ffprobePath: string): ProbeResult {
+function probeMedia(path: string, ffprobePath: string, signal: AbortSignal, checkActive: () => void): ProbeResult {
+  checkActive();
   const result = spawnSync(ffprobePath, [
     "-v", "error", "-show_format", "-show_streams", "-of", "json", path,
-  ], { encoding: "utf8", windowsHide: true, shell: false, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 });
+  ], { encoding: "utf8", windowsHide: true, shell: false, timeout: FFPROBE_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 });
+  checkActive();
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") fail("IMPORT_TIMEOUT", "media probing exceeded its 15 second limit");
   if (result.error || result.status !== 0 || !result.stdout) fail("MEDIA_PROBE_FAILED", "media could not be probed");
 
   let parsed: unknown;
@@ -308,11 +359,17 @@ function probeMedia(path: string, ffprobePath: string): ProbeResult {
   const height = positiveInteger(video?.height);
   if (type === "uploaded_video" && (width === undefined || height === undefined)) fail("UNSUPPORTED_MEDIA", "video stream dimensions are missing");
   if (type === "image" && (width === undefined || height === undefined)) fail("UNSUPPORTED_MEDIA", "image dimensions are missing");
+  if (durationMs !== undefined && durationMs > MAX_MEDIA_DURATION_MS) fail("UNSUPPORTED_MEDIA", "media exceeds the 10 minute local import limit");
+  if (width !== undefined && width > MAX_MEDIA_DIMENSION || height !== undefined && height > MAX_MEDIA_DIMENSION) fail("UNSUPPORTED_MEDIA", "media dimensions exceed the local import limit");
+  if (width !== undefined && height !== undefined && width * height > MAX_MEDIA_PIXELS) fail("UNSUPPORTED_MEDIA", "media pixel count exceeds the local import limit");
+  const fps = positiveRational(video?.avg_frame_rate) ?? positiveRational(video?.r_frame_rate);
+  if (fps !== undefined && fps > MAX_MEDIA_FPS) fail("UNSUPPORTED_MEDIA", "media frame rate exceeds the local import limit");
+  const channels = positiveInteger(audio?.channels);
+  if (channels !== undefined && channels > MAX_AUDIO_CHANNELS) fail("UNSUPPORTED_MEDIA", "audio channel count exceeds the local import limit");
+  const sampleRateHz = positiveInteger(audio?.sample_rate);
+  if (sampleRateHz !== undefined && sampleRateHz > MAX_SAMPLE_RATE_HZ) fail("UNSUPPORTED_MEDIA", "audio sample rate exceeds the local import limit");
 
   try {
-    const fps = positiveRational(video?.avg_frame_rate) ?? positiveRational(video?.r_frame_rate);
-    const channels = positiveInteger(audio?.channels);
-    const sampleRateHz = positiveInteger(audio?.sample_rate);
     const probe = MediaProbeV2Schema.parse({
       ...(durationMs ? { durationMs } : {}),
       ...(width ? { width } : {}),
@@ -326,6 +383,26 @@ function probeMedia(path: string, ffprobePath: string): ProbeResult {
     return { type, probe };
   } catch {
     fail("MEDIA_PROBE_FAILED", "media probe returned invalid technical facts");
+  }
+}
+
+function decodeMedia(path: string, ffmpegPath: string, probe: MediaProbeV2, signal: AbortSignal, checkActive: () => void): void {
+  checkActive();
+  const result = spawnSync(ffmpegPath, [
+    "-hide_banner", "-v", "error", "-xerror", "-nostdin", "-max_alloc", "268435456", "-err_detect", "explode", "-threads", "1",
+    "-i", path, "-map", "0:v?", "-map", "0:a?", "-progress", "pipe:1", "-nostats", "-f", "null", "-",
+  ], { encoding: "utf8", windowsHide: true, shell: false, timeout: MEDIA_CHECK_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 });
+  checkActive();
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") fail("IMPORT_TIMEOUT", "media decoding exceeded its 30 second limit");
+  if (result.error || result.status !== 0) fail("MEDIA_DECODE_FAILED", "media failed full decode validation");
+
+  if (probe.durationMs === undefined) return;
+  const progress = [...result.stdout.matchAll(/^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)$/gm)].at(-1);
+  if (!progress) fail("MEDIA_DECODE_FAILED", "media decode did not report its completed duration");
+  const decodedSeconds = Number(progress[1]) * 3_600 + Number(progress[2]) * 60 + Number(progress[3]);
+  const frameTolerance = probe.fps ? 2 / probe.fps : 0.05;
+  if (!Number.isFinite(decodedSeconds) || decodedSeconds + Math.max(frameTolerance, 0.05) < probe.durationMs / 1000) {
+    fail("MEDIA_DECODE_FAILED", "media decode ended before the probed duration");
   }
 }
 
@@ -348,8 +425,9 @@ function positiveRational(value: unknown): number | undefined {
   return Number.isFinite(result) && result > 0 ? result : undefined;
 }
 
-async function promoteImmutable(stagePath: string, finalPath: string, sha256: string): Promise<{ created: boolean }> {
+async function promoteImmutable(stagePath: string, finalPath: string, sha256: string, signal: AbortSignal, checkActive: () => void): Promise<{ created: boolean }> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
+    checkActive();
     let linked = false;
     try {
       await link(stagePath, finalPath);
@@ -379,23 +457,29 @@ async function promoteImmutable(stagePath: string, finalPath: string, sha256: st
       await new Promise((done) => setTimeout(done, 25));
       continue;
     }
-    if (await hashExistingFile(finalPath) !== sha256) fail("STORAGE_FAILED", "existing content-addressed media has a different hash");
+    if (await hashExistingFile(finalPath, signal, checkActive) !== sha256) fail("STORAGE_FAILED", "existing content-addressed media has a different hash");
+    await unlink(stagePath).catch(() => fail("STORAGE_FAILED", "duplicate staging bytes could not be cleaned"));
     return { created: false };
   }
   fail("STORAGE_FAILED", "content-addressed media publication did not settle");
 }
 
-async function hashExistingFile(path: string): Promise<string> {
+async function hashExistingFile(path: string, signal: AbortSignal, checkActive: () => void): Promise<string> {
   let file: FileHandle | undefined;
   try {
+    checkActive();
     const before = await lstat(path, { bigint: true });
     if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1n) fail("STORAGE_FAILED", "existing media is not a regular immutable file");
     file = await open(path, sourceFlags());
     const opened = await file.stat({ bigint: true });
     if (!sameFile(before, opened)) fail("STORAGE_FAILED", "existing media changed during validation");
     const hash = createHash("sha256");
-    for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk as Buffer);
+    for await (const chunk of file.createReadStream({ autoClose: false, start: 0, signal })) {
+      checkActive();
+      hash.update(chunk as Buffer);
+    }
     const after = await file.stat({ bigint: true });
+    checkActive();
     if (!sameSnapshot(opened, after)) fail("STORAGE_FAILED", "existing media changed during validation");
     return hash.digest("hex");
   } finally {
@@ -416,13 +500,14 @@ async function removePromoted(path: string): Promise<void> {
   });
 }
 
-async function withLock<T>(key: string, action: () => Promise<T>): Promise<T> {
+async function withLock<T>(key: string, action: () => Promise<T>, checkActive: () => void): Promise<T> {
   const previous = hashLocks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolveLock) => { release = resolveLock; });
   hashLocks.set(key, current);
   await previous;
   try {
+    checkActive();
     return await action();
   } finally {
     release();
