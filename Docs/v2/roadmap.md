@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. PR-D's code head `5b7ec36` closes Phase 4 with a NO-GO for the runtime ffmpeg-skill adapter and implements a technically validated bounded Phase 5 composition profile. Gates A, B, and C passed their bounded technical evidence. Gate D remains open for motion quality and human review; live-provider behavior, human usefulness, and production readiness remain unproven.
+**Status:** PR-A through PR-D are merged to `main` at `2dc4035`. Gates A-C and Phase 5's technical composition gate passed. Phase 4 closed with NO-GO for runtime ffmpeg-skill adoption. V2-601 returned PARTIAL-GO for two bounded motion candidates behind a separate `MotionBackend`; V2-602 is scoped to `camera-push.v1` and is not implemented. Gate D remains open for motion quality and human review; live-provider behavior and production readiness remain unproven.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
@@ -15,7 +15,7 @@ The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve t
 | 3 | Agent inspection/edit loop | Model can ground and revise the same project | Initial and follow-up edits replay | Spend on bounded model calls only |
 | 4 | Chosen media evidence adapter | Approved read-only measurements reduce evidence work safely | Native path already covers the useful Phase 2 subset; no measurable advantage was established | **NO-GO for this POC; keep the native provider** |
 | 5 | Rich 2D composition | Output is useful, not merely valid | Multi-asset/audio/caption demo passes | Limit breadth to demo needs |
-| 6 | Motion backend | One or two impressive reusable treatments | Human-reviewed preset demo plus legal gate | Prioritize one strong effect |
+| 6 | Motion backend | One or two impressive reusable treatments | Human-reviewed preset demo plus legal gate | PARTIAL-GO for the FFmpeg-backed `MotionBackend`; implement `camera-push` first and defer `title-reveal`; see [`motion-spike-report.md`](motion-spike-report.md) |
 | 7 | Local executor and transport | Early domain contracts become a usable asynchronous local workflow | Same hashes through CLI/service; cancellation works | Implement after frontend can already mock |
 | 8 | Cloud render spike | Same semantics can execute remotely | Measured cost/isolation/result parity | Optional; only with remaining budget |
 | 9 | Mixed-media recapture | Differentiation survives V2 | Unrelated upload/edit state preserved | Required architectural proof |

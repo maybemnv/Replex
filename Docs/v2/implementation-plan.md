@@ -1,6 +1,6 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62beccbba2b797e01322299544e3e36599b65f7`; Gates A, B, and C passed bounded technical evidence. Live-provider success, human usefulness, motion quality, and production readiness remain unproven.
+**Status:** PR-A through PR-D are merged to `main` at `2dc4035f9b847a0c78152a43ea3d8324045d7df0`. Gates A, B, and C passed bounded technical evidence; Phase 5's composition render gate passed. Phase 4 closed with NO-GO for runtime ffmpeg-skill adoption. V2-601 returned PARTIAL-GO for two bounded Replex-owned motion candidates, with FFmpeg as the initial replaceable `MotionBackend` implementation. V2-602 is scoped to `camera-push.v1`; `title-reveal` is deferred. Gate D remains open for motion implementation and human review. Live-provider success and production readiness remain unproven.
 
 **PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
 
@@ -11,6 +11,8 @@
 **PR-D Phase 4 decision (25 September 2026):** **NO-GO for a runtime ffmpeg-skill evidence adapter in this POC.** The native `src/media-evidence.ts` path already generates the useful approved evidence subset used by bounded V2 inspection. The pinned spike's tiny synthetic samples did not establish a parity or performance advantage, while its dynamic capabilities, command-bearing failure payloads, Windows `drawtext` crash, and process/path constraints would add a second execution boundary. Keep `src/media-evidence.ts` as the selected provider and retain V2-150's `PARTIAL-GO` as research evidence only. See [ADR-008](../architecture/ADR-008-native-v2-evidence-provider.md).
 
 **PR-D Phase 5 validation (25 September 2026, candidate `5b7ec36`):** V2-501 implements a bounded native composition profile: one or two contiguous video clips, optional audio, timed title and picture-in-picture image layers, cut/crossfade, reframing, speed, opacity, and audio controls. A frozen v2 execution job carries authorized asset handles and derived output duration; the backend verifies all inputs and the resulting artifact without mutating canonical state. The agent can propose typed composition operations and render previews through the same reducer. Independent review found no blockers. `npm run build`, the focused composition suite (5/5), `git diff --check origin/main...HEAD`, and the final serial suite (37/37 files, 270/270 tests, zero skips; 252.45 seconds) passed with FFmpeg/FFprobe 9.0.1. The default WinGet links were inaccessible in the sandbox; the final suite used their direct executable paths with scoped elevation. No GitHub CI result is claimed. Phase 5 technical evidence is complete; Gate D remains open pending motion quality and human review.
+
+**Phase 6 V2-601 decision (25 September 2026):** **PARTIAL-GO** for `camera-push` and `title-reveal` behind ADR-002's separate `MotionBackend` boundary, using FFmpeg as the first replaceable implementation; **NO-GO** for adding Remotion in this POC. A 640 x 360 synthetic render showed same-environment repeat-hash, audio, and ProRes alpha support, but color tags, cancellation, cross-platform repeatability, representative performance, and human quality remain untested. The recorded render timings are anecdotal; hardware and measurement method were not retained. The evidence, current license review, and limits are in the [motion spike report](motion-spike-report.md). V2-602 starts with `camera-push.v1`; Gate D stays open until the implemented treatment receives human review.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -269,14 +271,14 @@ The current planner handles one uploaded video clip and supports trim, speed, cr
 
 ### V2-602: Implement versioned motion presets
 
-- **Objective:** Deliver a small reusable set, starting with the strongest one or two effects rather than all candidates.
-- **Why:** Maximize visible POC evidence per rupee.
-- **Dependencies:** V2-601 GO.
-- **Likely files:** `src/backends/motion-*`, preset registry/schema, RenderJob compositor, fixtures/tests.
-- **Contracts:** `apply_motion_preset`; allowlisted parameters; preset ID/version; expanded canonical keyframes where feasible.
-- **Migration concerns:** Existing preset instances retain version; upgrades are explicit operations.
-- **Tests:** parameter bounds, repeatability, preview/export agreement, intermediate mux, backend absence, visual regression frames.
-- **Acceptance:** Agent applies a preset through the reducer and produces a human-reviewed polished output without backend code in project state.
+- **Objective:** Implement the bounded `camera-push.v1` preset first; keep `title-reveal` deferred unless later evidence justifies a second implementation.
+- **Why:** Prove one visible, programmable treatment with the least new motion/rendering machinery.
+- **Dependencies:** V2-601's PARTIAL-GO and [ADR-010](../architecture/ADR-010-v2-motion-presets.md). Keep `MotionBackend` replaceable and distinct from `MediaBackend`; using FFmpeg for both does not merge their jobs or semantics.
+- **Likely files:** `src/schema-v2.ts`, `src/operations-v2.ts`, `src/motion-v2.ts`, `src/render-v2.ts`, `src/inspect-v2.ts`, `src/agent-v2.ts`, fixtures/tests.
+- **Contracts:** Optional canonical `motionPresets`; `camera-push.v1` strength from `0.02` through `0.08`, meaning a linear zoom from `1.0x` to `1.02x`-`1.08x` over clip duration; `MotionExecutionJobV1` and a separate authorized motion-artifact handle; a new composition job version for final use of motion output. Do not modify existing composition job versions or service-contract v1.
+- **Migration concerns:** Absent `motionPresets` remains absent so existing semantic hashes remain stable. Stored preset IDs/versions never upgrade implicitly.
+- **Tests:** strict target/preset bounds, replay, repeatability, post-trim/post-speed zoom timing, proof that final composition does not apply speed twice, crop/transform/opacity ordering, matching semantic motion inputs/source pins for preview and final, independent motion/final artifact verification, cancellation/cleanup, stale revision/source rejection, missing authorized handles, and existing V1/V2 render regressions.
+- **Acceptance:** The agent applies `camera-push.v1` through the shared reducer and returns a verified preview plus final export without backend code in project state. Gate D also requires a human visual review; synthetic/test renders alone do not pass it.
 - **Non-goals:** All eight candidate effects, arbitrary 3D scenes, user scripting.
 - **Rollback:** Remove preset operation/revert revision; media-only render remains valid when composition does not require motion.
 
