@@ -1,40 +1,208 @@
 import { z } from "zod";
-import { IdSchema } from "../schema.js";
-import {
-  AssetTypeSchema,
-  BrowserProvenanceSchema,
-  ClipSchema,
-  GeneratedProvenanceSchema,
-  LayerSchema,
-  MediaProbeV2Schema,
-  ProjectBriefV2Schema,
-  RenderOutputSchemaV2,
-  RevisionV2Schema,
-  TrackSchema,
-  UploadProvenanceSchema,
-  VerificationStateSchema,
-} from "../schema-v2.js";
-import {
-  OperationBatchSchema,
-  SCHEMA_RECOGNIZED_OPERATION_TYPES,
-  type Operation,
-  type OperationType,
-} from "../operations-v2.js";
 
 export const CONTRACT_VERSION = "v1" as const;
 export const ContractVersionSchema = z.literal(CONTRACT_VERSION);
 export type ContractVersion = z.infer<typeof ContractVersionSchema>;
 
 const text = z.string().trim().min(1);
-const boundedText = text.max(2000);
 const datetime = z.string().datetime({ offset: true });
+const IdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "invalid stable ID");
+const milliseconds = z.number().int().finite().nonnegative();
+const finite = z.number().finite();
+const positiveNumber = finite.positive();
+const positiveInteger = z.number().int().finite().positive();
+const unitInterval = finite.min(0).max(1);
+const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedIdempotencyKey = z.string().trim().min(1).max(128);
 const unsafePublicPath = /(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|(?:^|[\s"'(=])\/(?:[^\s/]+\/)+[^\s/]*|\bhttps?:\/\/[^\s/]*@)/i;
 const secretAssignment = /["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie|aws_access_key_id|aws_secret_access_key|aws_session_token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|(?:Bearer\s+)?[^\s,;}"']+)/i;
 function hasUnsafePublicDetail(value: string): boolean {
   return unsafePublicPath.test(value) || secretAssignment.test(value) || /\bBearer\s+[A-Za-z0-9._~+/-]+=*/i.test(value);
 }
-const publicErrorText = boundedText.max(4000).refine((value) => !hasUnsafePublicDetail(value), "public error text must not contain host paths or secret-shaped details");
+const safePublicText = (maxLength: number) => text.max(maxLength).refine((value) => !hasUnsafePublicDetail(value), "public text must not contain host paths or secret-shaped details");
+const publicErrorText = safePublicText(4000);
+
+// Frozen wire v1 projections. External changes require a deliberate contract version bump.
+function isScopedReference(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/");
+  const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(normalized);
+  const safeObjectRef = /^object:\/\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(normalized);
+  return normalized !== "."
+    && !normalized.startsWith("/")
+    && !/^[A-Za-z]:/.test(normalized)
+    && !normalized.split("/").includes("..")
+    && !/%(?:2e|2f|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(normalized)
+    && (!hasScheme || safeObjectRef)
+    && !normalized.includes("\0");
+}
+
+const scopedReference = text.refine(isScopedReference, "reference must stay within an authorized project or object namespace");
+const projectBriefV1Schema = z.object({
+  audience: text.optional(),
+  message: text.optional(),
+  targetDurationMs: milliseconds.optional(),
+}).strict();
+const mediaProbeV1Schema = z.object({
+  durationMs: milliseconds.optional(),
+  width: positiveInteger.optional(),
+  height: positiveInteger.optional(),
+  fps: positiveNumber.optional(),
+  videoCodec: text.optional(),
+  audioCodec: text.optional(),
+  channels: positiveInteger.optional(),
+  sampleRateHz: positiveInteger.optional(),
+}).strict();
+const assetTypeV1Schema = z.enum(["browser_capture", "uploaded_video", "image", "audio", "generated_graphic"]);
+const browserProvenanceV1Schema = z.object({
+  kind: z.literal("browser"),
+  flowId: IdSchema,
+  sceneKey: IdSchema,
+  actionIds: z.array(IdSchema).min(1).max(1000),
+  checkpointActionId: IdSchema,
+  runId: IdSchema,
+  capturedAt: datetime,
+  predecessorAssetId: IdSchema.optional(),
+}).strict();
+const uploadProvenanceV1Schema = z.object({
+  kind: z.literal("upload"),
+  originalFilename: text.max(255).refine((value) => !/[\\/:\0-\x1f]/.test(value), "filename must not contain a path or control characters"),
+  importedAt: datetime,
+  sourceSha256: sha256,
+  importMethod: z.enum(["file_picker", "path", "upload"]),
+  originalProbe: mediaProbeV1Schema,
+}).strict();
+const generatedProvenanceV1Schema = z.object({
+  kind: z.literal("generated"),
+  generator: text,
+  generatedAt: datetime,
+  inputRefs: z.array(IdSchema).max(1000),
+}).strict();
+const cropV1Schema = z.object({
+  x: unitInterval,
+  y: unitInterval,
+  width: finite.positive().max(1),
+  height: finite.positive().max(1),
+}).strict().superRefine((value, context) => {
+  if (value.x + value.width > 1) context.addIssue({ code: "custom", path: ["width"], message: "crop must remain inside normalized bounds" });
+  if (value.y + value.height > 1) context.addIssue({ code: "custom", path: ["height"], message: "crop must remain inside normalized bounds" });
+});
+const transformV1Schema = z.object({
+  x: finite,
+  y: finite,
+  scale: positiveNumber,
+  rotation: finite,
+  anchorX: unitInterval,
+  anchorY: unitInterval,
+}).strict();
+const transitionV1Schema = z.object({
+  type: z.enum(["cut", "crossfade"]),
+  durationMs: milliseconds,
+}).strict().superRefine((value, context) => {
+  if (value.type === "cut" && value.durationMs !== 0) context.addIssue({ code: "custom", path: ["durationMs"], message: "cut duration must be zero" });
+  if (value.type === "crossfade" && value.durationMs === 0) context.addIssue({ code: "custom", path: ["durationMs"], message: "crossfade duration must be positive" });
+});
+const clipViewV1Schema = z.object({
+  id: IdSchema,
+  assetId: IdSchema,
+  trackId: IdSchema,
+  timelineStartMs: milliseconds,
+  sourceInMs: milliseconds,
+  sourceOutMs: milliseconds,
+  speed: finite.positive().min(0.25).max(4),
+  transform: transformV1Schema,
+  crop: cropV1Schema.optional(),
+  opacity: unitInterval,
+  audioGainDb: finite,
+  muted: z.boolean().default(false),
+  transitionOut: transitionV1Schema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.sourceOutMs <= value.sourceInMs) context.addIssue({ code: "custom", path: ["sourceOutMs"], message: "clip source range must be positive" });
+  if (value.transitionOut && value.transitionOut.durationMs >= (value.sourceOutMs - value.sourceInMs) / value.speed) {
+    context.addIssue({ code: "custom", path: ["transitionOut", "durationMs"], message: "transition must be shorter than the clip" });
+  }
+});
+const textLayerPropertiesV1Schema = z.object({
+  text,
+  fontFamily: text.optional(),
+  fontSize: positiveNumber.optional(),
+  color: text.optional(),
+}).strict();
+const imageLayerPropertiesV1Schema = z.object({ assetId: IdSchema }).strict();
+const graphicLayerPropertiesV1Schema = z.object({ assetId: IdSchema }).strict();
+const keyframeV1Schema = z.object({
+  id: IdSchema.optional(),
+  property: z.enum(["position", "scale", "rotation", "opacity", "crop", "blur", "camera"]),
+  timeMs: milliseconds,
+  value: z.union([finite, cropV1Schema]),
+  interpolation: z.enum(["linear", "ease_in", "ease_out", "ease_in_out"]),
+}).strict().superRefine((value, context) => {
+  if (value.property === "crop" && typeof value.value === "number") context.addIssue({ code: "custom", path: ["value"], message: "crop keyframes require crop bounds" });
+  if (value.property !== "crop" && typeof value.value !== "number") context.addIssue({ code: "custom", path: ["value"], message: "numeric keyframes require a numeric value" });
+});
+const layerViewV1Schema = z.object({
+  id: IdSchema,
+  trackId: IdSchema,
+  kind: z.enum(["text", "image", "graphic"]),
+  timelineStartMs: milliseconds,
+  durationMs: positiveInteger,
+  properties: z.union([textLayerPropertiesV1Schema, imageLayerPropertiesV1Schema, graphicLayerPropertiesV1Schema]),
+  keyframes: z.array(keyframeV1Schema).max(100_000),
+}).strict().superRefine((value, context) => {
+  const expectedKind = value.kind === "text" ? textLayerPropertiesV1Schema : value.kind === "image" ? imageLayerPropertiesV1Schema : graphicLayerPropertiesV1Schema;
+  if (!expectedKind.safeParse(value.properties).success) context.addIssue({ code: "custom", path: ["properties"], message: `layer kind ${value.kind} requires matching properties` });
+  const seen = new Set<string>();
+  for (const [index, keyframe] of value.keyframes.entries()) {
+    if (keyframe.timeMs > value.durationMs) context.addIssue({ code: "custom", path: ["keyframes", index, "timeMs"], message: "keyframe must fit within layer timing" });
+    const key = `${keyframe.property}:${keyframe.timeMs}`;
+    if (seen.has(key)) context.addIssue({ code: "custom", path: ["keyframes", index], message: "keyframe property and time must be unique" });
+    seen.add(key);
+  }
+});
+const trackViewV1Schema = z.object({
+  id: IdSchema,
+  kind: z.enum(["video", "audio", "overlay"]),
+  order: z.number().int().finite().nonnegative(),
+  muted: z.boolean(),
+  locked: z.boolean(),
+}).strict();
+const revisionViewV1Schema = z.object({
+  id: IdSchema,
+  parentId: IdSchema.optional(),
+  actor: z.enum(["user", "agent", "recapture", "migration"]),
+  operationIds: z.array(IdSchema).max(100_000),
+  manifestSha256: sha256,
+  createdAt: datetime,
+  isCurrent: z.boolean(),
+}).strict();
+const verificationRefV1Schema = z.object({
+  id: IdSchema,
+  revisionId: IdSchema,
+  status: z.enum(["passed", "failed"]),
+  evidenceRefs: z.array(scopedReference).max(1000),
+}).strict();
+const verificationViewV1Schema = z.object({
+  revisionId: IdSchema,
+  status: z.enum(["unknown", "stale", "passed", "failed"]),
+  refs: z.array(verificationRefV1Schema).max(100_000),
+}).strict().superRefine((value, context) => {
+  const ids = new Set<string>();
+  for (const [index, ref] of value.refs.entries()) {
+    if (ids.has(ref.id)) context.addIssue({ code: "custom", path: ["refs", index, "id"], message: "verification reference IDs must be unique" });
+    ids.add(ref.id);
+  }
+});
+const renderArtifactViewV1Schema = z.object({
+  outputId: IdSchema,
+  ref: scopedReference,
+  sha256,
+  renderJobHash: sha256,
+  probe: mediaProbeV1Schema,
+  sourceRevisionId: IdSchema,
+  revisionId: IdSchema.optional(),
+  backendId: text,
+  backendVersion: text,
+  verificationRefId: IdSchema,
+}).strict();
 
 export const CommandMetaSchema = z.object({
   contractVersion: ContractVersionSchema,
@@ -61,7 +229,7 @@ export type RevisionReadMeta = z.infer<typeof RevisionReadMetaSchema>;
 export const ProjectSummarySchema = z.object({
   projectId: IdSchema,
   projectSchemaVersion: z.literal(2),
-  brief: ProjectBriefV2Schema,
+  brief: projectBriefV1Schema,
   currentRevisionId: IdSchema,
   assetCount: z.number().int().nonnegative().max(100_000),
   durationMs: z.number().int().nonnegative().max(86_400_000),
@@ -71,26 +239,27 @@ export const ProjectSummarySchema = z.object({
 
 export const AssetViewSchema = z.object({
   id: IdSchema,
-  type: AssetTypeSchema,
-  sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  probe: MediaProbeV2Schema,
+  type: assetTypeV1Schema,
+  sha256,
+  probe: mediaProbeV1Schema,
   provenance: z.discriminatedUnion("kind", [
-    BrowserProvenanceSchema,
-    UploadProvenanceSchema.extend({
-      originalFilename: text.max(255).refine((value) => !/[\\/:\0-\x1f]/.test(value), "filename must not contain a path or control characters"),
-    }),
-    GeneratedProvenanceSchema,
+    browserProvenanceV1Schema,
+    uploadProvenanceV1Schema,
+    generatedProvenanceV1Schema,
   ]),
-}).strict();
+}).strict().superRefine((asset, context) => {
+  const expectedKind = asset.type === "browser_capture" ? "browser" : asset.type === "generated_graphic" ? "generated" : "upload";
+  if (asset.provenance.kind !== expectedKind) {
+    context.addIssue({ code: "custom", path: ["provenance", "kind"], message: `${asset.type} assets require ${expectedKind} provenance` });
+  }
+});
 
-export const ClipViewSchema = ClipSchema;
-export const LayerViewSchema = LayerSchema;
-export const TrackViewSchema = TrackSchema;
-export const RevisionViewSchema = RevisionV2Schema.extend({
-  isCurrent: z.boolean(),
-}).strict();
-export const VerificationViewSchema = VerificationStateSchema;
-export const RenderArtifactViewSchema = RenderOutputSchemaV2;
+export const ClipViewSchema = clipViewV1Schema;
+export const LayerViewSchema = layerViewV1Schema;
+export const TrackViewSchema = trackViewV1Schema;
+export const RevisionViewSchema = revisionViewV1Schema;
+export const VerificationViewSchema = verificationViewV1Schema;
+export const RenderArtifactViewSchema = renderArtifactViewV1Schema;
 
 export const ProjectSnapshotSchema = z.object({
   summary: ProjectSummarySchema,
@@ -198,10 +367,42 @@ export const JobKindSchema = z.enum([
   "render_final",
 ]);
 
-const operationTypeSchema = z.custom<OperationType>(
-  (value) => typeof value === "string" && SCHEMA_RECOGNIZED_OPERATION_TYPES.includes(value as OperationType),
-  "unknown semantic operation type",
-);
+const serviceOperationTypesV1 = [
+  "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip", "remove_clip", "replace_asset",
+  "set_transform", "set_opacity", "set_speed", "set_transition", "add_text_layer", "update_text_layer",
+  "add_image_layer", "remove_layer", "set_volume", "mute_clip", "animate_property", "apply_motion_preset",
+] as const;
+const operationTypeSchema = z.enum(serviceOperationTypesV1);
+
+// Import and recapture use their service commands; edit batches carry only user-facing semantic operations.
+export const SemanticOperationV1Schema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("remove_asset"), assetId: IdSchema }).strict(),
+  z.object({ type: z.literal("create_clip"), clip: ClipViewSchema }).strict(),
+  z.object({ type: z.literal("split_clip"), clipId: IdSchema, atTimelineMs: milliseconds, newClipId: IdSchema }).strict(),
+  z.object({ type: z.literal("trim_clip"), clipId: IdSchema, sourceInMs: milliseconds, sourceOutMs: milliseconds }).strict(),
+  z.object({ type: z.literal("move_clip"), clipId: IdSchema, timelineStartMs: milliseconds, trackId: IdSchema.optional() }).strict(),
+  z.object({ type: z.literal("remove_clip"), clipId: IdSchema }).strict(),
+  z.object({ type: z.literal("replace_asset"), clipId: IdSchema, assetId: IdSchema }).strict(),
+  z.object({ type: z.literal("set_transform"), clipId: IdSchema, transform: transformV1Schema, crop: cropV1Schema.optional() }).strict(),
+  z.object({ type: z.literal("set_opacity"), clipId: IdSchema.optional(), layerId: IdSchema.optional(), opacity: unitInterval }).strict().superRefine((value, context) => {
+    if ((value.clipId === undefined) === (value.layerId === undefined)) context.addIssue({ code: "custom", path: ["clipId"], message: "set_opacity requires exactly one clipId or layerId" });
+  }),
+  z.object({ type: z.literal("set_speed"), clipId: IdSchema, speed: finite.min(0.25).max(4) }).strict(),
+  z.object({ type: z.literal("set_transition"), clipId: IdSchema, transition: transitionV1Schema }).strict(),
+  z.object({ type: z.literal("add_text_layer"), layer: LayerViewSchema }).strict().superRefine((value, context) => {
+    if (value.layer.kind !== "text") context.addIssue({ code: "custom", path: ["layer", "kind"], message: "text layer operation requires a text layer" });
+  }),
+  z.object({ type: z.literal("update_text_layer"), layerId: IdSchema, properties: textLayerPropertiesV1Schema }).strict(),
+  z.object({ type: z.literal("add_image_layer"), layer: LayerViewSchema }).strict().superRefine((value, context) => {
+    if (value.layer.kind !== "image") context.addIssue({ code: "custom", path: ["layer", "kind"], message: "image layer operation requires an image layer" });
+  }),
+  z.object({ type: z.literal("remove_layer"), layerId: IdSchema }).strict(),
+  z.object({ type: z.literal("set_volume"), clipId: IdSchema, audioGainDb: finite }).strict(),
+  z.object({ type: z.literal("mute_clip"), clipId: IdSchema, muted: z.boolean() }).strict(),
+  z.object({ type: z.literal("animate_property"), layerId: IdSchema, keyframes: z.array(keyframeV1Schema).min(1).max(1000) }).strict(),
+  z.object({ type: z.literal("apply_motion_preset"), targetId: IdSchema, presetId: IdSchema, presetVersion: text, parameters: z.record(z.string(), finite).optional() }).strict(),
+]);
+export const SemanticOperationBatchV1Schema = z.array(SemanticOperationV1Schema).min(1);
 
 const unique = <T>(values: T[]): boolean => new Set(values).size === values.length;
 
@@ -209,8 +410,8 @@ export const CapabilitySetSchema = z.object({
   contractVersion: ContractVersionSchema,
   target: z.enum(["local", "cloud"]),
   availableCommands: z.array(ServiceCommandSchema).max(12),
-  availableOperations: z.array(operationTypeSchema).max(22),
-  assetTypes: z.array(AssetTypeSchema).max(5),
+  availableOperations: z.array(operationTypeSchema).max(serviceOperationTypesV1.length),
+  assetTypes: z.array(assetTypeV1Schema).max(5),
   jobKinds: z.array(JobKindSchema).max(8),
   cancellationSupported: z.boolean(),
   credentialActions: z.array(z.literal("secure_browser_flow")).max(1),
@@ -247,7 +448,7 @@ export const CapabilitySetSchema = z.object({
 
 export const CreateProjectRequestSchema = CommandMetaSchema.extend({
   name: text.max(120),
-  brief: ProjectBriefV2Schema.optional(),
+  brief: projectBriefV1Schema.optional(),
 }).strict();
 
 // Opening a project is pinned to a concrete revision; callers use a summary to choose it.
@@ -285,7 +486,7 @@ export const RequestAgentEditSchema = RequestAgentEditRequestSchema;
 
 export const ApplyOperationsRequestSchema = RevisionCommandMetaSchema.extend({
   actor: z.enum(["user", "agent"]),
-  operations: OperationBatchSchema,
+  operations: SemanticOperationBatchV1Schema,
 }).strict();
 
 export const VerifyRevisionRequestSchema = RevisionReadMetaSchema;
@@ -342,16 +543,16 @@ export const ErrorSchema = z.object({
 
 export const JobInputOptionSchema = z.object({
   id: IdSchema,
-  label: text.max(120),
-  description: text.max(500).optional(),
+  label: safePublicText(120),
+  description: safePublicText(500).optional(),
 }).strict();
 
 const jobInputBase = {
   id: IdSchema,
   jobId: IdSchema,
   expectedRevisionId: IdSchema,
-  title: text.max(120),
-  message: boundedText,
+  title: safePublicText(120),
+  message: safePublicText(2000),
   expiresAt: datetime.optional(),
 };
 
@@ -378,7 +579,7 @@ export const JobInputResponseSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("browser_approval"), approved: z.boolean() }).strict(),
   z.object({ type: z.literal("missing_media"), source: z.object({ kind: z.enum(["local_token", "upload_session"]), ref: IdSchema }).strict() }).strict(),
   z.object({ type: z.literal("user_choice"), optionId: IdSchema }).strict(),
-  z.object({ type: z.literal("clarification"), text: boundedText }).strict(),
+  z.object({ type: z.literal("clarification"), text: safePublicText(2000) }).strict(),
   CredentialActionSchema,
   z.object({ type: z.literal("conflict_resolution"), action: z.enum(["refresh", "cancel"]) }).strict(),
 ]);
@@ -618,5 +819,5 @@ export type JobInputSubmissionResult = z.infer<typeof JobInputSubmissionResultSc
 export type JobEvent = z.infer<typeof JobEventSchema>;
 export type ProjectEvent = JobEvent;
 export type CancelJobResponse = z.infer<typeof CancelJobResponseSchema>;
-export type SemanticOperation = Operation;
-export type SemanticOperationType = OperationType;
+export type SemanticOperation = z.infer<typeof SemanticOperationV1Schema>;
+export type SemanticOperationType = z.infer<typeof operationTypeSchema>;

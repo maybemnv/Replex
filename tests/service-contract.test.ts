@@ -126,6 +126,15 @@ describe("transport-independent service contract", () => {
       ...asset,
       provenance: { ...asset.provenance, originalFilename: "C:\\Users\\Manav\\secret\\logo.png" },
     }).success).toBe(false);
+    expect(AssetViewSchema.safeParse({
+      ...asset,
+      provenance: { ...asset.provenance, originalFilename: "/home/alice/private/logo.png" },
+    }).success).toBe(false);
+    expect(AssetViewSchema.safeParse({
+      ...asset,
+      provenance: { ...asset.provenance, originalFilename: "file:///home/alice/private/logo.png" },
+    }).success).toBe(false);
+    expect(AssetViewSchema.safeParse({ ...asset, type: "browser_capture" }).success).toBe(false);
   });
 
   it("keeps v1 view and operation schemas independent from mutable V2 domain schemas", () => {
@@ -288,6 +297,7 @@ describe("transport-independent service contract", () => {
     expect(ErrorSchema.safeParse({ ...error, trace: "internal" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, code: "PATH_FAILURE", message: "Cannot open C:\\Users\\Alice\\private\\clip.mp4" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Request failed access_token=private-token" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, message: "Cannot open file:///C:/private/clip.mp4" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: 'Request failed with {"password":"private-token"}' }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Cloud error AWS_ACCESS_KEY_ID=AKIA1234567890123456" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "C:\\Users\\Alice\\clip.mp4", message: "invalid" }] }).success).toBe(false);
