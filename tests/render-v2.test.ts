@@ -8,7 +8,7 @@ import { semanticHashV2 } from "../src/operations-v2.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 import { buildMediaExecutionJob, executeMediaExecutionJob, MAX_RENDER_ARTIFACT_BYTES, verifyMediaExecutionPreflight, type MediaExecutionAuthorization } from "../src/render-v2.js";
 
-const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
 const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
 const mediaToolsAvailable = spawnSync(ffmpegPath, ["-version"], { windowsHide: true, shell: false }).status === 0
@@ -324,39 +324,45 @@ describe("V2 media render planning", () => {
     expect(fixture.status, fixture.stderr?.toString()).toBe(0);
     const sourceSha256 = sha(await readFile(source));
     const localHandle = { ...handle, sha256: sourceSha256 };
-    const firstRedColumns: number[] = [];
     try {
-      for (const anchorX of [0, 0.5, 1]) {
-        const project = uploadedProject(sourceSha256, false);
-        const clip = project.composition.clips[0];
-        clip.crop = { x: 0, y: 0, width: 0.5, height: 1 };
-        clip.transform = { x: 0, y: 0, scale: 1, rotation: 0, anchorX, anchorY: 0.5 };
-        project.revisions[0].manifestSha256 = semanticHashV2(project);
-        const job = buildMediaExecutionJob(project, [localHandle]);
-        const result = await executeMediaExecutionJob(job, {
-          projectRoot: root,
-          resolvedHandles: [{ ...localHandle, path: source }],
-          isRevisionCurrent: async () => true,
-        }, { ffmpegPath, ffprobePath });
-        const outputPath = join(root, ...result.artifact.ref.split("/"));
-        const frame = spawnSync(ffmpegPath, [
-          "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "0.25", "-i", outputPath,
-          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-        ], { windowsHide: true, shell: false, timeout: 15_000, maxBuffer: 1024 * 1024 });
-        expect(frame.status, frame.stderr?.toString()).toBe(0);
-        const pixels = frame.stdout as Buffer;
-        expect(pixels.length).toBe(320 * 180 * 3);
-        let firstRed = -1;
-        for (let x = 0; x < 320; x += 1) {
-          const offset = (90 * 320 + x) * 3;
-          if (pixels[offset] > 100 && pixels[offset + 1] < 100 && pixels[offset + 2] < 100) {
-            firstRed = x;
-            break;
+      for (const { rotation, expectedPositions } of [{ rotation: 0, expectedPositions: [0, 80, 160] }, { rotation: 90, expectedPositions: [0, 70, 140] }]) {
+        const firstRedColumns: number[] = [];
+        for (const anchorX of [0, 0.5, 1]) {
+          const project = uploadedProject(sourceSha256, false);
+          const clip = project.composition.clips[0];
+          clip.crop = { x: 0, y: 0, width: 0.5, height: 1 };
+          clip.transform = { x: 0, y: 0, scale: 1, rotation, anchorX, anchorY: 0.5 };
+          project.revisions[0].manifestSha256 = semanticHashV2(project);
+          const job = buildMediaExecutionJob(project, [localHandle]);
+          expect(job.clip).toMatchObject({
+            crop: { x: 0, y: 0, width: 0.5, height: 1 },
+            transform: { x: 0, y: 0, scale: 1, rotation, anchorX, anchorY: 0.5 },
+          });
+          const result = await executeMediaExecutionJob(job, {
+            projectRoot: root,
+            resolvedHandles: [{ ...localHandle, path: source }],
+            isRevisionCurrent: async () => true,
+          }, { ffmpegPath, ffprobePath });
+          const outputPath = join(root, ...result.artifact.ref.split("/"));
+          const frame = spawnSync(ffmpegPath, [
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "0.25", "-i", outputPath,
+            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+          ], { windowsHide: true, shell: false, timeout: 15_000, maxBuffer: 1024 * 1024 });
+          expect(frame.status, frame.stderr?.toString()).toBe(0);
+          const pixels = frame.stdout as Buffer;
+          expect(pixels.length).toBe(320 * 180 * 3);
+          let firstRed = -1;
+          for (let x = 0; x < 320; x += 1) {
+            const offset = (90 * 320 + x) * 3;
+            if (pixels[offset] > 100 && pixels[offset + 1] < 100 && pixels[offset + 2] < 100) {
+              firstRed = x;
+              break;
+            }
           }
+          firstRedColumns.push(firstRed);
         }
-        firstRedColumns.push(firstRed);
+        expect(firstRedColumns).toEqual(expectedPositions);
       }
-      expect(firstRedColumns).toEqual([0, 80, 160]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

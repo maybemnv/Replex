@@ -388,7 +388,7 @@ function buildFfmpegArgs(job: JobPayload, sourcePath: string, stagedPath: string
   const opacity = numberText(clip.opacity);
   // V2 crops in normalized source space before contain-fit; anchors align the transformed clip in canvas slack.
   // x/y are signed canvas-pixel offsets applied after alignment; scale is a multiplier and rotation uses degrees.
-  const videoFilter = `[0:v]trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(iw):oh=roth(ih):c=none,colorchannelmixer=aa=${opacity}[clip]`;
+  const videoFilter = `[0:v]trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=none,colorchannelmixer=aa=${opacity}[clip]`;
   const audioInput = job.source.hasAudio ? "[0:a]" : "[2:a]";
   const audioStart = job.source.hasAudio ? seconds(clip.sourceInMs) : "0";
   const audioEnd = job.source.hasAudio ? seconds(clip.sourceOutMs) : duration;
