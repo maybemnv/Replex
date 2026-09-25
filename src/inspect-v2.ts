@@ -256,6 +256,10 @@ function projectSummary(project: ProjectV2): Record<string, unknown> {
     assetCount: Object.keys(project.assets).length,
     clipCount: project.composition.clips.length,
     trackCount: project.composition.tracks.length,
+    tracks: [...project.composition.tracks].sort((left, right) => left.order - right.order).slice(0, 32).map((track) => ({
+      trackId: safeId(track.id), kind: track.kind, order: track.order, muted: track.muted,
+    })),
+    tracksTruncated: project.composition.tracks.length > 32,
     layerCount: project.composition.layers.length,
   };
 }

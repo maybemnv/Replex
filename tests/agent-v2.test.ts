@@ -142,7 +142,7 @@ describe("V2 conversational edit thread", () => {
     expect((inspection.properties as Record<string, { maximum?: number }>).limit?.maximum).toBe(25);
     const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { enum: string[] } } }> } }).items.anyOf;
     expect(operationBranches.map(({ properties }) => properties.type.enum[0]).sort()).toEqual([
-      "mute_clip", "set_opacity", "set_speed", "set_transform", "set_volume", "trim_clip",
+      "add_image_layer", "add_text_layer", "mute_clip", "remove_layer", "set_opacity", "set_speed", "set_transform", "set_transition", "set_volume", "trim_clip", "update_text_layer",
     ]);
   });
 

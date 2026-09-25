@@ -152,7 +152,11 @@ describe("V2 bounded model inspection", () => {
     const project = fixtureProject();
     const result = success(await inspectProjectV2({ kind: "project_summary" }, context(project)));
     const serialized = JSON.stringify(result);
-    expect(result.data).toMatchObject({ projectId: "project-launch", currentRevisionId: "revision-0", composition: { durationMs: 4000 }, assetCount: 3, clipCount: 3 });
+    expect(result.data).toMatchObject({
+      projectId: "project-launch", currentRevisionId: "revision-0", composition: { durationMs: 4000 }, assetCount: 3, clipCount: 3,
+      tracks: [{ trackId: "track-video", kind: "video" }, { trackId: "track-audio", kind: "audio" }, { trackId: "track-overlay", kind: "overlay" }],
+      tracksTruncated: false,
+    });
     expect(result.evidenceRefs).toEqual([]);
     expect(serialized).not.toContain('"schemaVersion"');
     expect(serialized).not.toContain('"revisions"');
