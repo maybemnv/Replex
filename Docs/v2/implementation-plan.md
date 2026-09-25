@@ -1,8 +1,8 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation and the PR-A candidate are implemented. Gate A passed independent validation on `e38b792`; PR-A is ready for review and merge is pending. Phase 2 has not started and remains gated on PR-A merge and Gate B.
+**Status:** V2 Core Foundation and PR-A are merged to `main` at `a8feca95c26373467fc300c1b01eac583cb74e89`. Independent validation met Gate A on PR-A head `496474715369d8517f53acc79e6ca86c1c685bb6`. PR-B Phase 2 implementation is underway on `feat/v2-phase2-local-media`; Gate B has not been evaluated.
 
-**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed; no GitHub CI result was available during this review.
+**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -91,7 +91,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
-**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A at `e38b792`; see the PR-A validation record above.
+**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A on PR-A head `4964747`; the merge commit is `a8feca9`. See the PR-A validation record above.
 
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
