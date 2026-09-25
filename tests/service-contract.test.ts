@@ -233,6 +233,7 @@ describe("transport-independent service contract", () => {
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow" } }).success).toBe(true);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow", password: "secret" } }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text: "The access_token=private-token value was provided" } }).success).toBe(false);
+    expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text: "See https://example.test/help for details" } }).success).toBe(true);
   });
 
   it("validates cancellation as a request and a terminal cancelled state", () => {
@@ -296,6 +297,10 @@ describe("transport-independent service contract", () => {
     expect(ErrorSchema.safeParse({ ...error, code: "WHATEVER" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, trace: "internal" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, code: "PATH_FAILURE", message: "Cannot open C:\\Users\\Alice\\private\\clip.mp4" }).success).toBe(false);
+    for (const path of ["/", "/tmp", "/root"]) {
+      expect(ErrorSchema.safeParse({ ...error, code: "PATH_FAILURE", message: path }).success).toBe(false);
+    }
+    expect(ErrorSchema.safeParse({ ...error, message: "See https://example.test/help for details" }).success).toBe(true);
     expect(ErrorSchema.safeParse({ ...error, message: "Request failed access_token=private-token" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Cannot open file:///C:/private/clip.mp4" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: 'Request failed with {"password":"private-token"}' }).success).toBe(false);

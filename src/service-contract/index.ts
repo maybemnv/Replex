@@ -14,7 +14,7 @@ const positiveInteger = z.number().int().finite().positive();
 const unitInterval = finite.min(0).max(1);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedIdempotencyKey = z.string().trim().min(1).max(128);
-const unsafePublicPath = /(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|(?:^|[\s"'(=])\/(?:[^\s/]+\/)+[^\s/]*|\bhttps?:\/\/[^\s/]*@)/i;
+const unsafePublicPath = /(?:^|[\s"'(=])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|\/(?:[^\s"'<>]*))|\bfile:\/\/|\bhttps?:\/\/[^\s/]*@/i;
 const secretAssignment = /["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie|aws_access_key_id|aws_secret_access_key|aws_session_token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|(?:Bearer\s+)?[^\s,;}"']+)/i;
 function hasUnsafePublicDetail(value: string): boolean {
   return unsafePublicPath.test(value) || secretAssignment.test(value) || /\bBearer\s+[A-Za-z0-9._~+/-]+=*/i.test(value);
