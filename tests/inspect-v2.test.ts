@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { normalFlow } from "../fixtures/apps/normal/flow.js";
 import { inspectProjectV2, V2InspectRequestSchema, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
 import { semanticHashV2, type OperationLogRecord } from "../src/operations-v2.js";
-import { MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "../src/media-evidence.js";
+import { generateMediaEvidence, MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "../src/media-evidence.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
+import { ffmpegPath, mediaAvailable } from "./media.js";
 
 const sha = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const pngFixture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJZkAAAAASUVORK5CYII=", "base64");
@@ -52,7 +54,7 @@ function fixtureProject(): ProjectV2 {
   const project = {
     schemaVersion: 2 as const,
     projectId: "project-launch",
-    brief: { audience: "Founders", message: "Bearer top-secret; show release flow", targetDurationMs: 4000 },
+    brief: { audience: "Founders", message: "Bearer top-secret; show release flow from /mnt/data/private/launch.mp4", targetDurationMs: 4000 },
     assets: { [video.id]: video, [audio.id]: audio, [image.id]: image },
     composition: {
       width: 1920, height: 1080, fps: 30, durationMs: 4000,
@@ -158,6 +160,8 @@ describe("V2 bounded model inspection", () => {
     expect(serialized).not.toContain("private.example.test");
     expect(serialized).not.toContain("top-secret");
     expect(serialized).not.toContain("layer-secret");
+    expect(serialized).not.toContain("/mnt/data");
+    expect(serialized).toContain("[LOCAL_PATH]");
     expect(serialized).not.toContain("run-private-123");
     expect(serialized).not.toContain("media/assets/browser.mp4");
   });
@@ -413,4 +417,33 @@ describe("V2 bounded model inspection", () => {
     expect(V2InspectRequestSchema.safeParse({ kind: "media_evidence", assetId: "../private", image: "selected_frame" }).success).toBe(false);
     expect(V2InspectRequestSchema.safeParse({ kind: "clips", offset: -1 }).success).toBe(false);
   });
+
+  it.skipIf(!mediaAvailable)("projects actual generated evidence-index output into a verified image and bounded summary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-generated-"));
+    const source = join(root, "source.mp4");
+    try {
+      const encoded = spawnSync(ffmpegPath, [
+        "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=12:d=1",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", source,
+      ], { encoding: "utf8", windowsHide: true, shell: false, timeout: 30000, maxBuffer: 1024 * 1024 });
+      if (encoded.error || encoded.status !== 0) throw new Error("could not create the inspection media fixture");
+      const bytes = await import("node:fs/promises").then(({ readFile }) => readFile(source));
+      const project = fixtureProject();
+      project.assets["asset-browser"].sha256 = sha(bytes);
+      project.revisions[0].manifestSha256 = semanticHashV2(project);
+      const evidenceRoot = join(root, "owned-evidence");
+      const assetHandle = { assetId: "asset-browser", sha256: sha(bytes), ref: "media/assets/browser.mp4" };
+      const index = await generateMediaEvidence({ asset: assetHandle, evidenceRoot, resolveSource: async () => source });
+      const result = success(await inspectProjectV2(
+        { kind: "media_evidence", assetId: "asset-browser", image: "contact_sheet" },
+        context(project, { evidenceRoot, evidenceIndexes: [index] }),
+      ));
+      expect(result.data).toMatchObject({ status: "available", audio: { silenceSegmentCount: 0 }, transcriptStatus: "unavailable" });
+      expect(result.images?.[0]?.mimeType).toBe("image/jpeg");
+      expect(result.evidenceRefs).toContain(index.artifacts.find((artifact) => artifact.kind === "scene_boundaries")?.ref);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 120000);
 });
