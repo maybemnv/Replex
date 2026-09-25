@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A through PR-D are merged to `main` at `2dc4035`. Gates A-C and Phase 5's technical composition gate passed. Phase 4 closed with NO-GO for runtime ffmpeg-skill adoption. V2-601 returned PARTIAL-GO for two bounded motion candidates behind a separate `MotionBackend`; V2-602 is scoped to `camera-push.v1` and is not implemented. Gate D remains open for motion quality and human review; live-provider behavior and production readiness remain unproven.
+**Status:** PR-A through PR-D are merged to `main` at `2dc4035`. Gates A-C and Phase 5's technical composition gate passed. Phase 4 closed with NO-GO for runtime ffmpeg-skill adoption. V2-601 returned PARTIAL-GO for two bounded motion candidates behind a separate `MotionBackend`. V2-602 has an unmerged `camera-push.v1` implementation candidate on `feat/v2-602-camera-push`; the local fixture demonstrates typed revisions, a verified motion-to-composition render, and a same-thread strength follow-up. Gate D remains open for independent review and human visual/quality approval; live-provider behavior and production readiness remain unproven.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
@@ -15,7 +15,7 @@ The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve t
 | 3 | Agent inspection/edit loop | Model can ground and revise the same project | Initial and follow-up edits replay | Spend on bounded model calls only |
 | 4 | Chosen media evidence adapter | Approved read-only measurements reduce evidence work safely | Native path already covers the useful Phase 2 subset; no measurable advantage was established | **NO-GO for this POC; keep the native provider** |
 | 5 | Rich 2D composition | Output is useful, not merely valid | Multi-asset/audio/caption demo passes | Limit breadth to demo needs |
-| 6 | Motion backend | One or two impressive reusable treatments | Human-reviewed preset demo plus legal gate | PARTIAL-GO for the FFmpeg-backed `MotionBackend`; implement `camera-push` first and defer `title-reveal`; see [`motion-spike-report.md`](motion-spike-report.md) |
+| 6 | Motion backend | One or two impressive reusable treatments | Human-reviewed preset demo plus legal gate | V2-602 implements one bounded `camera-push.v1` candidate through a separate motion job and V3 composition job; direct trusted FFmpeg/FFprobe only, wrappers unsupported. Technical sample exists; Gate D is still open pending independent review and human quality approval. Defer `title-reveal`; see [`motion-spike-report.md`](motion-spike-report.md) |
 | 7 | Local executor and transport | Early domain contracts become a usable asynchronous local workflow | Same hashes through CLI/service; cancellation works | Implement after frontend can already mock |
 | 8 | Cloud render spike | Same semantics can execute remotely | Measured cost/isolation/result parity | Optional; only with remaining budget |
 | 9 | Mixed-media recapture | Differentiation survives V2 | Unrelated upload/edit state preserved | Required architectural proof |

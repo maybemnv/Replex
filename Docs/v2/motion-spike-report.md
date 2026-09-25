@@ -72,7 +72,17 @@ This POC does not incur Remotion licensing or package cost because it does not a
 
 **V2-601 result: PARTIAL-GO.** The bounded candidate list is `camera-push` and `title-reveal` (fade-in), behind the replaceable `MotionBackend` boundary, using native FFmpeg as its first implementation. V2-602 will implement `camera-push.v1` first; defer `title-reveal` because the required alpha-layer composition path has only synthetic evidence and would expand the first implementation. Keep `MediaBackend` distinct as required by ADR-002. Do not implement Remotion, 3D scenes, arbitrary component code, or additional presets in this POC.
 
-Before claiming Gate D, V2-602 must add canonical preset IDs/versions and typed bounds, semantic reducer operations, a versioned frozen motion-job boundary, preview/export parity, output verification, and cancellation checks. At least one selected treatment must then pass human review on a software-product video. The synthetic fixture is engineering evidence, not a quality verdict.
+## V2-602 implementation candidate
+
+As of 25 September 2026, the `feat/v2-602-camera-push` branch implements the bounded `camera-push.v1` candidate. Canonical state is optional and absent when unused. The reducer upserts a strict target/version/strength operation; the frozen `MotionExecutionJobV1` and replaceable `MotionBackend` stay distinct from the final composition backend. V3 composition receives only a separate executor-issued motion handle, while canonical source audio follows its regular trim/speed/gain/mute path. Existing media job versions, service-contract v1, V1 rendering, and media-only semantic hashes are unchanged.
+
+The native backend requires host-configured trusted direct FFmpeg/FFprobe binaries. Wrappers are unsupported: execution uses `shell: false`, cancellation kills and drains the direct child, and the POC does not claim general process-tree ownership. The intermediate remains in private staging only through final composition and is removed afterward. A small receipt at `.replex-evidence/motion/receipts/<artifact-id>/verification.json` remains readable; it binds the source asset ID/hash, target clip, preset/version/typed strength, source revision/hash, motion job hash, output hash/probe, backend, and FFmpeg version. Successful conversational results return typed motion execution summaries to the host; model-facing tool results contain only the verified final preview.
+
+The FFmpeg-backed fixture demonstrates a visible 6% centered push, deterministic repeat output in the same environment, preserved source SAR, silent intermediate verification, final H.264/AAC composition, and a same-thread strength follow-up. The retained local output is 55,076 bytes (SHA-256 `123E88E0239AA87C3948504E891CA3FB94844E3C7B864E93281CF3C69DEDB083`; FFprobe: H.264 320 x 180 at 24 fps, AAC, 2.0 seconds). The artifact remains only in the local temporary review workspace and is not committed.
+
+`npm run build` passed. The final serial suite passed 38 files / 288 tests with zero skips in 245.67 seconds using direct FFmpeg/FFprobe 9.0.1; the motion conversation, final render, receipt, and in-flight cancellation checks all ran. `git diff --check` passed. No GitHub CI result is claimed, and independent validation remains pending. This local synthetic evidence does not establish cross-platform bitwise repeatability, live-provider quality, or production readiness.
+
+Gate D remains open. A small human review cohort must judge the treatment on a representative software-product video before the motion quality gate can pass. Do not treat the spike's timings, test fixtures, or one retained sample as a quality verdict.
 
 ## Primary sources
 
