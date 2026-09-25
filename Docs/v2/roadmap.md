@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. Gates A, B, and C passed their bounded technical evidence. Live-provider behavior, human usefulness, motion quality, and production readiness remain unproven.
+**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. PR-D candidate `5b7ec36` closes Phase 4 with a NO-GO for the runtime ffmpeg-skill adapter and implements a technically validated bounded Phase 5 composition profile. Gates A, B, and C passed their bounded technical evidence. Gate D remains open for motion quality and human review; live-provider behavior, human usefulness, and production readiness remain unproven.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 

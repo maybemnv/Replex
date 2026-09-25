@@ -1,6 +1,6 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** PR-A and PR-B are merged to `main` through `805edbe`; their frozen V2-104 wire v1 and mock fixtures remain unchanged. PR-C code candidate `0dd2b2d` passed deterministic Gate C validation and adds a bounded V2 agent library plus an injected-client OpenAI Responses adapter. The agent is not wired into a frontend transport or runtime service, and no live model call was made. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
+**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. Frozen V2-104 service-contract v1 types and mock fixtures remain unchanged. PR-C adds a bounded V2 agent library and injected-client OpenAI Responses adapter; deterministic Gate C passed, but no live model call was made and the agent is not wired into a frontend transport or runtime service. PR-D candidate `5b7ec36` adds bounded local composition preview support without changing service-contract v1. V2-150 remains PARTIAL-GO research; Phase 4 did not adopt ffmpeg-skill. Phase 5 technical validation passed; motion and human review remain pending.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
