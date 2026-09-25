@@ -135,11 +135,11 @@ describe("V2 local asset import", () => {
     expect((await stat(join(projectRoot, first.asset.path!))).nlink).toBe(1);
     expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
 
-    const secondSource = await authorizeLocalImport(sourcePath, [sourceRoot]);
+    const secondSource = await authorizeLocalImport(sourcePath, [sourceRoot], "path");
     const second = await importLocalAssetV2(first.project, projectRoot, secondSource);
     expect(second.asset.id).not.toBe(first.asset.id);
     expect(second.asset.path).toBe(first.asset.path);
-    expect(second.asset.provenance).toMatchObject({ kind: "upload", originalFilename: filename, sourceSha256: first.asset.sha256 });
+    expect(second.asset.provenance).toMatchObject({ kind: "upload", originalFilename: filename, sourceSha256: first.asset.sha256, importMethod: "path" });
     expect(Object.keys(second.project.assets)).toHaveLength(2);
   });
 
@@ -289,6 +289,37 @@ describe("V2 local asset import", () => {
     expect(await entries(join(projectRoot, "media", "assets"))).toEqual([]);
   }, 30_000);
 
+  it("cancels during staged copying and removes partial bytes", async () => {
+    const { sourceRoot, projectRoot } = await workspace();
+    const sourcePath = join(sourceRoot, "cancel-mid-copy.ppm");
+    const { size } = await writeSparsePpm(sourcePath);
+    const original = emptyProject();
+    const before = JSON.stringify(original);
+    const controller = new AbortController();
+    const completed = importLocalAssetV2(original, projectRoot, await authorizeLocalImport(sourcePath, [sourceRoot]), { signal: controller.signal });
+    const outcome = completed.then((value) => ({ value }), (error: unknown) => ({ error }));
+
+    const deadline = Date.now() + 10_000;
+    let cancelledDuringCopy = false;
+    while (!cancelledDuringCopy && Date.now() < deadline) {
+      for (const directory of await entries(join(projectRoot, ".replex-staging"))) {
+        const stagedStat = await stat(join(projectRoot, ".replex-staging", directory, "source")).catch(() => undefined);
+        if (!stagedStat || stagedStat.size === 0 || stagedStat.size >= size) continue;
+        controller.abort();
+        cancelledDuringCopy = true;
+        break;
+      }
+      if (!cancelledDuringCopy) await new Promise((done) => setTimeout(done, 1));
+    }
+
+    const result = await outcome;
+    expect(cancelledDuringCopy).toBe(true);
+    expect("error" in result ? result.error : undefined).toMatchObject({ code: "IMPORT_CANCELLED" });
+    expect(JSON.stringify(original)).toBe(before);
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
+    expect(await entries(join(projectRoot, "media", "assets"))).toEqual([]);
+  }, 30_000);
+
   it.skipIf(!mediaAvailable)("rejects corrupt and unsupported media without publishing assets", async () => {
     const { sourceRoot, projectRoot } = await workspace();
     const original = emptyProject();
@@ -345,5 +376,26 @@ describe("V2 local asset import", () => {
     expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
     expect(await readFile(sourcePath)).toEqual(ppmFixture());
     expect(await readFile(join(projectRoot, "media", "assets", sha256)).catch(() => undefined)).toBeUndefined();
+  }, 30_000);
+
+  it.skipIf(!mediaAvailable)("does not overwrite a corrupt object already at the content hash path", async () => {
+    const { sourceRoot, projectRoot } = await workspace();
+    const sourcePath = join(sourceRoot, "valid.ppm");
+    const sourceBytes = ppmFixture();
+    await writeFile(sourcePath, sourceBytes);
+    const sha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    const assetsRoot = join(projectRoot, "media", "assets");
+    await mkdir(assetsRoot, { recursive: true });
+    const existingObject = join(assetsRoot, sha256);
+    await writeFile(existingObject, "wrong bytes at the requested hash");
+    const original = emptyProject();
+    const before = JSON.stringify(original);
+
+    await expect(importLocalAssetV2(original, projectRoot, await authorizeLocalImport(sourcePath, [sourceRoot]), { ffprobePath }))
+      .rejects.toMatchObject({ code: "STORAGE_FAILED" });
+    expect(JSON.stringify(original)).toBe(before);
+    expect(await readFile(existingObject, "utf8")).toBe("wrong bytes at the requested hash");
+    expect(await entries(assetsRoot)).toEqual([sha256]);
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
   }, 30_000);
 });
