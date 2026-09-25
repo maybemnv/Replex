@@ -13,7 +13,7 @@ Late Phase 1 or the beginning of Phase 2 performs a cheap capability/contract sp
 
 Only after that report does a later phase implement `FfmpegSkillBackend`. The adapter maps a strict subset of Replex `MediaExecutionJob` operations to its structured contract and maps results/errors back into Replex evidence. Adoption requires contract-version checks, `doctor` capability checks, dry-run plan inspection, immutable-input guarantees, deadlines, cancellation behavior, deterministic fixtures, and output verification.
 
-A restricted MCP spike may expose only probe, scene/contact-sheet analysis, cut/fit, audio measurement, and check tools to an internal research harness. It is experimental and never becomes the model's canonical editing surface. Production orchestration calls the adapter, not unrestricted MCP.
+The V2-150 PARTIAL-GO authorizes only a future internal, read-only evidence study: `probe`, `look`/contact sheets, `scenes`, `silence --list`, `loudness --measure-only`, and `check`. It does not authorize model-facing MCP access, mutating tools, or a runtime adapter. Any adapter requires Phase 2 parity evidence and a separate architecture review. Production orchestration calls an approved Replex adapter, not unrestricted MCP.
 
 Pin an actual release and record skill version, contract version, tool capabilities, and FFmpeg version in every job. Never track `main`. Keep the native `FfmpegBackend` until parity and rollback tests pass.
 
