@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { runConversationalEditV2, type V2AgentModelClient } from "../../src/agent-v2.js";
+import { runConversationalEditV2, type V2AgentModelClient, type V2AgentModelRequest } from "../../src/agent-v2.js";
 import { inspectProjectV2, type V2InspectRequest } from "../../src/inspect-v2.js";
 import { authorizeLocalImport, importLocalAssetV2 } from "../../src/import-v2.js";
 import { generateMediaEvidence } from "../../src/media-evidence.js";
@@ -26,7 +26,7 @@ function emptyProject(): ProjectV2 {
       width: 320,
       height: 180,
       fps: 24,
-      durationMs: 1500,
+      durationMs: 1400,
       tracks: [{ id: "video-track", kind: "video", order: 0, muted: false, locked: false }],
       clips: [],
       layers: [],
@@ -118,7 +118,7 @@ describe("V2 conversational edit E2E", () => {
             trackId: "video-track",
             timelineStartMs: 0,
             sourceInMs: 0,
-            sourceOutMs: 1500,
+            sourceOutMs: 1400,
             speed: 1,
             transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
             opacity: 1,
@@ -156,8 +156,8 @@ describe("V2 conversational edit E2E", () => {
       };
 
       const proposedOne: Operation[] = [
-        { type: "trim_clip", clipId: "uploaded-clip", sourceInMs: 150, sourceOutMs: 1900 },
         { type: "set_speed", clipId: "uploaded-clip", speed: 1.25 },
+        { type: "trim_clip", clipId: "uploaded-clip", sourceInMs: 150, sourceOutMs: 1900 },
         {
           type: "set_transform",
           clipId: "uploaded-clip",
@@ -166,8 +166,8 @@ describe("V2 conversational edit E2E", () => {
         },
       ];
       const proposedTwo: Operation[] = [
+        { type: "trim_clip", clipId: "uploaded-clip", sourceInMs: 150, sourceOutMs: 1760 },
         { type: "set_speed", clipId: "uploaded-clip", speed: 1.15 },
-        { type: "trim_clip", clipId: "uploaded-clip", sourceInMs: 150, sourceOutMs: 1874 },
         { type: "set_volume", clipId: "uploaded-clip", audioGainDb: -6 },
       ];
       const call = (id: string, name: string, args: unknown) => ({ id, name, arguments: args });
@@ -183,40 +183,22 @@ describe("V2 conversational edit E2E", () => {
           { responseId: "thread-two-final", calls: [], text: "Kept the crop and adjusted speed and audio." },
         ]],
       ]);
-      const modelInputs: Array<{ prompt: string; previousResponseId?: string; currentRevisionId: string; currentRevisionHash: string; toolResults: unknown }> = [];
+      const modelInputs: Array<Pick<V2AgentModelRequest, "prompt" | "previousResponseId" | "toolResults"> & V2AgentModelRequest["context"]> = [];
       const model: V2AgentModelClient = {
         async respond(input) {
-          modelInputs.push({ prompt: input.prompt, previousResponseId: input.previousResponseId, currentRevisionId: input.context.currentRevisionId, currentRevisionHash: input.context.currentRevisionHash, toolResults: input.toolResults });
+          modelInputs.push({ prompt: input.prompt, previousResponseId: input.previousResponseId, projectId: input.context.projectId, currentRevisionId: input.context.currentRevisionId, currentRevisionHash: input.context.currentRevisionHash, toolResults: input.toolResults });
           const queue = responseQueues.get(input.prompt);
           const response = queue?.shift();
           if (!response) return { responseId: "unexpected-empty-" + modelInputs.length, calls: [] };
-          if (response.calls.some(({ name }) => name === "propose_edit_batch")) {
-            expect(inspectedEvidenceRefs.length).toBeGreaterThan(0);
-            expect(JSON.stringify(input.toolResults)).toContain(inspectedEvidenceRefs[0]);
-            expect(JSON.stringify(input.toolResults)).toContain(evidence.artifacts.find(({ kind }) => kind === "selected_frame")!.ref);
-            expect(input.toolResults.some((result) => result.images?.some((image) => image.ref === evidence.artifacts.find(({ kind }) => kind === "selected_frame")!.ref && image.bytes.byteLength > 0))).toBe(true);
-            const proposal = response.calls.find(({ name }) => name === "propose_edit_batch")!;
-            const args = proposal.arguments as { operations: Operation[] };
-            return {
-              ...response,
-              calls: response.calls.map((toolCall) => toolCall === proposal
-                ? { ...toolCall, arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [...inspectedEvidenceRefs], operations: args.operations } }
-                : toolCall),
-            };
-          }
-          if (input.prompt === promptOne && response.calls.length === 0) {
-            const result = input.toolResults.find(({ name }) => name === "propose_edit_batch");
-            const output = result?.output as {
-              ok: boolean;
-              preview?: { verificationRefId: string; checks: { probe: boolean; decode: boolean; hash: boolean } };
-              previewEvidence?: { imageRef: string };
-            };
-            expect(output?.ok).toBe(true);
-            expect(output?.preview?.checks).toMatchObject({ probe: true, decode: true, hash: true });
-            expect(output?.preview?.verificationRefId).toBeTruthy();
-            expect(result?.images?.some((image) => image.ref === output?.previewEvidence?.imageRef && image.bytes.byteLength > 0)).toBe(true);
-          }
-          return response;
+          if (!response.calls.some(({ name }) => name === "propose_edit_batch")) return response;
+          const proposal = response.calls.find(({ name }) => name === "propose_edit_batch")!;
+          const args = proposal.arguments as { operations: Operation[] };
+          return {
+            ...response,
+            calls: response.calls.map((toolCall) => toolCall === proposal
+              ? { ...toolCall, arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [...inspectedEvidenceRefs], operations: args.operations } }
+              : toolCall),
+          };
         },
       };
 
@@ -277,8 +259,24 @@ describe("V2 conversational edit E2E", () => {
 
       const baseSemanticHash = semanticHashV2(base);
       const first = await run(promptOne, initialThreadState, canonicalProject);
-      expect(first.ok).toBe(true);
+      expect(first.ok, first.ok ? "" : `${first.code}: ${first.detail}\n${JSON.stringify(modelInputs.map(({ toolResults }) => toolResults))}`).toBe(true);
       if (!first.ok) throw new Error("first conversational edit failed: " + first.code);
+      const firstPromptInputs = modelInputs.filter(({ prompt }) => prompt === promptOne);
+      const selectedFrameRef = evidence.artifacts.find(({ kind }) => kind === "selected_frame")!.ref;
+      expect(firstPromptInputs).toHaveLength(3);
+      expect(JSON.stringify(firstPromptInputs[1]?.toolResults)).toContain(inspectedEvidenceRefs[0]);
+      expect(JSON.stringify(firstPromptInputs[1]?.toolResults)).toContain(selectedFrameRef);
+      expect(firstPromptInputs[1]?.toolResults.some((result) => result.images?.some((image) => image.ref === selectedFrameRef && image.bytes.byteLength > 0))).toBe(true);
+      const previewToolResult = firstPromptInputs[2]?.toolResults.find(({ name }) => name === "propose_edit_batch");
+      const previewOutput = previewToolResult?.output as {
+        ok: boolean;
+        preview?: { verificationRefId: string; checks: { probe: boolean; decode: boolean; hash: boolean } };
+        previewEvidence?: { imageRef: string };
+      } | undefined;
+      expect(previewOutput?.ok).toBe(true);
+      expect(previewOutput?.preview?.checks).toMatchObject({ probe: true, decode: true, hash: true });
+      expect(previewOutput?.preview?.verificationRefId).toBeTruthy();
+      expect(previewToolResult?.images?.some((image) => image.ref === previewOutput?.previewEvidence?.imageRef && image.bytes.byteLength > 0)).toBe(true);
       expect(first.threadState).toMatchObject({
         threadId: initialThreadState.threadId,
         projectId: canonicalProject.projectId,
@@ -314,7 +312,7 @@ describe("V2 conversational edit E2E", () => {
       });
       expect(second.project.composition.clips[0]).toMatchObject({
         sourceInMs: 150,
-        sourceOutMs: 1874,
+        sourceOutMs: 1760,
         speed: 1.15,
         audioGainDb: -6,
         crop: { x: 0.15, y: 0.1, width: 0.7, height: 0.8 },
