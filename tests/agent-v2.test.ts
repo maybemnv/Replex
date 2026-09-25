@@ -194,9 +194,14 @@ describe("V2 conversational edit thread", () => {
 
   it("rejects invalid inspection arguments before calling the bounded inspector", async () => {
     const model = scriptedModel([
-      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "assets", offset: -1 } }] }),
+      () => ({ responseId: "response-1", calls: [
+        { id: "call-inspect", name: "inspect_v2", arguments: { kind: "assets", offset: -1 } },
+        { id: "call-frame", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1", image: null, frameOffset: 0, offset: null, limit: null } },
+        { id: "call-offset", name: "inspect_v2", arguments: { kind: "assets", assetId: null, offset: 1_000_001, limit: null, image: null, frameOffset: null } },
+      ] }),
       (input) => {
-        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+        expect(input.toolResults).toHaveLength(3);
+        expect(input.toolResults.every(({ output }) => (output as { code?: string }).code === "INVALID_ARGUMENTS")).toBe(true);
         return finalResponse("response-2");
       },
     ]);
