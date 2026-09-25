@@ -1,6 +1,8 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62beccbba2b797e01322299544e3e36599b65f7`; Gates A, B, and C passed bounded technical evidence. Live-provider success, human usefulness, motion quality, and production readiness remain unproven.
+**Status:** PR-A through PR-D (Phases 4 and 5) are merged to `main` at `2dc4035`; corrective PR #16 closed the retrospective Gate A event-identity finding at `517b4f4`. Gates A, B, and C have bounded technical evidence on main; Phase 4 selected the native evidence provider (NO-GO for the ffmpeg-skill adapter), and Phase 5 technical validation passed. PR #15 remains an open draft camera-push candidate; Gate D is open pending human review on representative product footage. Phase 7 and later gated implementation have not started. Live-provider behavior, formal human usefulness, mixed-media selective-recapture preservation, and production authorization remain unproven.
+
+**PR-A retrospective Gate A correction (25 September 2026):** A fresh independent review of merged PR #11 found that `JobEventSchema` allowed `job.updated.projectId` to disagree with its nested job and `verification.updated.revisionId` to disagree with its nested verification. PR #16 adds event-level consistency checks and two negative tests. The correction merged at `517b4f40d799cf66c38f7317890ec2ffc9529a69`; `npm run build`, focused tests (2 files/35 tests), and the serial full suite (37 files/272 tests, zero skips) passed using direct FFmpeg/FFprobe 9.0.1 binaries with scoped elevation. Independent corrective review passed. GitHub reported no CI status checks. This supersedes the earlier Gate A claim for PR-A head.
 
 **PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
 
@@ -99,7 +101,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
-**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A on PR-A head `4964747`; the merge commit is `a8feca9`. See the PR-A validation record above.
+**Implementation status:** PR-A froze explicit service-contract v1 projections and boundary tests. A retrospective review then found two event identity gaps; PR #16 adds both consistency checks and negative tests and is merged at `517b4f4`. Gate A is closed against corrected main. See the corrective validation record above.
 
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.

@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62becc`. PR-D's code head `5b7ec36` closes Phase 4 with a NO-GO for the runtime ffmpeg-skill adapter and implements a technically validated bounded Phase 5 composition profile. Gates A, B, and C passed their bounded technical evidence. Gate D remains open for motion quality and human review; live-provider behavior, human usefulness, and production readiness remain unproven.
+**Status:** PR-A-D are merged to `main` at `2dc4035`; the retrospective Gate A event-identity correction is merged at `517b4f4`. Gates A-C have bounded technical evidence on main. Phase 4 selected native evidence (NO-GO for an ffmpeg-skill runtime adapter); Phase 5 technical evidence passed. PR #15 remains an open draft camera-push candidate, with Gate D open pending human review of representative software-product footage. Phase 7 and later phases remain gated. No formal POC result or production authorization exists.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
