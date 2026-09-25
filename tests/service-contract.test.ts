@@ -230,10 +230,15 @@ describe("transport-independent service contract", () => {
     expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://user:password@example.test" }).success).toBe(false);
     expect(JobInputRequestSchema.safeParse({ ...approval, targetOrigin: "https://example.test/login?token=secret" }).success).toBe(false);
     expect(JobInputRequestSchema.safeParse({ ...approval, message: "Use access_token=private-token" }).success).toBe(false);
+    expect(JobInputRequestSchema.safeParse({ ...approval, message: "Please open /media/user/private.mov" }).success).toBe(false);
+    expect(JobInputRequestSchema.safeParse({ ...approval, message: "Review /customer-data/project/secret.mov" }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow" } }).success).toBe(true);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "credential_action", secureFlowId: "secure-flow-1", action: "open_secure_flow", password: "secret" } }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text: "The access_token=private-token value was provided" } }).success).toBe(false);
     expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text: "See https://example.test/help for details" } }).success).toBe(true);
+    for (const text of ["Use a 16 / 9 crop", "Keep the left / right margins even", "Use the /dashboard route", "Open /dashboard/settings"]) {
+      expect(SubmitJobInputRequestSchema.safeParse({ ...meta, baseRevisionId: "revision-1", jobId: "job-1", inputRequestId: "input-1", response: { type: "clarification", text } }).success, text).toBe(true);
+    }
   });
 
   it("validates cancellation as a request and a terminal cancelled state", () => {
@@ -303,11 +308,14 @@ describe("transport-independent service contract", () => {
     expect(ErrorSchema.safeParse({ ...error, message: "See https://example.test/help for details" }).success).toBe(true);
     expect(ErrorSchema.safeParse({ ...error, message: "Request failed access_token=private-token" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Cannot open file:///C:/private/clip.mp4" }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, message: "Unable to read /customer-data/private/clip.mp4" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: 'Request failed with {"password":"private-token"}' }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, message: "Cloud error AWS_ACCESS_KEY_ID=AKIA1234567890123456" }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "C:\\Users\\Alice\\clip.mp4", message: "invalid" }] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, fieldIssues: [{ path: "brief.message", message: 'Invalid {"token":"private-token"}' }] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["/home/alice/private/clip.mp4"] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["https://example.test/evidence.json"] }).success).toBe(false);
+    expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["https://bucket.test/evidence.json?X-Amz-Signature=private"] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, evidenceRefs: ["AWS_SECRET_ACCESS_KEY=private-token"] }).success).toBe(false);
     expect(ErrorSchema.safeParse({ ...error, requiredCapability: "C:\\private\\tool.exe" }).success).toBe(false);
   });

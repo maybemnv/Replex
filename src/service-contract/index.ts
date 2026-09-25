@@ -14,12 +14,15 @@ const positiveInteger = z.number().int().finite().positive();
 const unitInterval = finite.min(0).max(1);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedIdempotencyKey = z.string().trim().min(1).max(128);
-const unsafePublicPath = /(?:^|[\s"'(=])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|\/(?:[^\s"'<>]*))|\bfile:\/\/|\bhttps?:\/\/[^\s/]*@/i;
+const unsafePublicPath = /(?:^|[\s"'(=])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|\/(?:home|root|tmp|Users?|private|var|etc|mnt|Volumes|proc|sys|dev|opt|usr|bin|sbin|run|srv|workspace|workspaces)(?:[\\/]|(?=$|[\s"'<>),;])))|\bfile:\/\/|\bhttps?:\/\/[^\s/]*@/i;
 const secretAssignment = /["']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|token|api[-_]?key|password|secret|authorization|cookie|aws_access_key_id|aws_secret_access_key|aws_session_token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|(?:Bearer\s+)?[^\s,;}"']+)/i;
+const absolutePosixPath = /(?:^|[\s"'(=])\/(?:[^\s"'<>/]+(?:\/[^\s"'<>]*)?|(?=\s*$))/;
 function hasUnsafePublicDetail(value: string): boolean {
-  return unsafePublicPath.test(value) || secretAssignment.test(value) || /\bBearer\s+[A-Za-z0-9._~+/-]+=*/i.test(value);
+  return value.trim() === "/" || /\b(?:open|path|file|directory|folder)\s+\/\s*$/i.test(value)
+    || unsafePublicPath.test(value) || secretAssignment.test(value) || /\bBearer\s+[A-Za-z0-9._~+/-]+=*/i.test(value);
 }
-const safePublicText = (maxLength: number) => text.max(maxLength).refine((value) => !hasUnsafePublicDetail(value), "public text must not contain host paths or secret-shaped details");
+const safePublicText = (maxLength: number) => text.max(maxLength).refine((value) => !hasUnsafePublicDetail(value) && !absolutePosixPath.test(value), "public text must not contain host paths or secret-shaped details");
+const safeClarificationText = (maxLength: number) => text.max(maxLength).refine((value) => !hasUnsafePublicDetail(value), "clarification must not contain secret-shaped details");
 const publicErrorText = safePublicText(4000);
 
 // Frozen wire v1 projections. External changes require a deliberate contract version bump.
@@ -537,7 +540,7 @@ export const ErrorSchema = z.object({
   message: publicErrorText,
   retryable: z.boolean(),
   fieldIssues: z.array(z.object({ path: text.max(512).regex(/^[A-Za-z0-9_$.[\]-]+$/), message: publicErrorText }).strict()).max(50).optional(),
-  evidenceRefs: z.array(text.max(512).refine((value) => !hasUnsafePublicDetail(value), "evidence reference must not contain a host path or secret-shaped detail")).max(100).optional(),
+  evidenceRefs: z.array(text.max(512).refine((value) => isScopedReference(value) && !hasUnsafePublicDetail(value), "evidence reference must stay within an authorized project or object namespace")).max(100).optional(),
   requiredCapability: text.max(128).regex(/^[a-z][a-z0-9_]*$/).optional(),
 }).strict();
 
@@ -579,7 +582,7 @@ export const JobInputResponseSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("browser_approval"), approved: z.boolean() }).strict(),
   z.object({ type: z.literal("missing_media"), source: z.object({ kind: z.enum(["local_token", "upload_session"]), ref: IdSchema }).strict() }).strict(),
   z.object({ type: z.literal("user_choice"), optionId: IdSchema }).strict(),
-  z.object({ type: z.literal("clarification"), text: safePublicText(2000) }).strict(),
+  z.object({ type: z.literal("clarification"), text: safeClarificationText(2000) }).strict(),
   CredentialActionSchema,
   z.object({ type: z.literal("conflict_resolution"), action: z.enum(["refresh", "cancel"]) }).strict(),
 ]);
