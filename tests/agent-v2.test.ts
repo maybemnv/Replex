@@ -119,6 +119,8 @@ describe("V2 conversational edit thread", () => {
   it("offers only strict-schema tools with closed typed operation objects", () => {
     const visit = (schema: Record<string, unknown>): void => {
       expect(schema).not.toHaveProperty("oneOf");
+      expect(schema).not.toHaveProperty("const");
+      expect(schema).not.toHaveProperty("exclusiveMinimum");
       if (schema.type === "object" || schema.properties) {
         expect(schema.additionalProperties).toBe(false);
         const properties = schema.properties as Record<string, unknown> | undefined;
@@ -135,8 +137,8 @@ describe("V2 conversational edit thread", () => {
       visit(tool.parameters as Record<string, unknown>);
     }
     const proposal = V2_AGENT_TOOLS.find(({ name }) => name === "propose_edit_batch")!.parameters;
-    const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { const: string } } }> } }).items.anyOf;
-    expect(operationBranches.map(({ properties }) => properties.type.const).sort()).toEqual([
+    const operationBranches = ((proposal.properties as Record<string, unknown>).operations as { items: { anyOf: Array<{ properties: { type: { enum: string[] } } }> } }).items.anyOf;
+    expect(operationBranches.map(({ properties }) => properties.type.enum).sort()).toEqual([
       "mute_clip", "set_opacity", "set_speed", "set_transform", "set_volume", "trim_clip",
     ]);
   });
