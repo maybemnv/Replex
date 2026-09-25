@@ -700,8 +700,10 @@ async function buildCompositionFfmpegArgs(
       const inputIndex = inputIndexes.get(layer.assetId);
       if (inputIndex === undefined) throw new Error("composition image input was not authorized");
       const nextLabel = `videoImage${job.layers.indexOf(layer)}`;
-      filters.push(`[${inputIndex}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba[imageOverlay]`);
-      filters.push(`[${videoLabel}][imageOverlay]overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${start},${end})':shortest=1:eof_action=pass:format=auto,format=yuv420p[${nextLabel}]`);
+      const imageWidth = Math.max(2, Math.floor(width / 3 / 2) * 2);
+      const imageHeight = Math.max(2, Math.floor(height / 3 / 2) * 2);
+      filters.push(`[${inputIndex}:v]scale=${imageWidth}:${imageHeight}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba[imageOverlay]`);
+      filters.push(`[${videoLabel}][imageOverlay]overlay=x=W-w-16:y=16:enable='between(t,${start},${end})':shortest=1:eof_action=pass:format=auto,format=yuv420p[${nextLabel}]`);
       videoLabel = nextLabel;
     } else {
       const textPath = join(stageDir, `overlay-${job.layers.indexOf(layer)}.txt`);

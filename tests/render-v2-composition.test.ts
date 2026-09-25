@@ -177,8 +177,10 @@ describe("V2 composition render planning", () => {
       expect(brightTitlePixels).toBeGreaterThan(10);
       const imageFrame = spawnSync(ffmpegPath, ["-nostdin", "-hide_banner", "-loglevel", "error", "-ss", "1.75", "-i", outputPath, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], { windowsHide: true, shell: false, maxBuffer: 1024 * 1024 });
       expect(imageFrame.status, imageFrame.stderr?.toString()).toBe(0);
-      const center = (90 * 320 + 160) * 3;
-      expect(imageFrame.stdout[center + 1]).toBeGreaterThan(120);
+      const overlayPoint = (45 * 320 + 255) * 3;
+      expect(imageFrame.stdout[overlayPoint + 1]).toBeGreaterThan(120);
+      const backgroundPoint = (90 * 320 + 160) * 3;
+      expect(imageFrame.stdout[backgroundPoint]).toBeGreaterThan(120);
       const registered = registerRenderArtifactV2(project, first.artifact);
       expect(registered.outputs).toHaveLength(1);
       expect(registered.outputs[0]).toMatchObject({ renderJobHash: job.jobHash, sourceRevisionId: project.currentRevisionId });
