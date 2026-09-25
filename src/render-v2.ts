@@ -11,6 +11,7 @@ import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type MediaProbeV2
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const positiveInt = z.number().int().finite().positive();
 const finite = z.number().finite();
+export const MAX_RENDER_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const jobPayloadSchema = z.object({
   jobVersion: z.literal(1),
   projectId: z.string().min(1),
@@ -106,6 +107,15 @@ async function digestFile(path: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
   return hash.digest("hex");
+}
+
+async function boundedDigestFile(path: string): Promise<{ sha256: string; size: number }> {
+  const before = await stat(path);
+  if (!before.isFile() || before.size > MAX_RENDER_ARTIFACT_BYTES) throw new Error("render artifact exceeds the local size limit");
+  const sha256 = await digestFile(path);
+  const after = await stat(path);
+  if (!after.isFile() || after.size > MAX_RENDER_ARTIFACT_BYTES || after.size !== before.size) throw new Error("render artifact changed or exceeded the local size limit while hashing");
+  return { sha256, size: after.size };
 }
 
 function assertJobHash(job: MediaExecutionJob): JobPayload {
@@ -343,7 +353,7 @@ function buildFfmpegArgs(job: JobPayload, sourcePath: string, stagedPath: string
     "-map", "[video]", "-map", "[audio]", "-t", duration,
     "-r", numberText(fps), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-threads", "1", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "128k", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact",
-    "-metadata", "creation_time=1970-01-01T00:00:00Z", "-movflags", "+faststart", stagedPath,
+    "-metadata", "creation_time=1970-01-01T00:00:00Z", "-movflags", "+faststart", "-fs", String(MAX_RENDER_ARTIFACT_BYTES), stagedPath,
   );
   return args;
 }
@@ -371,6 +381,8 @@ async function verifyRenderedOutput(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ probe: OutputProbe; sha256: string }> {
+  const initialFile = await stat(path);
+  if (!initialFile.isFile() || initialFile.size > MAX_RENDER_ARTIFACT_BYTES) throw new Error("render artifact exceeds the local size limit");
   const probeRun = await runProcess(ffprobePath, [
     "-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate", "-of", "json", path,
   ], timeoutMs, signal);
@@ -388,6 +400,8 @@ async function verifyRenderedOutput(
     throw new Error("render output does not meet its frozen media requirements");
   }
   await runProcess(ffmpegPath, ["-nostdin", "-v", "error", "-xerror", "-i", path, "-f", "null", "-"], timeoutMs, signal);
+  const artifactFile = await boundedDigestFile(path);
+  if (artifactFile.size !== initialFile.size) throw new Error("render artifact changed while it was being verified");
   return {
     probe: {
       durationMs: Math.round(durationSeconds * 1000),
@@ -397,7 +411,7 @@ async function verifyRenderedOutput(
       videoCodec: video.codec_name,
       audioCodec: audio.codec_name,
     },
-    sha256: await digestFile(path),
+    sha256: artifactFile.sha256,
   };
 }
 
@@ -423,7 +437,11 @@ interface PublishedFile { path: string; device: number; inode: number }
 async function publishExclusive(stagedPath: string, outputPath: string, expectedHash: string): Promise<PublishedFile | undefined> {
   const verifyExisting = async (): Promise<undefined> => {
     const existing = await lstat(outputPath);
-    if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1 || await digestFile(outputPath) !== expectedHash) {
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+      throw new Error("render artifact target already contains different or unsafe data");
+    }
+    const hashed = await boundedDigestFile(outputPath);
+    if (hashed.sha256 !== expectedHash) {
       throw new Error("render artifact target already contains different or unsafe data");
     }
     return undefined;
@@ -522,7 +540,7 @@ export async function executeMediaExecutionJob(
       if (finalSource !== sourcePath || !await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
         throw new Error("media execution revision or source changed after output promotion");
       }
-      outputSha = await digestFile(outputPath);
+      outputSha = (await boundedDigestFile(outputPath)).sha256;
       if (outputSha !== verified.sha256 || await digestFile(evidencePath) !== evidenceSha256) {
         throw new Error("promoted render artifact or verification evidence changed before return");
       }
