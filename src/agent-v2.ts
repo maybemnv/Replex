@@ -57,6 +57,8 @@ export interface V2AgentModelRequest {
   instructions: string;
   tools: readonly V2AgentToolDefinition[];
   toolResults: readonly V2AgentToolResult[];
+  /** The provider must enforce this per-call output ceiling. */
+  maxOutputTokens: number;
   signal: AbortSignal;
 }
 
@@ -327,6 +329,7 @@ const MAX_INSPECTION_DATA_BYTES = 64 * 1024;
 const MAX_IMAGES_PER_RESULT = 8;
 const MAX_IMAGE_BYTES_PER_RESULT = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES_PER_INTENT = 4 * 1024 * 1024;
+export const V2_AGENT_MAX_OUTPUT_TOKENS_PER_CALL = 1200;
 const MAX_MODEL_CALLS = 4;
 const MAX_TOOL_CALLS = 12;
 const MAX_WALL_TIME_MS = 120_000;
@@ -657,6 +660,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
         instructions,
         tools: V2_AGENT_TOOLS,
         toolResults,
+        maxOutputTokens: V2_AGENT_MAX_OUTPUT_TOKENS_PER_CALL,
         signal,
       }));
       if (!response || typeof response.responseId !== "string" || response.responseId.length > 128

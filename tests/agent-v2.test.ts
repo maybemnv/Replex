@@ -430,5 +430,6 @@ describe("V2 conversational edit thread", () => {
 
     expect(result).toMatchObject({ ok: false, code: "BUDGET_EXCEEDED" });
     expect(model.respond).toHaveBeenCalledTimes(4);
+    expect(model.respond.mock.calls.every(([input]) => input.maxOutputTokens === 1200)).toBe(true);
   });
 });
