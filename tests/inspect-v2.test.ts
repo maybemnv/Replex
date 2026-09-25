@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalFlow } from "../fixtures/apps/normal/flow.js";
-import { inspectProjectV2, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
+import { inspectProjectV2, V2InspectRequestSchema, type V2InspectionContext, type V2InspectRequest, type V2InspectResult } from "../src/inspect-v2.js";
 import { semanticHashV2, type OperationLogRecord } from "../src/operations-v2.js";
 import { MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenceIndex } from "../src/media-evidence.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
@@ -111,11 +111,13 @@ async function evidenceFixture(root: string, project: ProjectV2, options: { sour
     silenceSegments: [{ startMs: 3000, endMs: 4000 }],
     loudness: { integratedLufs: -20, truePeakDbtp: -3, rangeLufs: 7 },
   }));
+  const contactBytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
   const definitions = [
     { kind: "probe" as const, contentType: "application/json" as const, bytes: probeBytes, name: "probe", ext: "json" },
     { kind: "scene_boundaries" as const, contentType: "application/json" as const, bytes: sceneBytes, name: "scene-boundaries", ext: "json" },
     { kind: "audio_summary" as const, contentType: "application/json" as const, bytes: audioBytes, name: "audio-summary", ext: "json" },
     { kind: "selected_frame" as const, contentType: "image/png" as const, bytes: options.imageBytes ?? Buffer.from("image evidence bytes"), name: "selected-frame", ext: "png", timestampMs: 1200 },
+    { kind: "contact_sheet" as const, contentType: "image/jpeg" as const, bytes: contactBytes, name: "contact-sheet", ext: "jpg" },
   ];
   const artifacts: MediaEvidenceArtifact[] = definitions.map((definition) => {
     const digest = options.artifactSha256 ?? sha(definition.bytes);
@@ -251,8 +253,10 @@ describe("V2 bounded model inspection", () => {
   it("blocks unsafe refs and symlinked evidence artifacts", async ({ skip }) => {
     const root = await mkdtemp(join(tmpdir(), "replex-inspect-unsafe-"));
     try {
+      const evidenceRoot = join(root, "owned-evidence");
+      await mkdir(evidenceRoot, { recursive: true });
       const project = fixtureProject();
-      const { index } = await evidenceFixture(root, project);
+      const { index } = await evidenceFixture(evidenceRoot, project);
       const unsafe = {
         ...index,
         artifacts: index.artifacts.map((artifact) => artifact.kind === "selected_frame"
@@ -261,14 +265,14 @@ describe("V2 bounded model inspection", () => {
       } as unknown as MediaEvidenceIndex;
       const badRef = success(await inspectProjectV2(
         { kind: "media_evidence", assetId: "asset-browser", image: "selected_frame" },
-        context(project, { evidenceRoot: root, evidenceIndexes: [unsafe] }),
+        context(project, { evidenceRoot, evidenceIndexes: [unsafe] }),
       ));
       expect(badRef.data).toMatchObject({ status: "invalid" });
       expect(badRef.images).toBeUndefined();
       expect(badRef.evidenceRefs).toEqual([]);
 
       const frame = index.artifacts.find((artifact) => artifact.kind === "selected_frame")!;
-      const framePath = join(root, ...frame.ref.split("/"));
+      const framePath = join(evidenceRoot, ...frame.ref.split("/"));
       const outside = join(root, "outside.png");
       await writeFile(outside, "private file bytes");
       await rm(framePath);
@@ -280,7 +284,7 @@ describe("V2 bounded model inspection", () => {
       }
       const linked = success(await inspectProjectV2(
         { kind: "media_evidence", assetId: "asset-browser", image: "selected_frame" },
-        context(project, { evidenceRoot: root, evidenceIndexes: [index] }),
+        context(project, { evidenceRoot, evidenceIndexes: [index] }),
       ));
       expect(linked.data).toMatchObject({ status: "invalid" });
       expect(linked.images).toBeUndefined();
@@ -323,5 +327,89 @@ describe("V2 bounded model inspection", () => {
     expect(result.data).toMatchObject({ status: "unknown", revisionId: "revision-0", outputs: [] });
     expect(result.evidenceRefs).toEqual([]);
     expect(JSON.stringify(result)).not.toContain("operationLogRef");
+  });
+
+  it("serves a verified JPEG contact sheet as a typed image block", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-contact-"));
+    try {
+      const project = fixtureProject();
+      const { index, definitions } = await evidenceFixture(root, project);
+      const result = success(await inspectProjectV2(
+        { kind: "media_evidence", assetId: "asset-browser", image: "contact_sheet" },
+        context(project, { evidenceRoot: root, evidenceIndexes: [index] }),
+      ));
+      const jpeg = result.images?.[0];
+      expect(jpeg).toMatchObject({ mimeType: "image/jpeg", ref: index.artifacts.find((item) => item.kind === "contact_sheet")?.ref });
+      expect(Buffer.from(jpeg!.bytes)).toEqual(definitions[4].bytes);
+      expect(result.evidenceRefs).toContain(jpeg!.ref);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an index file symlink that targets outside the evidence root", async ({ skip }) => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-index-link-"));
+    try {
+      const evidenceRoot = join(root, "owned-evidence");
+      const project = fixtureProject();
+      const { index } = await evidenceFixture(evidenceRoot, project);
+      const outsideIndex = join(root, "outside-index.json");
+      await writeFile(outsideIndex, JSON.stringify(index));
+      const indexPath = join(evidenceRoot, ...index.indexRef.split("/"));
+      await rm(indexPath);
+      try {
+        await symlink(outsideIndex, indexPath, "file");
+      } catch (error) {
+        if (["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes((error as NodeJS.ErrnoException).code ?? "")) return skip();
+        throw error;
+      }
+      const result = success(await inspectProjectV2(
+        { kind: "media_evidence", assetId: "asset-browser", image: "selected_frame" },
+        context(project, { evidenceRoot, evidenceIndexes: [index] }),
+      ));
+      expect(result.data).toMatchObject({ status: "invalid" });
+      expect(result.images).toBeUndefined();
+      expect(result.evidenceRefs).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a nested evidence directory junction that escapes its root", async ({ skip }) => {
+    const root = await mkdtemp(join(tmpdir(), "replex-inspect-dir-link-"));
+    try {
+      const evidenceRoot = join(root, "owned-evidence");
+      const project = fixtureProject();
+      const { index } = await evidenceFixture(evidenceRoot, project);
+      const prefix = index.indexRef.split("/")[1];
+      const nested = join(evidenceRoot, "media-evidence", prefix);
+      const outside = join(root, "outside-evidence-run");
+      await rm(outside, { recursive: true, force: true });
+      await import("node:fs/promises").then(({ rename }) => rename(nested, outside));
+      try {
+        await symlink(outside, nested, "junction");
+      } catch (error) {
+        if (["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes((error as NodeJS.ErrnoException).code ?? "")) return skip();
+        throw error;
+      }
+      const result = success(await inspectProjectV2(
+        { kind: "media_evidence", assetId: "asset-browser", image: "selected_frame" },
+        context(project, { evidenceRoot, evidenceIndexes: [index] }),
+      ));
+      expect(result.data).toMatchObject({ status: "invalid" });
+      expect(result.images).toBeUndefined();
+      expect(result.evidenceRefs).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("applies a maximum serialized response size and validates the shared tool schema", async () => {
+    const project = fixtureProject();
+    await expect(inspectProjectV2({ kind: "project_summary" }, context(project, { responseByteLimit: 64 })))
+      .resolves.toMatchObject({ ok: false, code: "OUTPUT_LIMIT" });
+    expect(V2InspectRequestSchema.safeParse({ kind: "media_evidence", assetId: "asset-browser", image: "selected_frame", frameOffset: 0 }).success).toBe(true);
+    expect(V2InspectRequestSchema.safeParse({ kind: "media_evidence", assetId: "../private", image: "selected_frame" }).success).toBe(false);
+    expect(V2InspectRequestSchema.safeParse({ kind: "clips", offset: -1 }).success).toBe(false);
   });
 });
