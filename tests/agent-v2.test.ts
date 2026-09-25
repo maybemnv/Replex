@@ -168,7 +168,7 @@ describe("V2 conversational edit thread", () => {
     const model = scriptedModel([
       () => ({ responseId: "response-1", calls: [{ id: "call-1", name: "run_shell", arguments: { command: "ffmpeg secret" } }] }),
       (input) => {
-        expect(input.toolResults).toEqual([{ callId: "call-1", name: "run_shell", output: { ok: false, code: "UNSUPPORTED_TOOL", detail: "tool name is not in the fixed Replex allowlist" } }]);
+        expect(input.toolResults).toEqual([{ callId: "call-1", name: "unsupported_tool", output: { ok: false, code: "UNSUPPORTED_TOOL", detail: "tool name is not in the fixed Replex allowlist" } }]);
         return finalResponse("response-2");
       },
     ]);
@@ -195,6 +195,44 @@ describe("V2 conversational edit thread", () => {
     expect(inspect).not.toHaveBeenCalled();
   });
 
+  it("accepts the strict nullable inspection envelope and keeps project JSON out of model input", async () => {
+    const model = scriptedModel([
+      (input) => {
+        expect(input).not.toHaveProperty("project");
+        return { responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: {
+          kind: "project_summary", assetId: null, offset: null, limit: null, image: null, frameOffset: null,
+        } }] };
+      },
+      (input) => {
+        expect(input.toolResults[0]?.output).toEqual({ ok: true, data: { projectId: "agent-v2-test-project" }, evidenceRefs: ["project:summary"] });
+        return finalResponse("response-2");
+      },
+    ]);
+    const inspect = vi.fn(async () => ({ ok: true as const, data: { projectId: "agent-v2-test-project" }, evidenceRefs: ["project:summary"] }));
+    const result = await runConversationalEditV2(requestFor(emptyProject(), model, { inspect }));
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" } });
+    expect(inspect).toHaveBeenCalledOnce();
+  });
+
+  it("redacts unsafe inspector output before returning a tool result to the model", async () => {
+    const model = scriptedModel([
+      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "project_summary" } }] }),
+      (input) => {
+        const serialized = JSON.stringify(input.toolResults);
+        expect(serialized).not.toContain("private-token");
+        expect(serialized).not.toContain("C:\\\\Users");
+        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "INSPECTION_FAILED" });
+        return finalResponse("response-2");
+      },
+    ]);
+    const result = await runConversationalEditV2(requestFor(emptyProject(), model, {
+      inspect: async () => ({ ok: true, data: { absolutePath: "C:\\Users\\private-token\\project.json" }, evidenceRefs: ["project:summary"] }),
+    }));
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" } });
+  });
+
   it("rejects proposals grounded in refs not disclosed by an earlier inspection", async () => {
     const project = projectWithClip();
     const model = scriptedModel([
@@ -212,6 +250,50 @@ describe("V2 conversational edit thread", () => {
     const result = await runConversationalEditV2(requestFor(project, model, { commitCanonicalRevision: commit }));
 
     expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" }, operationLog: [], previews: [] });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a proposal pinned to an outdated revision before commit", async () => {
+    const project = projectWithClip();
+    const model = scriptedModel([
+      () => ({ responseId: "response-1", calls: [{
+        id: "call-edit",
+        name: "propose_edit_batch",
+        arguments: { baseRevisionId: "revision-old", evidenceRefs: [evidenceRef], operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }] },
+      }] }),
+      (input) => {
+        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "STALE_REVISION", currentRevisionId: "revision-0" });
+        return finalResponse("response-2");
+      },
+    ]);
+    const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: false as const, code: "unexpected" }));
+    const result = await runConversationalEditV2(requestFor(project, model, { commitCanonicalRevision: commit }));
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" }, operationLog: [] });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("rejects recognized but deferred semantic operation types", async () => {
+    const project = projectWithClip();
+    const model = scriptedModel([
+      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-2", calls: [{
+        id: "call-edit",
+        name: "propose_edit_batch",
+        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "apply_motion_preset", targetId: "clip-1", presetId: "tilt", presetVersion: "1", parameters: {} }] },
+      }] }),
+      (input) => {
+        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "UNSUPPORTED_OPERATION" });
+        return finalResponse("response-3");
+      },
+    ]);
+    const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: false as const, code: "unexpected" }));
+    const result = await runConversationalEditV2(requestFor(project, model, {
+      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidenceRef] }),
+      commitCanonicalRevision: commit,
+    }));
+
+    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" } });
     expect(commit).not.toHaveBeenCalled();
   });
 
@@ -255,12 +337,13 @@ describe("V2 conversational edit thread", () => {
       (input) => ({ responseId: "response-2", calls: [{
         id: "call-edit",
         name: "propose_edit_batch",
-        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "set_volume", clipId: "clip-1", audioGainDb: -6 }] },
+        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{
+          type: "set_transform",
+          clipId: "clip-1",
+          transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
+          crop: null,
+        }] },
       }] }),
-      (input) => {
-        expect(input.toolResults[0]?.output).toMatchObject({ ok: false, code: "COMMIT_REJECTED" });
-        return finalResponse("response-3");
-      },
     ]);
     const isRevisionCurrent = vi.fn();
     const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: false as const, code: "STALE_REVISION", detail: "host CAS lost" }));
@@ -270,9 +353,32 @@ describe("V2 conversational edit thread", () => {
       commitCanonicalRevision: commit,
     }));
 
-    expect(result).toMatchObject({ ok: true, project: { currentRevisionId: "revision-0" }, operationLog: [], previews: [] });
+    expect(result).toMatchObject({ ok: false, status: "rejected", code: "STALE_REVISION", project: { currentRevisionId: "revision-0" }, operationLog: [], previews: [] });
     expect(commit).toHaveBeenCalledOnce();
     expect(commit.mock.calls[0][0]).toMatchObject({ baseRevisionId: "revision-0", baseRevisionHash: semanticHashV2(project) });
+    expect(isRevisionCurrent).not.toHaveBeenCalled();
+  });
+
+  it("reports an invalid successful host commit as a protocol error", async () => {
+    const project = projectWithClip();
+    const model = scriptedModel([
+      () => ({ responseId: "response-1", calls: [{ id: "call-inspect", name: "inspect_v2", arguments: { kind: "media_evidence", assetId: "asset-1" } }] }),
+      (input) => ({ responseId: "response-2", calls: [{
+        id: "call-edit",
+        name: "propose_edit_batch",
+        arguments: { baseRevisionId: input.context.currentRevisionId, evidenceRefs: [evidenceRef], operations: [{ type: "set_volume", clipId: "clip-1", audioGainDb: -6 }] },
+      }] }),
+    ]);
+    const isRevisionCurrent = vi.fn();
+    const commit = vi.fn(async (_input: V2CanonicalRevisionCommit) => ({ ok: true as const, project: emptyProject() }));
+    const result = await runConversationalEditV2(requestFor(project, model, {
+      inspect: async () => ({ ok: true, data: { selectedFrames: 1 }, evidenceRefs: [evidenceRef] }),
+      renderAuthorization: { projectRoot: ".", resolvedHandles: [], isRevisionCurrent },
+      commitCanonicalRevision: commit,
+    }));
+
+    expect(result).toMatchObject({ ok: false, code: "COMMIT_PROTOCOL_ERROR", project: { currentRevisionId: "revision-0" } });
+    expect(commit).toHaveBeenCalledOnce();
     expect(isRevisionCurrent).not.toHaveBeenCalled();
   });
 
