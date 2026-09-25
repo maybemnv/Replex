@@ -334,7 +334,9 @@ export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: r
       : kind === "audio"
         ? { durationMs: asset.probe.durationMs, hasAudio: true }
         : { width: asset.probe.width, height: asset.probe.height, hasAudio: false };
-    if (kind !== "audio" && (!source.width || source.width < 2 || !source.height || source.height < 2)) throw new Error("composition visual asset requires valid dimensions");
+    if (kind !== "audio" && (!source.width || source.width < 2 || source.width > 4096 || !source.height || source.height < 2 || source.height > 4096 || source.width * source.height > 16_777_216)) {
+      throw new Error("composition visual asset dimensions exceed native V2 render limits");
+    }
     const planned = { assetId, handle, kind, source };
     inputs.set(assetId, planned);
     return planned;

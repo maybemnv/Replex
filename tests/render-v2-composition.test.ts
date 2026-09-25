@@ -97,6 +97,17 @@ describe("V2 composition render planning", () => {
     expect(() => buildCompositionExecutionJob(project, handles)).toThrow("contiguous");
   });
 
+  it("rejects visual source dimensions beyond the bounded import profile", () => {
+    const project = mixedProject();
+    const asset = project.assets["video-a"]!;
+    asset.probe.width = 4097;
+    if (asset.provenance.kind === "upload") asset.provenance.originalProbe.width = 4097;
+    project.revisions[0]!.manifestSha256 = semanticHashV2(project);
+    const handles = Object.values(project.assets).map((candidate) => ({ assetId: candidate.id, sha256: candidate.sha256, ref: candidate.path! }));
+
+    expect(() => buildCompositionExecutionJob(project, handles)).toThrow("dimensions exceed native V2 render limits");
+  });
+
   it("authorizes every source and rejects a hard-linked immutable asset", async () => {
     const project = mixedProject();
     const handles = Object.values(project.assets).map((asset) => ({ assetId: asset.id, sha256: asset.sha256, ref: asset.path! }));
