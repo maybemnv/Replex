@@ -1,6 +1,6 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** PR-A freezes the V2-104 wire v1 projection and preserves the existing mock fixture shape; independent final validation is pending. Frontend, transport, and runtime service are not implemented. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
+**Status:** The PR-A candidate freezes the V2-104 wire v1 projection and preserves the existing mock fixture shape; independent validation met Gate A at `e38b792`. Frontend, transport, and runtime service are not implemented. V2-150 concluded PARTIAL-GO; ffmpeg-skill is not adopted.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 

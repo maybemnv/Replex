@@ -1,6 +1,8 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation is implemented. PR-A seals the V2-104 service contract v1 boundary and records the V2-150 PARTIAL-GO scope. Phase 2 has not started; later phases remain gated on PR-A and their evidence gates.
+**Status:** V2 Core Foundation and the PR-A candidate are implemented. Gate A passed independent validation on `e38b792`; PR-A is ready to open, not merged. Phase 2 has not started and remains gated on PR-A merge and Gate B.
+
+**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26 files / 193 tests (10 skipped) with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed; no GitHub CI result was available during this review.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -89,7 +91,7 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
-**Implementation status:** Schemas and fixtures existed at `e63f6795`, but the candidate still accepted live-schema drift and unsafe clarification text. PR-A adds explicit v1 projections and boundary tests; final independent validation is pending.
+**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A at `e38b792`; see the PR-A validation record above.
 
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
