@@ -1,6 +1,6 @@
 # Replex V2 roadmap
 
-**Status:** PR-A / Gate A passed and merged at `a8feca9`. PR-B Phase 2 met Gate B on candidate head `fa9f42d` after independent review and final serial validation. Phase 3 has not started.
+**Status:** PR-A and PR-B are merged to `main` through `805edbe`. Gates A and B passed. PR-C code candidate `0dd2b2d` passed independent deterministic Gate C technical validation; live-provider behavior, human usefulness, and production readiness remain unproven.
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
@@ -29,7 +29,7 @@ The minimum credible POC is Phases 0-3, including the Phase 1.5 capability gate,
 
 - **Gate A, model and contract:** V1 migration and V2 reducer preserve identity, replay, and atomicity; service-contract v1 has explicit frozen public views and operation shapes.
 - **Gate B, media:** Imported footage produces bounded evidence and a verified deterministic render.
-- **Gate C, agent:** Initial and follow-up prompts create grounded operations on one project.
+- **Gate C, agent:** PASS on the deterministic fixture: initial and follow-up prompts create grounded, attributable operations on one project with replayable revisions and verified previews. This does not establish live-provider quality or human usefulness.
 - **Gate D, quality:** Human reviewers judge the edit and selected motion treatment useful; correction time is measured.
 - **Gate E, differentiation:** Selective browser recapture inside a mixed project preserves unrelated media and edits.
 - **Gate F, optional cloud:** Only after A-E, a capped media-only cloud render demonstrates protocol portability.

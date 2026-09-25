@@ -1,10 +1,12 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation and PR-A are merged to `main` at `a8feca95c26373467fc300c1b01eac583cb74e89`. PR-B Phase 2 is complete on candidate head `fa9f42d850a20eb23b0ee5cb297c045da96e3634`; Gate B passed local E2E, full serial tests, and independent review. Phase 3 has not started.
+**Status:** PR-A and PR-B are merged to `main` through `805edbe0da5c026e884c61edcc314fc65d23a739`; Gates A and B passed. PR-C code candidate `0dd2b2d2074747a0ae40eef179c50b2b612cf833` on `feat/v2-phase3-agent-loop` passed independent Gate C technical validation using deterministic model responses. Live-provider success, human usefulness, and production readiness remain unproven.
 
 **PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
 
 **PR-B validation (25 September 2026):** `tsc -p tsconfig.json --noEmit` passed. The final serial full suite passed 30/30 files and 226/226 tests with zero skips in 253.89 seconds using direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Independent validation reviewed head `fa9f42d`, passed build, 11/11 focused renderer/E2E tests, and `git diff --check`; the render-anchor finding was fixed and retested with actual output pixels. Gate B is met. No GitHub CI result was available during this validation.
+
+**PR-C validation (25 September 2026):** Independent read-only validation passed candidate head `0dd2b2d2074747a0ae40eef179c50b2b612cf833`: `npm run build`; focused V2 agent/inspection/conversation checks passed 5 files/38 tests; full `npx vitest run --maxWorkers=1` passed 35 files/264 tests in 238.67 seconds with direct FFmpeg/FFprobe 9.0.1; `git diff --check 805edbe..HEAD` passed. A provider probe confirmed incomplete responses at the 1,200-token ceiling are rejected. Gate C technical evidence uses a deterministic model client; no live provider call, GitHub CI result, or human-use evaluation is claimed.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -185,6 +187,8 @@ The current planner handles one uploaded video clip and supports trim, speed, cr
 
 ### V2-301: Add bounded V2 inspection tools
 
+**Implementation status:** Implemented and covered by bounded inspection, redaction, evidence-reference, and real-media conversation tests.
+
 - **Objective:** Expose project, asset, clip, frames, contact sheet, transcript, audio, browser provenance, and verification views.
 - **Why:** Ground planning while controlling privacy, context, and cost.
 - **Dependencies:** V2-202.
@@ -197,6 +201,9 @@ The current planner handles one uploaded video clip and supports trim, speed, cr
 - **Rollback:** Disable individual inspection capabilities without changing projects.
 
 ### V2-302: Extend the agent loop to V2 operations
+
+**Implementation status:** Implemented; deterministic two-prompt E2E creates attributable, replayable revisions and verified previews on one project.
+**Budgets enforced:** 8 KiB prompt; at most 4 model calls and 12 tool calls per intent; 1,200 provider-enforced output tokens per model call (4,800 total maximum); 120-second wall time; 64 KiB inspection data; and 4 MiB total image evidence. The output-token limit bounds generated tokens, not a fixed dollar amount across provider/model prices.
 
 - **Objective:** Let one model inspect, propose typed V2 operations, verify, preview, and respond to follow-up intent against the current revision.
 - **Why:** Conversational editing is useful only if it preserves canonical state and grounding.
