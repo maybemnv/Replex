@@ -149,7 +149,10 @@ describe("V2 bounded model inspection", () => {
     const serialized = JSON.stringify(result);
     expect(result.data).toMatchObject({ projectId: "project-launch", currentRevisionId: "revision-0", durationMs: 4000, assetCount: 3, clipCount: 3 });
     expect(result.evidenceRefs).toEqual([]);
-    expect(serialized).not.toContain("project");
+    expect(serialized).not.toContain('"schemaVersion"');
+    expect(serialized).not.toContain('"composition"');
+    expect(serialized).not.toContain('"revisions"');
+    expect(serialized).not.toContain('"browser"');
     expect(serialized).not.toContain("private.example.test");
     expect(serialized).not.toContain("top-secret");
     expect(serialized).not.toContain("layer-secret");
