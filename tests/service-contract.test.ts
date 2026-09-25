@@ -288,6 +288,23 @@ describe("transport-independent service contract", () => {
     }
   });
 
+  it("rejects job events whose project differs from the nested job", () => {
+    const event = mockProjectEvents.find((item) => item.type === "job.updated");
+    expect(event).toBeDefined();
+    expect(JobEventSchema.safeParse({ ...event, projectId: "project-other" }).success).toBe(false);
+  });
+
+  it("rejects verification events whose revision differs from the verification", () => {
+    expect(JobEventSchema.safeParse({
+      type: "verification.updated",
+      projectId: "project-launch",
+      sequence: 3,
+      occurredAt: "2026-09-23T00:00:03.000Z",
+      revisionId: "revision-1",
+      verification: { revisionId: "revision-2", status: "passed", refs: [] },
+    }).success).toBe(false);
+  });
+
   it("accepts structured known errors and rejects unknown codes", () => {
     const error = { code: "REVISION_CONFLICT", message: "Refresh the project", retryable: true, fieldIssues: [] };
     expect(ErrorSchema.parse(error)).toEqual(error);
