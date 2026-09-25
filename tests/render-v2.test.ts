@@ -16,7 +16,15 @@ const mediaToolsAvailable = spawnSync(ffmpegPath, ["-version"], { windowsHide: t
 
 const handle = { assetId: "upload-1", sha256: sha("uploaded-media"), ref: "assets/product.mp4" };
 
-function uploadedProject(sourceSha256 = handle.sha256): ProjectV2 {
+function uploadedProject(sourceSha256 = handle.sha256, hasAudio = true, sourceRef = handle.ref): ProjectV2 {
+  const sourceProbe = {
+    durationMs: 2000,
+    width: 320,
+    height: 180,
+    fps: 24,
+    videoCodec: "h264",
+    ...(hasAudio ? { audioCodec: "aac", channels: 2, sampleRateHz: 48000 } : {}),
+  };
   const base: Omit<ProjectV2, "revisions"> & { revisions: ProjectV2["revisions"] } = {
     schemaVersion: 2,
     projectId: "project-render-v2",
@@ -25,16 +33,16 @@ function uploadedProject(sourceSha256 = handle.sha256): ProjectV2 {
       "upload-1": {
         id: "upload-1",
         type: "uploaded_video",
-        path: handle.ref,
+        path: sourceRef,
         sha256: sourceSha256,
-        probe: { durationMs: 2000, width: 320, height: 180, fps: 24, videoCodec: "h264", audioCodec: "aac", channels: 2, sampleRateHz: 48000 },
+        probe: sourceProbe,
         provenance: {
           kind: "upload",
           originalFilename: "product.mp4",
           importedAt: "2026-09-25T00:00:00.000Z",
           sourceSha256,
           importMethod: "path",
-          originalProbe: { durationMs: 2000, width: 320, height: 180, fps: 24, videoCodec: "h264", audioCodec: "aac", channels: 2, sampleRateHz: 48000 },
+          originalProbe: sourceProbe,
         },
       },
     },
@@ -217,6 +225,8 @@ describe("V2 media render planning", () => {
       const outputDir = join(root, "renders");
       await mkdir(outputDir);
       const outputPath = join(outputDir, `${job.jobHash}.mp4`);
+      await expect(executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath, timeoutMs: 1 })).rejects.toThrow("timed out");
+      expect(await readdir(join(root, ".replex-staging"))).toEqual([]);
       await writeFile(outputPath, "pre-existing artifact must not be overwritten");
       await expect(executeMediaExecutionJob(job, authorization, { ffmpegPath, ffprobePath })).rejects.toThrow("already contains different");
       expect(await readFile(outputPath, "utf8")).toBe("pre-existing artifact must not be overwritten");
@@ -263,6 +273,35 @@ describe("V2 media render planning", () => {
       await expect(readFile(join(root, "renders", `${staleJob.jobHash}.mp4`))).rejects.toMatchObject({ code: "ENOENT" });
       await expect(readFile(join(root, "evidence", "renders", `${staleJob.jobHash}.json`))).rejects.toMatchObject({ code: "ENOENT" });
       expect(revisionChecks).toBe(3);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!mediaToolsAvailable)("adds a silent AAC track when the uploaded video has no audio", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-v2-render-silent-"));
+    const source = join(root, "assets", "silent.mp4");
+    await mkdir(join(root, "assets"));
+    const fixture = spawnSync(ffmpegPath, [
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=2", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2", source,
+    ], { windowsHide: true, shell: false });
+    if (fixture.status !== 0) {
+      await rm(root, { recursive: true, force: true });
+      throw new Error("FFmpeg could not generate the synthetic silent-video fixture");
+    }
+    const sourceSha256 = createHash("sha256").update(await readFile(source)).digest("hex");
+    const localHandle = { ...handle, sha256: sourceSha256, ref: "assets/silent.mp4" };
+    const project = uploadedProject(sourceSha256, false, localHandle.ref);
+    const job = buildMediaExecutionJob(project, [localHandle]);
+    expect(job.source.hasAudio).toBe(false);
+    try {
+      const result = await executeMediaExecutionJob(job, {
+        projectRoot: root,
+        resolvedHandles: [{ ...localHandle, path: source }],
+        isRevisionCurrent: async () => true,
+      }, { ffmpegPath, ffprobePath });
+      expect(result.artifact.probe.audioCodec).toBe("aac");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
