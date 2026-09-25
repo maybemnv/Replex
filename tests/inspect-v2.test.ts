@@ -10,6 +10,7 @@ import { MediaEvidenceIndexSchema, type MediaEvidenceArtifact, type MediaEvidenc
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
 
 const sha = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+const pngFixture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJZkAAAAASUVORK5CYII=", "base64");
 
 function fixtureProject(): ProjectV2 {
   const video = {
@@ -104,7 +105,7 @@ function success(result: V2InspectResult) {
 async function evidenceFixture(root: string, project: ProjectV2, options: { sourceSha256?: string; imageBytes?: Buffer; artifactSha256?: string } = {}) {
   const runRef = "media-evidence/" + "a".repeat(24) + "/" + "b".repeat(24);
   const asset = project.assets["asset-browser"];
-  const probeBytes = Buffer.from(JSON.stringify({ durationMs: 4000, bitRateBps: 1200000, streams: [{ index: 0, type: "video", codec: "h264", width: 1920, height: 1080, fps: 30 }] }));
+  const probeBytes = Buffer.from(JSON.stringify({ durationMs: 4000, bitRateBps: 1200000, streams: [{ index: 0, type: "video", codec: "token=codec-secret", width: 1920, height: 1080, fps: 30 }] }));
   const sceneBytes = Buffer.from(JSON.stringify({ version: 1, threshold: 0.3, boundariesMs: [0, 2000, 4000] }));
   const audioBytes = Buffer.from(JSON.stringify({
     version: 1, silenceThresholdDb: -50, peakDbfs: -4.5, meanDbfs: -22.1,
@@ -116,7 +117,7 @@ async function evidenceFixture(root: string, project: ProjectV2, options: { sour
     { kind: "probe" as const, contentType: "application/json" as const, bytes: probeBytes, name: "probe", ext: "json" },
     { kind: "scene_boundaries" as const, contentType: "application/json" as const, bytes: sceneBytes, name: "scene-boundaries", ext: "json" },
     { kind: "audio_summary" as const, contentType: "application/json" as const, bytes: audioBytes, name: "audio-summary", ext: "json" },
-    { kind: "selected_frame" as const, contentType: "image/png" as const, bytes: options.imageBytes ?? Buffer.from("image evidence bytes"), name: "selected-frame", ext: "png", timestampMs: 1200 },
+    { kind: "selected_frame" as const, contentType: "image/png" as const, bytes: options.imageBytes ?? pngFixture, name: "selected-frame", ext: "png", timestampMs: 1200 },
     { kind: "contact_sheet" as const, contentType: "image/jpeg" as const, bytes: contactBytes, name: "contact-sheet", ext: "jpg" },
   ];
   const artifacts: MediaEvidenceArtifact[] = definitions.map((definition) => {
@@ -149,10 +150,9 @@ describe("V2 bounded model inspection", () => {
     const project = fixtureProject();
     const result = success(await inspectProjectV2({ kind: "project_summary" }, context(project)));
     const serialized = JSON.stringify(result);
-    expect(result.data).toMatchObject({ projectId: "project-launch", currentRevisionId: "revision-0", durationMs: 4000, assetCount: 3, clipCount: 3 });
+    expect(result.data).toMatchObject({ projectId: "project-launch", currentRevisionId: "revision-0", composition: { durationMs: 4000 }, assetCount: 3, clipCount: 3 });
     expect(result.evidenceRefs).toEqual([]);
     expect(serialized).not.toContain('"schemaVersion"');
-    expect(serialized).not.toContain('"composition"');
     expect(serialized).not.toContain('"revisions"');
     expect(serialized).not.toContain('"browser"');
     expect(serialized).not.toContain("private.example.test");
@@ -177,7 +177,7 @@ describe("V2 bounded model inspection", () => {
     expect(serialized).not.toContain("private.example.test");
     expect(serialized).not.toContain("local-secret");
     expect(serialized).not.toContain("media/assets/browser.mp4");
-    expect(await inspectProjectV2({ kind: "assets", offset: 0, limit: 1000 }, context(project)))
+    await expect(inspectProjectV2({ kind: "assets", offset: 0, limit: 1000 }, context(project)))
       .resolves.toMatchObject({ ok: false, code: "INVALID_REQUEST" });
   });
 
@@ -205,10 +205,11 @@ describe("V2 bounded model inspection", () => {
         audio: { peakDbfs: -4.5, silenceSegmentCount: 1 },
         transcriptStatus: "unavailable",
       });
+      expect(JSON.stringify(result)).not.toContain("codec-secret");
       expect(result.evidenceRefs).toContain(index.artifacts[0].ref);
       expect(result.images).toHaveLength(1);
       expect(result.images?.[0]).toMatchObject({ ref: index.artifacts[3].ref, mimeType: "image/png" });
-      expect(Buffer.from(result.images![0].bytes)).toEqual(Buffer.from("image evidence bytes"));
+      expect(Buffer.from(result.images![0].bytes)).toEqual(pngFixture);
       expect(JSON.stringify(result)).not.toContain(root);
       expect(JSON.stringify(result)).not.toContain("index.json");
     } finally {
@@ -314,7 +315,7 @@ describe("V2 bounded model inspection", () => {
       expect(JSON.stringify(history)).not.toContain("input");
       expect(JSON.stringify(history)).not.toContain("capture.mp4");
       expect(history.evidenceRefs).toEqual([]);
-      expect(await inspectProjectV2({ kind: "operation_history", limit: 1000 }, context(project)))
+      await expect(inspectProjectV2({ kind: "operation_history", limit: 1000 }, context(project)))
         .resolves.toMatchObject({ ok: false, code: "INVALID_REQUEST" });
     } finally {
       await rm(root, { recursive: true, force: true });
