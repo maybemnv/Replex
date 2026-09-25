@@ -1,12 +1,16 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** PR-A and PR-B are merged to `main` through `805edbe0da5c026e884c61edcc314fc65d23a739`; Gates A and B passed. PR-C code candidate `0dd2b2d2074747a0ae40eef179c50b2b612cf833` on `feat/v2-phase3-agent-loop` passed independent Gate C technical validation using deterministic model responses. Live-provider success, human usefulness, and production readiness remain unproven.
+**Status:** PR-A, PR-B, and PR-C are merged to `main` at `d62beccbba2b797e01322299544e3e36599b65f7`; Gates A, B, and C passed bounded technical evidence. Live-provider success, human usefulness, motion quality, and production readiness remain unproven.
 
 **PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed. GitHub reported no CI status checks for PR-A.
 
 **PR-B validation (25 September 2026):** `tsc -p tsconfig.json --noEmit` passed. The final serial full suite passed 30/30 files and 226/226 tests with zero skips in 253.89 seconds using direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Independent validation reviewed head `fa9f42d`, passed build, 11/11 focused renderer/E2E tests, and `git diff --check`; the render-anchor finding was fixed and retested with actual output pixels. Gate B is met. No GitHub CI result was available during this validation.
 
 **PR-C validation (25 September 2026):** Independent read-only validation passed candidate head `0dd2b2d2074747a0ae40eef179c50b2b612cf833`: `npm run build`; focused V2 agent/inspection/conversation checks passed 5 files/38 tests; full `npx vitest run --maxWorkers=1` passed 35 files/264 tests in 238.67 seconds with direct FFmpeg/FFprobe 9.0.1; `git diff --check 805edbe..HEAD` passed. A provider probe confirmed incomplete responses at the 1,200-token ceiling are rejected. Gate C technical evidence uses a deterministic model client; no live provider call, GitHub CI result, or human-use evaluation is claimed.
+
+**PR-D Phase 4 decision (25 September 2026):** **NO-GO for a runtime ffmpeg-skill evidence adapter in this POC.** The native `src/media-evidence.ts` path already generates the useful approved evidence subset used by bounded V2 inspection. The pinned spike's tiny synthetic samples did not establish a parity or performance advantage, while its dynamic capabilities, command-bearing failure payloads, Windows `drawtext` crash, and process/path constraints would add a second execution boundary. Keep `src/media-evidence.ts` as the selected provider and retain V2-150's `PARTIAL-GO` as research evidence only. See [ADR-008](../architecture/ADR-008-native-v2-evidence-provider.md).
+
+**PR-D Phase 5 validation (25 September 2026, candidate `5b7ec36`):** V2-501 implements a bounded native composition profile: one or two contiguous video clips, optional audio, timed title and picture-in-picture image layers, cut/crossfade, reframing, speed, opacity, and audio controls. A frozen v2 execution job carries authorized asset handles and derived output duration; the backend verifies all inputs and the resulting artifact without mutating canonical state. The agent can propose typed composition operations and render previews through the same reducer. Independent review found no blockers. `npm run build`, the focused composition suite (5/5), `git diff --check origin/main...HEAD`, and the final serial suite (37/37 files, 270/270 tests, zero skips; 252.45 seconds) passed with FFmpeg/FFprobe 9.0.1. The default WinGet links were inaccessible in the sandbox; the final suite used their direct executable paths with scoped elevation. No GitHub CI result is claimed. Phase 5 technical evidence is complete; Gate D remains open pending motion quality and human review.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -220,6 +224,8 @@ The current planner handles one uploaded video clip and supports trim, speed, cr
 
 ### V2-401: Integrate only the approved read-only evidence subset
 
+**Decision:** NO-GO for this POC. The existing native provider covers the useful Phase 2 evidence; the spike did not show an advantage worth a second runtime boundary. V2-150 remains `PARTIAL-GO` as a capability study, not a runtime adoption decision.
+
 - **Objective:** If Phase 2 evidence shows an advantage, wrap only the approved V2-150 read-only evidence subset behind authorized handles and Replex-owned staging.
 - **Why:** Reuse bounded measurements without ceding editing or verification semantics.
 - **Dependencies:** V2-203 baseline and Phase 2 parity evidence. V2-150 PARTIAL-GO alone does not authorize a runtime adapter.
@@ -237,12 +243,12 @@ The current planner handles one uploaded video clip and supports trim, speed, cr
 
 - **Objective:** Support the minimum launch-video composition beyond a single clip.
 - **Why:** Prove a useful edit, not a transcoding demo.
-- **Dependencies:** V2-401 GO/PARTIAL-GO or explicit native-backend decision.
+- **Dependencies:** V2-203 and the explicit native-provider decision in [ADR-008](../architecture/ADR-008-native-v2-evidence-provider.md).
 - **Likely files:** V2 schemas/operations/planner, selected backend adapter, verification and tests.
-- **Contracts:** one primary video track, bounded B-roll/video overlay, audio track, typed caption/text/image layers, allowlisted transitions.
-- **Migration concerns:** Schema additions must be optional/defaulted or require a schema minor migration policy chosen before release.
+- **Contracts:** at most two contiguous primary-track video clips, one optional audio clip, bounded timed text/image overlays, crop/transform/audio controls, and cut/crossfade. The backend consumes a versioned frozen job with authorized asset handles; `ProjectV2` remains unchanged.
+- **Migration concerns:** No canonical schema addition is planned. Render duration is derived from canonical duration minus transition overlaps and is recorded in the frozen job.
 - **Tests:** timing overlaps, audio mix/gain, missing fonts/assets, caption bounds, transition duration, portrait/landscape reframing, multi-asset replay.
-- **Acceptance:** A two-video, one-audio, captioned project previews and exports with deterministic timing and verified delivery properties.
+- **Acceptance:** A two-video, one-audio, title/caption project with an image overlay previews and exports deterministically, replays through semantic operations, and passes independent output verification.
 - **Non-goals:** Unlimited tracks, nested sequences, advanced color/effect graphs.
 - **Rollback:** Revert revision; older readers fail explicitly on unsupported schema/capability, never silently drop layers.
 

@@ -8,8 +8,10 @@ vi.mock("../src/render-v2.js", async () => {
   const { writeFile, mkdir } = await import("node:fs/promises");
   const { dirname, join } = await import("node:path");
   const { createHash } = await import("node:crypto");
+  const buildJob = vi.fn((project: { currentRevisionId: string }) => ({ jobHash: "a".repeat(64), sourceRevisionId: project.currentRevisionId }));
   return {
-    buildMediaExecutionJob: vi.fn((project: { currentRevisionId: string }) => ({ jobHash: "a".repeat(64), sourceRevisionId: project.currentRevisionId })),
+    buildMediaExecutionJob: buildJob,
+    buildCompositionExecutionJob: buildJob,
     executeMediaExecutionJob: vi.fn(async (job: { jobHash: string; sourceRevisionId: string }, authorization: { projectRoot: string }) => {
       const ref = "renders/preview.mp4";
       const bytes = Buffer.from("deterministic mock render");
@@ -98,6 +100,7 @@ vi.mock("../src/media-evidence.js", async () => {
 });
 
 import { applyOperationBatch, semanticHashV2 } from "../src/operations-v2.js";
+import { buildCompositionExecutionJob } from "../src/render-v2.js";
 import { generateMediaEvidence } from "../src/media-evidence.js";
 import { runConversationalEditV2, type V2AgentModelRequest, type V2AgentModelResponse } from "../src/agent-v2.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
@@ -124,7 +127,10 @@ function makeProject() {
     },
     composition: {
       width: 320, height: 180, fps: 24, durationMs: 1000,
-      tracks: [{ id: "track-1", kind: "video", order: 0, muted: false, locked: false }],
+      tracks: [
+        { id: "track-1", kind: "video", order: 0, muted: false, locked: false },
+        { id: "track-overlay", kind: "overlay", order: 1, muted: false, locked: false },
+      ],
       clips: [{ id: "clip-1", assetId: "asset-1", trackId: "track-1", timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 1000, speed: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 }, opacity: 1, audioGainDb: 0, muted: false }],
       layers: [],
     },
@@ -154,7 +160,10 @@ describe("V2 conversation preview evidence", () => {
       actor: "agent",
       intentId: "intent-preview",
       evidenceRefs: [evidenceRef],
-      operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }],
+      operations: [
+        { type: "set_speed", clipId: "clip-1", speed: 1.25 },
+        { type: "add_text_layer", layer: { id: "title-1", trackId: "track-overlay", kind: "text", timelineStartMs: 0, durationMs: 1000, properties: { text: "Launch faster", fontSize: 36, color: "#ffffff" }, keyframes: [] } },
+      ],
     });
     expect(predicted.ok).toBe(true);
     if (!predicted.ok) return;
@@ -164,7 +173,10 @@ describe("V2 conversation preview evidence", () => {
       (input) => ({ responseId: "response-edit", calls: [{ id: "call-edit", name: "propose_edit_batch", arguments: {
         baseRevisionId: input.context.currentRevisionId,
         evidenceRefs: [evidenceRef],
-        operations: [{ type: "set_speed", clipId: "clip-1", speed: 1.25 }],
+        operations: [
+          { type: "set_speed", clipId: "clip-1", speed: 1.25 },
+          { type: "add_text_layer", layer: { id: "title-1", trackId: "track-overlay", kind: "text", timelineStartMs: 0, durationMs: 1000, properties: { text: "Launch faster", fontSize: 36, color: "#ffffff" }, keyframes: [] } },
+        ],
       } }] }),
       (input) => {
         const result = input.toolResults[0];
@@ -194,6 +206,7 @@ describe("V2 conversation preview evidence", () => {
     });
 
     expect(result).toMatchObject({ ok: true, previews: [{ renderJobHash: "a".repeat(64) }] });
+    expect(buildCompositionExecutionJob).toHaveBeenCalledOnce();
     expect(commit.mock.calls[0]?.[0].project.outputs).toHaveLength(1);
     expect(result.ok && result.project.outputs).toHaveLength(1);
     expect(model.respond).toHaveBeenCalledTimes(3);

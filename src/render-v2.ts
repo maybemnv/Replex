@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { semanticHashV2 } from "./operations-v2.js";
-import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
+import { resolveRenderFont } from "./render.js";
+import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, TransitionV2Schema, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const positiveInt = z.number().int().finite().positive();
@@ -33,10 +35,47 @@ const jobPayloadSchema = z.object({
   }).strict(),
 }).strict();
 
+const compositionVideoClipSchema = jobPayloadSchema.shape.clip.extend({
+  assetId: z.string().min(1),
+  timelineStartMs: z.number().int().nonnegative(),
+  transitionOut: TransitionV2Schema.optional(),
+});
+const compositionLayerSchema = z.discriminatedUnion("kind", [
+  z.object({
+    id: z.string().min(1), kind: z.literal("text"), timelineStartMs: z.number().int().nonnegative(), durationMs: positiveInt,
+    text: z.string().min(1).max(1024), fontSize: z.number().int().min(8).max(96), color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  }).strict(),
+  z.object({
+    id: z.string().min(1), kind: z.literal("image"), timelineStartMs: z.number().int().nonnegative(), durationMs: positiveInt, assetId: z.string().min(1),
+  }).strict(),
+]);
+const compositionJobPayloadSchema = z.object({
+  jobVersion: z.literal(2),
+  projectId: z.string().min(1),
+  sourceRevisionId: z.string().min(1),
+  sourceRevisionHash: sha256Schema,
+  assetInputs: z.array(z.object({
+    assetId: z.string().min(1),
+    handle: AssetHandleSchema,
+    kind: z.enum(["video", "audio", "image"]),
+    source: z.object({ width: positiveInt.optional(), height: positiveInt.optional(), durationMs: positiveInt.optional(), hasAudio: z.boolean() }).strict(),
+  }).strict()).min(1).max(4),
+  composition: z.object({ width: positiveInt, height: positiveInt, fps: z.number().positive().finite(), durationMs: positiveInt, outputDurationMs: positiveInt }).strict(),
+  videoClips: z.array(compositionVideoClipSchema).min(1).max(2),
+  audioClip: z.object({ id: z.string().min(1), assetId: z.string().min(1), sourceInMs: z.number().int().nonnegative(), sourceOutMs: positiveInt, speed: z.number().min(0.25).max(4), audioGainDb: finite, muted: z.boolean() }).strict().optional(),
+  layers: z.array(compositionLayerSchema).max(2),
+  fontSha256: sha256Schema.optional(),
+}).strict();
+
 type JobPayload = z.infer<typeof jobPayloadSchema>;
+type CompositionJobPayload = z.infer<typeof compositionJobPayloadSchema>;
+type FrozenJobPayload = JobPayload | CompositionJobPayload;
+type FrozenRenderJob = MediaExecutionJob | CompositionExecutionJob;
+const frozenJobPayloadSchema = z.discriminatedUnion("jobVersion", [jobPayloadSchema, compositionJobPayloadSchema]);
 type DeepReadonly<T> = T extends (...args: never[]) => unknown ? T : T extends readonly unknown[] ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 
 export type MediaExecutionJob = DeepReadonly<JobPayload & { jobHash: string }>;
+export type CompositionExecutionJob = DeepReadonly<CompositionJobPayload & { jobHash: string }>;
 
 export interface ResolvedAssetHandle {
   assetId: string;
@@ -66,6 +105,13 @@ export interface MediaExecutionPreflight {
   assetSha256: string;
 }
 
+export interface CompositionExecutionPreflight {
+  status: "passed";
+  sourceRevisionId: string;
+  sourceRevisionHash: string;
+  assets: Array<{ assetId: string; sha256: string }>;
+}
+
 export interface RenderArtifactV2 {
   outputId: string;
   ref: string;
@@ -75,7 +121,7 @@ export interface RenderArtifactV2 {
   sourceRevisionHash: string;
   renderJobHash: string;
   backendId: "native-ffmpeg";
-  backendVersion: "1";
+  backendVersion: string;
   ffmpegVersion: string;
   verificationRefId: string;
   verification: {
@@ -238,13 +284,160 @@ export function buildMediaExecutionJob(projectInput: ProjectV2, handles: readonl
   return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as MediaExecutionJob;
 }
 
+function assertFrozenJobHash(job: FrozenRenderJob): FrozenJobPayload {
+  const { jobHash, ...payloadInput } = job;
+  const payload = frozenJobPayloadSchema.parse(payloadInput);
+  if (digest(canonicalJson(payload)) !== jobHash) throw new Error("media execution job hash does not match its frozen plan");
+  return payload;
+}
+
+function compositionFontSha256(): string {
+  const { file } = resolveRenderFont();
+  const info = lstatSync(file);
+  if (extname(file).toLowerCase() !== ".ttf" || info.isSymbolicLink() || !info.isFile() || info.size > 32 * 1024 * 1024) throw new Error("composition font must be a bounded regular TrueType file");
+  return digest(readFileSync(file));
+}
+
+/** Plans the bounded native 2D profile without exposing ProjectV2 or host paths to the backend. */
+export function buildCompositionExecutionJob(projectInput: ProjectV2, handles: readonly AssetHandle[]): CompositionExecutionJob {
+  const project = ProjectV2Schema.parse(projectInput);
+  const { width, height, fps, durationMs } = project.composition;
+  if (width < 16 || height < 16 || width % 2 !== 0 || height % 2 !== 0 || width > 4096 || height > 4096 || fps < 1 || fps > 60 || durationMs > 120_000) {
+    throw new Error("composition exceeds native V2 render limits");
+  }
+  const revision = project.revisions.find(({ id }) => id === project.currentRevisionId);
+  const sourceRevisionHash = semanticHashV2(project);
+  if (!revision || revision.manifestSha256 !== sourceRevisionHash) throw new Error("current revision manifest hash does not match semantic project state");
+
+  const authorized = new Map<string, AssetHandle>();
+  for (const handleInput of handles) {
+    const handle = AssetHandleSchema.parse(handleInput);
+    const previous = authorized.get(handle.assetId);
+    if (previous && canonicalJson(previous) !== canonicalJson(handle)) throw new Error("authorized handles contain conflicting identity for one asset");
+    authorized.set(handle.assetId, handle);
+  }
+  const inputs = new Map<string, CompositionJobPayload["assetInputs"][number]>();
+  const addInput = (assetId: string, kind: "video" | "audio" | "image") => {
+    const asset = project.assets[assetId];
+    if (!asset || !(kind === "video" ? ["uploaded_video", "browser_capture"].includes(asset.type) : kind === "audio" ? asset.type === "audio" : ["image", "generated_graphic"].includes(asset.type))) {
+      throw new Error(`composition asset ${assetId} has an unsupported media type`);
+    }
+    const handle = authorized.get(assetId);
+    if (!handle || handle.sha256 !== asset.sha256 || handle.ref !== (asset.path ?? asset.objectRef)) throw new Error("authorized asset handle does not match the selected immutable asset");
+    const existing = inputs.get(assetId);
+    if (existing) {
+      if (existing.kind !== kind) throw new Error("one asset cannot be used with conflicting composition media types");
+      return existing;
+    }
+    const source = kind === "video"
+      ? { width: asset.probe.width, height: asset.probe.height, durationMs: asset.probe.durationMs, hasAudio: asset.probe.audioCodec !== undefined }
+      : kind === "audio"
+        ? { durationMs: asset.probe.durationMs, hasAudio: true }
+        : { width: asset.probe.width, height: asset.probe.height, hasAudio: false };
+    if (kind !== "audio" && (!source.width || source.width < 2 || source.width > 4096 || !source.height || source.height < 2 || source.height > 4096 || source.width * source.height > 16_777_216)) {
+      throw new Error("composition visual asset dimensions exceed native V2 render limits");
+    }
+    const planned = { assetId, handle, kind, source };
+    inputs.set(assetId, planned);
+    return planned;
+  };
+
+  const videoEntries = project.composition.clips
+    .filter((clip) => project.assets[clip.assetId]?.type !== "audio")
+    .sort((left, right) => left.timelineStartMs - right.timelineStartMs);
+  const audioEntries = project.composition.clips.filter((clip) => project.assets[clip.assetId]?.type === "audio");
+  if (videoEntries.length < 1 || videoEntries.length > 2 || audioEntries.length > 1) throw new Error("native composition supports one or two video clips and at most one audio clip");
+  if (videoEntries.length === 2 && videoEntries[0]!.assetId === videoEntries[1]!.assetId) throw new Error("native composition requires distinct video assets");
+  const primaryTrackId = videoEntries[0]!.trackId;
+  const primaryTrack = project.composition.tracks.find(({ id }) => id === primaryTrackId);
+  if (!primaryTrack || primaryTrack.kind !== "video" || videoEntries.some(({ trackId }) => trackId !== primaryTrackId)) throw new Error("native composition video clips must use one video track");
+  if (videoEntries[0]!.timelineStartMs !== 0) throw new Error("native composition video must start at timeline zero");
+
+  const videoClips = videoEntries.map((clip, index) => {
+    const asset = project.assets[clip.assetId]!;
+    const track = project.composition.tracks.find(({ id }) => id === clip.trackId)!;
+    const input = addInput(clip.assetId, "video");
+    if (!input.source.durationMs || clip.sourceOutMs > input.source.durationMs) throw new Error("video clip source range exceeds its immutable asset");
+    if (Math.abs(clip.transform.x) > width * 2 || Math.abs(clip.transform.y) > height * 2 || clip.transform.scale > 8
+      || Math.max(width, height) * clip.transform.scale > 8192 || Math.abs(clip.transform.rotation) > 360 || clip.audioGainDb < -60 || clip.audioGainDb > 24) {
+      throw new Error("clip transform or audio gain exceeds native V2 render limits");
+    }
+    if (asset.type !== "uploaded_video" && asset.type !== "browser_capture") throw new Error("native composition video input is unsupported");
+    const planned = {
+      id: clip.id, assetId: clip.assetId, timelineStartMs: clip.timelineStartMs, sourceInMs: clip.sourceInMs, sourceOutMs: clip.sourceOutMs,
+      speed: clip.speed, transform: clip.transform, ...(clip.crop ? { crop: clip.crop } : {}), opacity: clip.opacity,
+      audioGainDb: clip.audioGainDb, muted: clip.muted || track.muted,
+      ...(clip.transitionOut ? { transitionOut: clip.transitionOut } : {}),
+    };
+    return compositionVideoClipSchema.parse(planned);
+  });
+  if (videoClips.at(-1)!.transitionOut) throw new Error("the final video clip cannot have an outgoing transition");
+  const clipDurations = videoClips.map((clip) => (clip.sourceOutMs - clip.sourceInMs) / clip.speed);
+  if (videoClips.length === 2 && Math.abs(videoClips[1]!.timelineStartMs - clipDurations[0]!) > 1) throw new Error("native composition video clips must be contiguous");
+  const canonicalDuration = clipDurations.reduce((total, duration) => total + duration, 0);
+  if (Math.abs(canonicalDuration - durationMs) > 1) throw new Error("native composition video clips must fill the canonical duration");
+  const transition = videoClips[0]!.transitionOut;
+  const transitionMs = transition?.type === "crossfade" ? transition.durationMs : 0;
+  const outputDurationMs = Math.round(canonicalDuration - transitionMs);
+  if (outputDurationMs <= 0) throw new Error("native composition render duration must be positive");
+
+  let audioClip: CompositionJobPayload["audioClip"];
+  if (audioEntries.length) {
+    const clip = audioEntries[0]!;
+    const track = project.composition.tracks.find(({ id }) => id === clip.trackId);
+    const input = addInput(clip.assetId, "audio");
+    if (!track || track.kind !== "audio" || clip.timelineStartMs !== 0 || clip.audioGainDb < -60 || clip.audioGainDb > 24
+      || (clip.sourceOutMs - clip.sourceInMs) / clip.speed < outputDurationMs) throw new Error("native audio clip must be a bounded full-length clip on an audio track");
+    audioClip = { id: clip.id, assetId: clip.assetId, sourceInMs: clip.sourceInMs, sourceOutMs: clip.sourceOutMs, speed: clip.speed, audioGainDb: clip.audioGainDb, muted: clip.muted || track.muted };
+    if (input.source.durationMs && clip.sourceOutMs > input.source.durationMs) throw new Error("audio clip source range exceeds its immutable asset");
+  }
+
+  const activeLayers = project.composition.layers.filter((layer) => !project.composition.tracks.find(({ id }) => id === layer.trackId)?.muted);
+  if (activeLayers.length > 2 || activeLayers.filter(({ kind }) => kind === "text").length > 1 || activeLayers.filter(({ kind }) => kind === "image").length > 1
+    || activeLayers.some(({ kind }) => kind === "graphic")) throw new Error("native composition supports one timed text layer and one timed image layer");
+  const layers = activeLayers.map((layer) => {
+    if (layer.keyframes.length || layer.timelineStartMs + layer.durationMs > outputDurationMs) throw new Error("native composition layers must be static and fit the rendered duration");
+    if (layer.kind === "text" && "text" in layer.properties) {
+      if (layer.properties.fontFamily && layer.properties.fontFamily !== "Replex Sans") throw new Error("native composition supports only the Replex Sans font preset");
+      const text = layer.properties.text;
+      if (Buffer.byteLength(text, "utf8") > 2048) throw new Error("composition text exceeds the local render limit");
+      const requestedFontSize = layer.properties.fontSize ?? 36;
+      // ponytail: approximate title width with average glyph size; font-metric layout if reviewer samples show clipping.
+      const fontSize = Math.min(requestedFontSize, Math.floor(width * 0.9 / (Math.max(1, [...text].length) * 0.58)));
+      if (fontSize < 8) throw new Error("composition text is too long to fit the native title layout");
+      return compositionLayerSchema.parse({
+        id: layer.id, kind: "text", timelineStartMs: layer.timelineStartMs, durationMs: layer.durationMs,
+        text, fontSize, color: layer.properties.color ?? "#ffffff",
+      });
+    }
+    if (layer.kind !== "image" || !("assetId" in layer.properties)) throw new Error("native composition does not support this layer kind");
+    const assetId = layer.properties.assetId;
+    addInput(assetId, "image");
+    return compositionLayerSchema.parse({ id: layer.id, kind: "image", timelineStartMs: layer.timelineStartMs, durationMs: layer.durationMs, assetId });
+  });
+
+  const payload = compositionJobPayloadSchema.parse({
+    jobVersion: 2,
+    projectId: project.projectId,
+    sourceRevisionId: project.currentRevisionId,
+    sourceRevisionHash,
+    assetInputs: [...inputs.values()],
+    composition: { width, height, fps, durationMs, outputDurationMs },
+    videoClips,
+    ...(audioClip ? { audioClip } : {}),
+    layers,
+    ...(layers.some(({ kind }) => kind === "text") ? { fontSha256: compositionFontSha256() } : {}),
+  });
+  return freezeDeep({ ...payload, jobHash: digest(canonicalJson(payload)) }) as CompositionExecutionJob;
+}
+
 function pathInside(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
   return relation !== "" && !relation.startsWith(`..${sep}`) && relation !== ".." && !isAbsolute(relation);
 }
 
-async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandle, payload: JobPayload): Promise<string> {
-  if (handle.assetId !== payload.assetHandle.assetId || handle.sha256 !== payload.assetHandle.sha256 || handle.ref !== payload.assetHandle.ref) {
+async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandle, expected: AssetHandle): Promise<string> {
+  if (handle.assetId !== expected.assetId || handle.sha256 !== expected.sha256 || handle.ref !== expected.ref) {
     throw new Error("resolved asset handle does not match the frozen job");
   }
   const root = await realpath(projectRoot);
@@ -254,9 +447,9 @@ async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandl
     throw new Error("authorized asset handle escapes the project root");
   }
   const [rootReal, fileReal, fileStat, linkStat] = await Promise.all([realpath(root), realpath(resolvedHandle), stat(resolvedHandle), lstat(resolvedHandle)]);
-  if (!pathInside(rootReal, fileReal) || !fileStat.isFile() || linkStat.isSymbolicLink()) throw new Error("authorized asset handle is not a regular project media file");
+  if (!pathInside(rootReal, fileReal) || !fileStat.isFile() || linkStat.isSymbolicLink() || linkStat.nlink !== 1) throw new Error("authorized asset handle is not a regular project media file");
   const actualHash = await digestFile(fileReal);
-  if (actualHash !== payload.assetHandle.sha256) throw new Error("uploaded source bytes changed since the job was planned");
+  if (actualHash !== expected.sha256) throw new Error("uploaded source bytes changed since the job was planned");
   return fileReal;
 }
 
@@ -269,7 +462,7 @@ async function checkPreflight(
   }
   const resolved = authorization.resolvedHandles.find(({ assetId }) => assetId === payload.assetHandle.assetId);
   if (!resolved) throw new Error("authorized asset handle was not resolved for this job");
-  const sourcePath = await checkedSourcePath(authorization.projectRoot, resolved, payload);
+  const sourcePath = await checkedSourcePath(authorization.projectRoot, resolved, payload.assetHandle);
   return {
     sourcePath,
     result: {
@@ -282,12 +475,45 @@ async function checkPreflight(
   };
 }
 
+async function checkCompositionPreflight(
+  payload: CompositionJobPayload,
+  authorization: MediaExecutionAuthorization,
+): Promise<{ result: CompositionExecutionPreflight; sourcePaths: Map<string, string> }> {
+  if (!await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) throw new Error("media execution job revision is no longer current");
+  const sourcePaths = new Map<string, string>();
+  for (const input of payload.assetInputs) {
+    const resolved = authorization.resolvedHandles.find(({ assetId }) => assetId === input.assetId);
+    if (!resolved) throw new Error("authorized asset handle was not resolved for this job");
+    sourcePaths.set(input.assetId, await checkedSourcePath(authorization.projectRoot, resolved, input.handle));
+  }
+  return {
+    sourcePaths,
+    result: {
+      status: "passed",
+      sourceRevisionId: payload.sourceRevisionId,
+      sourceRevisionHash: payload.sourceRevisionHash,
+      assets: payload.assetInputs.map(({ assetId, handle }) => ({ assetId, sha256: handle.sha256 })),
+    },
+  };
+}
+
 /** Checks job/revision authorization and immutable source identity before any backend work. */
 export async function verifyMediaExecutionPreflight(
   job: MediaExecutionJob,
   authorization: MediaExecutionAuthorization,
 ): Promise<MediaExecutionPreflight> {
   return (await checkPreflight(assertJobHash(job), authorization)).result;
+}
+
+/** Checks every source handle and the pinned revision before multi-input composition. */
+export async function verifyCompositionExecutionPreflight(
+  job: CompositionExecutionJob,
+  authorization: MediaExecutionAuthorization,
+): Promise<CompositionExecutionPreflight> {
+  const { jobHash, ...payloadInput } = job;
+  const payload = compositionJobPayloadSchema.parse(payloadInput);
+  if (digest(canonicalJson(payload)) !== jobHash) throw new Error("media execution job hash does not match its frozen plan");
+  return (await checkCompositionPreflight(payload, authorization)).result;
 }
 
 interface ProcessResult { stdout: string; stderr: string }
@@ -355,17 +581,20 @@ function seconds(milliseconds: number): string {
   return numberText(milliseconds / 1000);
 }
 
-function evenCrop(job: JobPayload): { x: number; y: number; width: number; height: number } | undefined {
-  const crop = job.clip.crop;
+function evenCropFor(width: number, height: number, crop: JobPayload["clip"]["crop"]): { x: number; y: number; width: number; height: number } | undefined {
   if (!crop) return undefined;
-  const sourceWidth = job.source.width - job.source.width % 2;
-  const sourceHeight = job.source.height - job.source.height % 2;
-  const x = Math.floor(job.source.width * crop.x / 2) * 2;
-  const y = Math.floor(job.source.height * crop.y / 2) * 2;
-  const width = Math.min(sourceWidth - x, Math.floor(job.source.width * crop.width / 2) * 2);
-  const height = Math.min(sourceHeight - y, Math.floor(job.source.height * crop.height / 2) * 2);
-  if (x < 0 || y < 0 || width < 2 || height < 2) throw new Error("clip crop is too small for native V2 rendering");
-  return { x, y, width, height };
+  const sourceWidth = width - width % 2;
+  const sourceHeight = height - height % 2;
+  const x = Math.floor(width * crop.x / 2) * 2;
+  const y = Math.floor(height * crop.y / 2) * 2;
+  const cropWidth = Math.min(sourceWidth - x, Math.floor(width * crop.width / 2) * 2);
+  const cropHeight = Math.min(sourceHeight - y, Math.floor(height * crop.height / 2) * 2);
+  if (x < 0 || y < 0 || cropWidth < 2 || cropHeight < 2) throw new Error("clip crop is too small for native V2 rendering");
+  return { x, y, width: cropWidth, height: cropHeight };
+}
+
+function evenCrop(job: JobPayload): { x: number; y: number; width: number; height: number } | undefined {
+  return evenCropFor(job.source.width, job.source.height, job.clip.crop);
 }
 
 function atempoFilters(speed: number): string {
@@ -411,6 +640,120 @@ function buildFfmpegArgs(job: JobPayload, sourcePath: string, stagedPath: string
   return args;
 }
 
+function escapeFilterPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'").replace(/,/g, "\\,").replace(/\[/g, "\\[").replace(/\]/g, "\\]").replace(/;/g, "\\;");
+}
+
+async function buildCompositionFfmpegArgs(
+  job: CompositionJobPayload,
+  sourcePaths: ReadonlyMap<string, string>,
+  stageDir: string,
+  stagedPath: string,
+): Promise<string[]> {
+  const { width, height, fps, outputDurationMs } = job.composition;
+  const duration = seconds(outputDurationMs);
+  const args = ["-nostdin", "-hide_banner", "-loglevel", "error", "-y"];
+  const inputIndexes = new Map<string, number>();
+  job.assetInputs.forEach((input, index) => {
+    const path = sourcePaths.get(input.assetId);
+    if (!path) throw new Error("composition source path was not authorized");
+    inputIndexes.set(input.assetId, index);
+    if (input.kind === "image") args.push("-loop", "1", "-framerate", numberText(fps));
+    args.push("-i", path);
+  });
+  const backgroundIndex = job.assetInputs.length;
+  args.push("-f", "lavfi", "-t", duration, "-i", `color=c=black:s=${width}x${height}:r=${numberText(fps)}`);
+  const hasAudio = job.videoClips.some((clip) => !clip.muted && job.assetInputs.find(({ assetId }) => assetId === clip.assetId)?.source.hasAudio)
+    || Boolean(job.audioClip && !job.audioClip.muted);
+  const silenceIndex = backgroundIndex + 1;
+  if (!hasAudio) args.push("-f", "lavfi", "-t", duration, "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
+
+  const filters: string[] = [];
+  if (job.videoClips.length === 1) filters.push(`[${backgroundIndex}:v]format=rgba[bg0]`);
+  else filters.push(`[${backgroundIndex}:v]split=2[bg0][bg1]`);
+  for (const [index, clip] of job.videoClips.entries()) {
+    const inputIndex = inputIndexes.get(clip.assetId);
+    const input = job.assetInputs.find(({ assetId }) => assetId === clip.assetId);
+    if (inputIndex === undefined || !input?.source.width || !input.source.height) throw new Error("composition video input is incomplete");
+    const crop = evenCropFor(input.source.width, input.source.height, clip.crop);
+    const cropFilter = crop ? `,crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}` : "";
+    const scale = numberText(clip.transform.scale);
+    const rotation = numberText(clip.transform.rotation * Math.PI / 180);
+    filters.push(`[${inputIndex}:v]trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=none,colorchannelmixer=aa=${numberText(clip.opacity)}[clip${index}]`);
+    filters.push(`[bg${index}][clip${index}]overlay=x='(W-w)*${numberText(clip.transform.anchorX)}+${numberText(clip.transform.x)}':y='(H-h)*${numberText(clip.transform.anchorY)}+${numberText(clip.transform.y)}':shortest=1:eof_action=pass:format=auto,format=yuv420p,setsar=1[video${index}]`);
+  }
+
+  let videoLabel = "video0";
+  if (job.videoClips.length === 2) {
+    const transition = job.videoClips[0]!.transitionOut;
+    if (transition?.type === "crossfade") {
+      const firstDuration = (job.videoClips[0]!.sourceOutMs - job.videoClips[0]!.sourceInMs) / job.videoClips[0]!.speed;
+      filters.push(`[video0][video1]xfade=transition=fade:duration=${seconds(transition.durationMs)}:offset=${seconds(firstDuration - transition.durationMs)}[videoJoined]`);
+    } else {
+      filters.push("[video0][video1]concat=n=2:v=1:a=0[videoJoined]");
+    }
+    videoLabel = "videoJoined";
+  }
+
+  for (const layer of job.layers) {
+    const start = seconds(layer.timelineStartMs);
+    const end = seconds(layer.timelineStartMs + layer.durationMs);
+    if (layer.kind === "image") {
+      const inputIndex = inputIndexes.get(layer.assetId);
+      if (inputIndex === undefined) throw new Error("composition image input was not authorized");
+      const nextLabel = `videoImage${job.layers.indexOf(layer)}`;
+      const imageWidth = Math.max(2, Math.floor(width / 3 / 2) * 2);
+      const imageHeight = Math.max(2, Math.floor(height / 3 / 2) * 2);
+      filters.push(`[${inputIndex}:v]scale=${imageWidth}:${imageHeight}:force_original_aspect_ratio=decrease:reset_sar=1,format=rgba[imageOverlay]`);
+      filters.push(`[${videoLabel}][imageOverlay]overlay=x=W-w-16:y=16:enable='between(t,${start},${end})':shortest=1:eof_action=pass:format=auto,format=yuv420p[${nextLabel}]`);
+      videoLabel = nextLabel;
+    } else {
+      const textPath = join(stageDir, `overlay-${job.layers.indexOf(layer)}.txt`);
+      await writeFile(textPath, layer.text, { flag: "wx", mode: 0o600 });
+      const font = resolveRenderFont();
+      if (!job.fontSha256 || compositionFontSha256() !== job.fontSha256) throw new Error("configured composition font changed since the job was planned");
+      const nextLabel = `videoText${job.layers.indexOf(layer)}`;
+      filters.push(`[${videoLabel}]drawtext=fontfile='${escapeFilterPath(font.file)}':textfile='${escapeFilterPath(textPath)}':expansion=none:fontcolor=0x${layer.color.slice(1)}:fontsize=${layer.fontSize}:x=(w-text_w)/2:y=h-text_h-16:enable='between(t,${start},${end})'[${nextLabel}]`);
+      videoLabel = nextLabel;
+    }
+  }
+
+  const audioLabels: string[] = [];
+  const crossfade = job.videoClips[0]?.transitionOut?.type === "crossfade" ? job.videoClips[0].transitionOut.durationMs : 0;
+  for (const [index, clip] of job.videoClips.entries()) {
+    const input = job.assetInputs.find(({ assetId }) => assetId === clip.assetId);
+    if (!input?.source.hasAudio || clip.muted) continue;
+    const inputIndex = inputIndexes.get(clip.assetId)!;
+    const clipDuration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
+    const gain = `volume=${numberText(clip.audioGainDb)}dB`;
+    const fade = crossfade ? index === 0 ? `,afade=t=out:st=${seconds(clipDuration - crossfade)}:d=${seconds(crossfade)}` : `,afade=t=in:st=0:d=${seconds(crossfade)}` : "";
+    const delayMs = index === 0 ? 0 : Math.max(0, Math.round((job.videoClips[0]!.sourceOutMs - job.videoClips[0]!.sourceInMs) / job.videoClips[0]!.speed - crossfade));
+    const delay = delayMs ? `,adelay=${delayMs}|${delayMs}` : "";
+    const label = `audio${audioLabels.length}`;
+    filters.push(`[${inputIndex}:a]atrim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},asetpts=PTS-STARTPTS,${atempoFilters(clip.speed)},${gain},apad,atrim=duration=${seconds(clipDuration)}${fade}${delay}[${label}]`);
+    audioLabels.push(label);
+  }
+  if (job.audioClip && !job.audioClip.muted) {
+    const inputIndex = inputIndexes.get(job.audioClip.assetId);
+    if (inputIndex === undefined) throw new Error("composition audio input was not authorized");
+    const label = `audio${audioLabels.length}`;
+    filters.push(`[${inputIndex}:a]atrim=start=${seconds(job.audioClip.sourceInMs)}:end=${seconds(job.audioClip.sourceOutMs)},asetpts=PTS-STARTPTS,${atempoFilters(job.audioClip.speed)},volume=${numberText(job.audioClip.audioGainDb)}dB,apad,atrim=duration=${duration}[${label}]`);
+    audioLabels.push(label);
+  }
+  if (audioLabels.length === 0) filters.push(`[${silenceIndex}:a]atrim=duration=${duration}[audio]`);
+  else if (audioLabels.length === 1) filters.push(`[${audioLabels[0]}]apad,atrim=duration=${duration}[audio]`);
+  else filters.push(`${audioLabels.map((label) => `[${label}]`).join("")}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0,apad,atrim=duration=${duration}[audio]`);
+
+  args.push(
+    "-filter_complex_threads", "1", "-filter_complex", filters.join(";"),
+    "-map", `[${videoLabel}]`, "-map", "[audio]", "-t", duration,
+    "-r", numberText(fps), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-threads", "1", "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-b:a", "128k", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact",
+    "-metadata", "creation_time=1970-01-01T00:00:00Z", "-movflags", "+faststart", "-fs", String(MAX_RENDER_ARTIFACT_BYTES), stagedPath,
+  );
+  return args;
+}
+
 interface OutputProbe {
   durationMs: number;
   width: number;
@@ -428,12 +771,13 @@ function parseRate(rate: unknown): number {
 
 async function verifyRenderedOutput(
   path: string,
-  job: JobPayload,
+  job: FrozenJobPayload,
   ffprobePath: string,
   ffmpegPath: string,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ probe: OutputProbe; sha256: string }> {
+  const expectedDurationMs = job.jobVersion === 1 ? job.composition.durationMs : job.composition.outputDurationMs;
   const initialFile = await stat(path);
   if (!initialFile.isFile() || initialFile.size > MAX_RENDER_ARTIFACT_BYTES) throw new Error("render artifact exceeds the local size limit");
   const probeRun = await runProcess(ffprobePath, [
@@ -449,7 +793,7 @@ async function verifyRenderedOutput(
     || video.width !== job.composition.width || video.height !== job.composition.height
     || Math.abs(fps - job.composition.fps) > 0.01
     || !Number.isFinite(durationSeconds)
-    || Math.abs(durationSeconds * 1000 - job.composition.durationMs) > 1500 / job.composition.fps) {
+    || Math.abs(durationSeconds * 1000 - expectedDurationMs) > 1500 / job.composition.fps) {
     throw new Error("render output does not meet its frozen media requirements");
   }
   await runProcess(ffmpegPath, ["-nostdin", "-v", "error", "-xerror", "-i", path, "-f", "null", "-"], timeoutMs, signal);
@@ -523,20 +867,48 @@ async function removePublished(file: PublishedFile | undefined): Promise<void> {
   } catch { /* It was already removed; do not replace the original failure. */ }
 }
 
+function jobAssetHandles(payload: FrozenJobPayload): AssetHandle[] {
+  return payload.jobVersion === 1 ? [payload.assetHandle] : payload.assetInputs.map(({ handle }) => handle);
+}
+
+async function assertJobSourcesCurrent(
+  root: string,
+  authorization: MediaExecutionAuthorization,
+  payload: FrozenJobPayload,
+  sourcePaths: ReadonlyMap<string, string>,
+  boundary: "before" | "after",
+): Promise<void> {
+  for (const expected of jobAssetHandles(payload)) {
+    const resolved = authorization.resolvedHandles.find(({ assetId }) => assetId === expected.assetId);
+    if (!resolved) throw new Error("authorized asset handle was not resolved for this job");
+    const actual = await checkedSourcePath(root, resolved, expected);
+    if (actual !== sourcePaths.get(expected.assetId)) throw new Error(`media execution revision or source changed ${boundary} output promotion`);
+  }
+  if (!await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
+    throw new Error(`media execution revision or source changed ${boundary} output promotion`);
+  }
+}
+
 /** Executes a frozen job and returns a derived artifact without mutating ProjectV2. */
 export async function executeMediaExecutionJob(
-  job: MediaExecutionJob,
+  job: FrozenRenderJob,
   authorization: MediaExecutionAuthorization,
   options: MediaExecutionOptions = {},
-): Promise<{ preflight: MediaExecutionPreflight; artifact: RenderArtifactV2 }> {
+): Promise<{ preflight: MediaExecutionPreflight | CompositionExecutionPreflight; artifact: RenderArtifactV2 }> {
   const timeoutMs = options.timeoutMs ?? 120_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error("media execution timeout is outside the supported range");
-  const payload = assertJobHash(job);
-  const checked = await checkPreflight(payload, authorization);
-  const preflight = checked.result;
-  const handle = authorization.resolvedHandles.find(({ assetId }) => assetId === payload.assetHandle.assetId);
-  if (!handle) throw new Error("authorized asset handle was not resolved for this job");
-  const sourcePath = checked.sourcePath;
+  const payload = assertFrozenJobHash(job);
+  let preflight: MediaExecutionPreflight | CompositionExecutionPreflight;
+  let sourcePaths: Map<string, string>;
+  if (payload.jobVersion === 1) {
+    const checked = await checkPreflight(payload, authorization);
+    preflight = checked.result;
+    sourcePaths = new Map([[payload.assetHandle.assetId, checked.sourcePath]]);
+  } else {
+    const checked = await checkCompositionPreflight(payload, authorization);
+    preflight = checked.result;
+    sourcePaths = checked.sourcePaths;
+  }
   const root = await realpath(authorization.projectRoot);
   const stageRoot = await realContainedDirectory(root, ".replex-staging");
   const stageDir = await mkdtemp(join(stageRoot, `${job.jobHash.slice(0, 16)}-`));
@@ -546,7 +918,10 @@ export async function executeMediaExecutionJob(
   const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
   try {
-    await runProcess(ffmpegPath, buildFfmpegArgs(payload, sourcePath, stagedPath), timeoutMs, options.signal, 8 * 1024 * 1024);
+    const args = payload.jobVersion === 1
+      ? buildFfmpegArgs(payload, sourcePaths.get(payload.assetHandle.assetId)!, stagedPath)
+      : await buildCompositionFfmpegArgs(payload, sourcePaths, stageDir, stagedPath);
+    await runProcess(ffmpegPath, args, timeoutMs, options.signal, 8 * 1024 * 1024);
     const verified = await verifyRenderedOutput(stagedPath, payload, ffprobePath, ffmpegPath, timeoutMs, options.signal);
     const version = await runProcess(ffmpegPath, ["-version"], timeoutMs, options.signal, 32 * 1024);
     const ffmpegVersion = version.stdout.split(/\r?\n/, 1)[0]?.trim();
@@ -570,7 +945,7 @@ export async function executeMediaExecutionJob(
       artifactRef: `renders/${outputName}`,
       artifactSha256: verified.sha256,
       probe: verified.probe,
-      backend: { id: "native-ffmpeg", version: "1", ffmpegVersion },
+      backend: { id: "native-ffmpeg", version: payload.jobVersion === 1 ? "1" : "2", ffmpegVersion },
       checks: { probe: true, decode: true, hash: true },
     };
     const receiptBytes = `${canonicalJson(receipt)}\n`;
@@ -578,10 +953,7 @@ export async function executeMediaExecutionJob(
     const evidenceSha256 = digest(receiptBytes);
 
     // Pin revision and source again at the final publication boundary.
-    const sourceAgain = await checkedSourcePath(root, handle, payload);
-    if (sourceAgain !== sourcePath || !await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
-      throw new Error("media execution revision or source changed before output promotion");
-    }
+    await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, "before");
 
     let promotedOutput: PublishedFile | undefined;
     let promotedEvidence: PublishedFile | undefined;
@@ -589,10 +961,7 @@ export async function executeMediaExecutionJob(
     try {
       promotedOutput = await publishExclusive(stagedPath, outputPath, verified.sha256);
       promotedEvidence = await publishExclusive(stagedEvidencePath, evidencePath, evidenceSha256);
-      const finalSource = await checkedSourcePath(root, handle, payload);
-      if (finalSource !== sourcePath || !await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
-        throw new Error("media execution revision or source changed after output promotion");
-      }
+      await assertJobSourcesCurrent(root, authorization, payload, sourcePaths, "after");
       outputSha = (await boundedDigestFile(outputPath)).sha256;
       if (outputSha !== verified.sha256 || await digestFile(evidencePath) !== evidenceSha256) {
         throw new Error("promoted render artifact or verification evidence changed before return");
@@ -624,7 +993,7 @@ export async function executeMediaExecutionJob(
       sourceRevisionHash: payload.sourceRevisionHash,
       renderJobHash: job.jobHash,
       backendId: "native-ffmpeg",
-      backendVersion: "1",
+      backendVersion: payload.jobVersion === 1 ? "1" : "2",
       ffmpegVersion,
       verificationRefId: verificationId,
       verification,

@@ -136,6 +136,51 @@ export function semanticHashV2(project: ProjectV2 | Record<string, unknown>): st
   return digest(canonicalJson(semanticProject));
 }
 
+/** Creates a new V2 project with the bounded tracks used by local media composition. */
+export function createProjectV2(input: {
+  projectId: string;
+  brief: ProjectV2["brief"];
+  width: number;
+  height: number;
+  fps: number;
+  durationMs: number;
+  createdAt?: string;
+}): ProjectV2 {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const project = ProjectV2Schema.parse({
+    schemaVersion: 2,
+    projectId: input.projectId,
+    brief: input.brief,
+    assets: {},
+    composition: {
+      width: input.width,
+      height: input.height,
+      fps: input.fps,
+      durationMs: input.durationMs,
+      tracks: [
+        { id: "track-video", kind: "video", order: 0, muted: false, locked: false },
+        { id: "track-audio", kind: "audio", order: 1, muted: false, locked: false },
+        { id: "track-overlay", kind: "overlay", order: 2, muted: false, locked: false },
+      ],
+      clips: [],
+      layers: [],
+    },
+    revisions: [{
+      id: "revision-0",
+      actor: "user",
+      operationIds: [],
+      manifestSha256: "0".repeat(64),
+      createdAt,
+    }],
+    operationLogRef: "operations/operations.jsonl",
+    outputs: [],
+    verification: { revisionId: "revision-0", status: "unknown", refs: [] },
+    currentRevisionId: "revision-0",
+  });
+  project.revisions[0]!.manifestSha256 = semanticHashV2(project);
+  return ProjectV2Schema.parse(project);
+}
+
 export function applyOperationBatch(project: ProjectV2, batch: OperationBatchInput): OperationBatchResult {
   if (batch.baseRevisionId !== project.currentRevisionId) return { ok: false, code: "STALE_REVISION", detail: "base revision is not current" };
 

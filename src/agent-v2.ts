@@ -5,7 +5,7 @@ import { z } from "zod";
 import { checkedEvidenceRoot, readEvidenceFile, V2InspectRequestSchema, type V2InspectImage, type V2InspectRequest } from "./inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "./media-evidence.js";
 import { OperationLogRecordSchema, OperationSchema, applyOperationBatch, semanticHashV2, type Operation, type OperationBatchInput, type OperationLogRecord } from "./operations-v2.js";
-import { buildMediaExecutionJob, executeMediaExecutionJob, registerRenderArtifactV2, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
+import { buildCompositionExecutionJob, executeMediaExecutionJob, registerRenderArtifactV2, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
 import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type ProjectV2 } from "./schema-v2.js";
 import { IdSchema } from "./schema.js";
 
@@ -202,6 +202,18 @@ const operationWireSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("set_speed"), clipId: IdSchema, speed: z.number().finite().min(0.25).max(4) }).strict(),
   z.object({ type: z.literal("set_volume"), clipId: IdSchema, audioGainDb: z.number().finite() }).strict(),
   z.object({ type: z.literal("mute_clip"), clipId: IdSchema, muted: z.boolean() }).strict(),
+  z.object({ type: z.literal("set_transition"), clipId: IdSchema, transition: z.object({ type: z.enum(["cut", "crossfade"]), durationMs: z.number().int().nonnegative() }).strict() }).strict(),
+  z.object({ type: z.literal("add_text_layer"), layer: z.object({
+    id: IdSchema, trackId: IdSchema, kind: z.literal("text"), timelineStartMs: z.number().int().nonnegative(), durationMs: z.number().int().positive(),
+    properties: z.object({ text: z.string().min(1).max(1024), fontSize: z.number().int().min(8).max(96), color: z.string().regex(/^#[0-9a-fA-F]{6}$/) }).strict(),
+    keyframes: z.array(z.unknown()).max(0),
+  }).strict() }).strict(),
+  z.object({ type: z.literal("update_text_layer"), layerId: IdSchema, properties: z.object({ text: z.string().min(1).max(1024), fontSize: z.number().int().min(8).max(96), color: z.string().regex(/^#[0-9a-fA-F]{6}$/) }).strict() }).strict(),
+  z.object({ type: z.literal("add_image_layer"), layer: z.object({
+    id: IdSchema, trackId: IdSchema, kind: z.literal("image"), timelineStartMs: z.number().int().nonnegative(), durationMs: z.number().int().positive(),
+    properties: z.object({ assetId: IdSchema }).strict(), keyframes: z.array(z.unknown()).max(0),
+  }).strict() }).strict(),
+  z.object({ type: z.literal("remove_layer"), layerId: IdSchema }).strict(),
 ]);
 const proposalWireSchema = z.object({
   baseRevisionId: IdSchema,
@@ -264,6 +276,19 @@ export const V2_AGENT_TOOLS: readonly V2AgentToolDefinition[] = freezeDeep([
           { type: "object", properties: { type: { enum: ["set_speed"] }, clipId: { type: "string" }, speed: { type: "number", minimum: 0.25, maximum: 4 } }, required: ["type", "clipId", "speed"], additionalProperties: false },
           { type: "object", properties: { type: { enum: ["set_volume"] }, clipId: { type: "string" }, audioGainDb: { type: "number" } }, required: ["type", "clipId", "audioGainDb"], additionalProperties: false },
           { type: "object", properties: { type: { enum: ["mute_clip"] }, clipId: { type: "string" }, muted: { type: "boolean" } }, required: ["type", "clipId", "muted"], additionalProperties: false },
+          { type: "object", properties: { type: { enum: ["set_transition"] }, clipId: { type: "string" }, transition: { type: "object", properties: { type: { enum: ["cut", "crossfade"] }, durationMs: { type: "integer", minimum: 0 } }, required: ["type", "durationMs"], additionalProperties: false } }, required: ["type", "clipId", "transition"], additionalProperties: false },
+          { type: "object", properties: { type: { enum: ["add_text_layer"] }, layer: { type: "object", properties: {
+            id: { type: "string" }, trackId: { type: "string" }, kind: { enum: ["text"] }, timelineStartMs: { type: "integer", minimum: 0 }, durationMs: { type: "integer", minimum: 1 },
+            properties: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 1024 }, fontSize: { type: "integer", minimum: 8, maximum: 96 }, color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" } }, required: ["text", "fontSize", "color"], additionalProperties: false },
+            keyframes: { type: "array", maxItems: 0, items: { type: "object", properties: {}, required: [], additionalProperties: false } },
+          }, required: ["id", "trackId", "kind", "timelineStartMs", "durationMs", "properties", "keyframes"], additionalProperties: false } }, required: ["type", "layer"], additionalProperties: false },
+          { type: "object", properties: { type: { enum: ["update_text_layer"] }, layerId: { type: "string" }, properties: { type: "object", properties: { text: { type: "string", minLength: 1, maxLength: 1024 }, fontSize: { type: "integer", minimum: 8, maximum: 96 }, color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" } }, required: ["text", "fontSize", "color"], additionalProperties: false } }, required: ["type", "layerId", "properties"], additionalProperties: false },
+          { type: "object", properties: { type: { enum: ["add_image_layer"] }, layer: { type: "object", properties: {
+            id: { type: "string" }, trackId: { type: "string" }, kind: { enum: ["image"] }, timelineStartMs: { type: "integer", minimum: 0 }, durationMs: { type: "integer", minimum: 1 },
+            properties: { type: "object", properties: { assetId: { type: "string" } }, required: ["assetId"], additionalProperties: false },
+            keyframes: { type: "array", maxItems: 0, items: { type: "object", properties: {}, required: [], additionalProperties: false } },
+          }, required: ["id", "trackId", "kind", "timelineStartMs", "durationMs", "properties", "keyframes"], additionalProperties: false } }, required: ["type", "layer"], additionalProperties: false },
+          { type: "object", properties: { type: { enum: ["remove_layer"] }, layerId: { type: "string" } }, required: ["type", "layerId"], additionalProperties: false },
         ] } },
       },
       required: ["baseRevisionId", "evidenceRefs", "operations"],
@@ -322,7 +347,8 @@ function parseProposal(input: unknown): { baseRevisionId: string; evidenceRefs: 
 }
 
 const allowedAgentOperationTypes = new Set<Operation["type"]>([
-  "trim_clip", "set_transform", "set_opacity", "set_speed", "set_volume", "mute_clip",
+  "trim_clip", "set_transform", "set_opacity", "set_speed", "set_volume", "mute_clip", "set_transition",
+  "add_text_layer", "update_text_layer", "add_image_layer", "remove_layer",
 ]);
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_INSPECTION_DATA_BYTES = 64 * 1024;
@@ -542,7 +568,8 @@ const instructions = [
   "You edit a Replex ProjectV2 only by proposing typed semantic operations through propose_edit_batch.",
   "Inspect bounded project evidence before editing. Every proposed edit must cite evidence references already returned by inspect_v2.",
   "Use the exact currentRevisionId supplied in context as baseRevisionId. After acceptance, use the new currentRevisionId for a follow-up batch.",
-  "The currently supported edit operations are trim_clip, set_transform, set_opacity, set_speed, set_volume, and mute_clip.",
+  "The currently supported edit operations are trim_clip, set_transform, set_opacity, set_speed, set_volume, mute_clip, set_transition, add_text_layer, update_text_layer, add_image_layer, and remove_layer.",
+  "Inspect project_summary for overlay track IDs before adding text or image layers, and inspect assets before selecting an image asset.",
   "Never request paths, shell, JavaScript, FFmpeg commands, arbitrary files, raw project JSON, or backend implementation details.",
   "After a successful preview, inspect the result if useful, then finish with a concise response. A preview is technically verified, not a claim of creative approval.",
 ].join(" ");
@@ -758,7 +785,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
 
           let plannedJob;
           try {
-            plannedJob = buildMediaExecutionJob(predicted.project, handlesParsed.data);
+            plannedJob = buildCompositionExecutionJob(predicted.project, handlesParsed.data);
           } catch (error) {
             toolResults.push({ callId: call.id, name: call.name, output: { ok: false, code: "PREVIEW_UNSUPPORTED", detail: "the proposed state is outside the bounded preview renderer's supported project shape" } });
             continue;
