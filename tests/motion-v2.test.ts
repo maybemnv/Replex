@@ -250,8 +250,8 @@ describe("V2 camera-push execution", () => {
       const finalFrame = decodeFirstRgbFrame(finalPath);
       const sourceMarker = rgbAt(sourceFrame, 169, 140);
       const renderedMarker = rgbAt(finalFrame, 170, 148);
-      // This sample stays inside the marker only when canonical crop precedes contain-fit and scale.
-      const cropEdgeMarker = rgbAt(finalFrame, 213, 148);
+      // The marker ends near x=212; without crop, centered 1.25x scale ends near x=225.
+      const cropEdgeMarker = rgbAt(finalFrame, 232, 148);
       // This sample extends past the marker without the 1.25x canonical transform.
       const transformEdgeMarker = rgbAt(finalFrame, 170, 160);
       expect(sourceMarker.g).toBeGreaterThan(sourceMarker.r + 80);
