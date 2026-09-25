@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { AssetHandleSchema, type AssetHandle } from "./schema-v2.js";
 
@@ -91,6 +91,7 @@ type EvidenceConfig = {
 const MAX_FRAMES = 4;
 const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_ARTIFACT_BYTES = 32 * 1024 * 1024;
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024;
 const MAX_SCENES = 128;
 const MAX_SILENCE_SEGMENTS = 128;
@@ -112,6 +113,7 @@ export function parseMediaProbeOutput(value: string): {
     channels?: number;
   }>;
 } {
+  if (Buffer.byteLength(value, "utf8") > MAX_TOOL_OUTPUT_BYTES) throw new MediaEvidenceError("OUTPUT_LIMIT");
   let raw: unknown;
   try {
     raw = JSON.parse(value);
@@ -163,18 +165,40 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
   const handle = AssetHandleSchema.safeParse(request.asset);
   if (!handle.success) throw new MediaEvidenceError("INVALID_ASSET_HANDLE");
   if (!isAbsolute(request.evidenceRoot)) throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+  const startedAt = Date.now();
+  const deadlineMs = Math.min(MAX_DEADLINE_MS, Math.max(1_000, request.deadlineMs ?? 60_000));
 
   let sourcePath: string;
   try {
-    sourcePath = await realpath(await request.resolveSource(handle.data));
-    if (!(await stat(sourcePath)).isFile()) throw new Error();
-  } catch {
+    sourcePath = await realpath(await resolveWithDeadline(request.resolveSource(handle.data), startedAt, deadlineMs));
+    const sourceStat = await stat(sourcePath);
+    if (!sourceStat.isFile()) throw new Error();
+    if (sourceStat.size > MAX_SOURCE_BYTES) throw new MediaEvidenceError("EVIDENCE_LIMIT_EXCEEDED");
+  } catch (error) {
+    if (error instanceof MediaEvidenceError) throw error;
     throw new MediaEvidenceError("SOURCE_UNAVAILABLE");
   }
-  if (await hashFile(sourcePath) !== handle.data.sha256) throw new MediaEvidenceError("SOURCE_HASH_MISMATCH");
+  try {
+    let finalSourceHash: string;
+    try {
+      finalSourceHash = await hashFile(sourcePath, startedAt, deadlineMs);
+    } catch (error) {
+      if (error instanceof MediaEvidenceError) throw error;
+      throw new MediaEvidenceError("SOURCE_UNAVAILABLE");
+    }
+    if (finalSourceHash !== handle.data.sha256) throw new MediaEvidenceError("SOURCE_HASH_MISMATCH");
+  } catch (error) {
+    if (error instanceof MediaEvidenceError) throw error;
+    throw new MediaEvidenceError("SOURCE_UNAVAILABLE");
+  }
+  let rootReal: string;
+  try {
+    rootReal = await ensureRealDirectoryTree(request.evidenceRoot, startedAt, deadlineMs);
+  } catch (error) {
+    if (error instanceof MediaEvidenceError) throw error;
+    throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+  }
 
-  const startedAt = Date.now();
-  const deadlineMs = Math.min(MAX_DEADLINE_MS, Math.max(1_000, request.deadlineMs ?? 60_000));
   const ffmpeg = request.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobe = request.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
   const run = (tool: string, args: string[], maxBuffer = MAX_TOOL_OUTPUT_BYTES): ToolResult => runTool(tool, args, startedAt, deadlineMs, maxBuffer);
@@ -206,19 +230,13 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
   const assetKey = sha256(handle.data.assetId).slice(0, 24);
   const baseRef = `assets/${assetKey}/${handle.data.sha256}/${configHash}`;
 
-  let rootReal: string;
   let basePath: string;
   let stagePath: string | undefined;
   try {
-    await mkdir(request.evidenceRoot, { recursive: true });
-    rootReal = await realpath(request.evidenceRoot);
-    basePath = resolve(rootReal, ...baseRef.split("/"));
-    if (!isWithin(rootReal, basePath)) throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
-    await mkdir(basePath, { recursive: true });
-    basePath = await realpath(basePath);
-    if (!isWithin(rootReal, basePath)) throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+    basePath = await ensureEvidenceDirectory(rootReal, baseRef, startedAt, deadlineMs);
     stagePath = await mkdtemp(join(basePath, ".stage-"));
-    if (!isWithin(rootReal, await realpath(stagePath))) throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+    const stageReal = await realpath(stagePath);
+    if (!isWithin(rootReal, stageReal) || !samePath(stagePath, stageReal)) throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
     const stageRoot = stagePath;
 
     const artifactFiles: Array<{ kind: MediaEvidenceArtifact["kind"]; filename: string; contentType: MediaEvidenceArtifact["contentType"]; timestampMs?: number }> = [];
@@ -286,7 +304,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
       return {
         kind: artifact.kind,
         ref: "", // Replaced after the content-addressed run directory is known.
-        sha256: await hashFile(path),
+        sha256: await hashFile(path, startedAt, deadlineMs),
         sizeBytes: info.size,
         contentType: artifact.contentType,
         ...(artifact.timestampMs !== undefined ? { timestampMs: artifact.timestampMs } : {}),
@@ -295,7 +313,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
     if (artifacts.reduce((total, artifact) => total + artifact.sizeBytes, 0) > MAX_TOTAL_ARTIFACT_BYTES) {
       throw new MediaEvidenceError("EVIDENCE_LIMIT_EXCEEDED");
     }
-    if (await hashFile(sourcePath) !== handle.data.sha256) throw new MediaEvidenceError("SOURCE_HASH_MISMATCH");
+    if (await hashFile(sourcePath, startedAt, deadlineMs) !== handle.data.sha256) throw new MediaEvidenceError("SOURCE_HASH_MISMATCH");
 
     const runHash = sha256(stableJson({
       configHash,
@@ -322,11 +340,16 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
     const indexContents = `${stableJson(index)}\n`;
     if (Buffer.byteLength(indexContents, "utf8") > 64 * 1024) throw new MediaEvidenceError("EVIDENCE_LIMIT_EXCEEDED");
 
+    const publishedNames = new Set<string>();
     for (const [index, artifact] of indexedArtifacts.entries()) {
       const filename = artifact.ref.slice(`${runRef}/`.length);
       const source = join(stageRoot, artifactFiles[index].filename);
       const destination = join(stageRoot, filename);
-      if (source !== destination) await rename(source, destination);
+      if (source !== destination) {
+        if (publishedNames.has(filename)) await rm(source, { force: true });
+        else await rename(source, destination);
+        publishedNames.add(filename);
+      }
     }
     await writeFile(join(stageRoot, "index.json"), indexContents, { flag: "wx" });
     const finalPath = join(basePath, runHash);
@@ -412,7 +435,14 @@ function parseLoudness(log: string): { integratedLufs: number | null; truePeakDb
         input_i: z.string().max(32),
         input_tp: z.string().max(32),
         input_lra: z.string().max(32),
-      }).passthrough().safeParse(JSON.parse(candidate[0]));
+        input_thresh: z.string().max(32),
+        output_i: z.string().max(32),
+        output_tp: z.string().max(32),
+        output_lra: z.string().max(32),
+        output_thresh: z.string().max(32),
+        normalization_type: z.enum(["dynamic", "linear"]),
+        target_offset: z.string().max(32),
+      }).strict().safeParse(JSON.parse(candidate[0]));
       if (parsed.success) return {
         integratedLufs: finiteOrNull(parsed.data.input_i),
         truePeakDbtp: finiteOrNull(parsed.data.input_tp),
@@ -470,9 +500,80 @@ async function writeJson(root: string, filename: string, value: unknown): Promis
   await writeFile(join(root, filename), `${stableJson(value)}\n`, { flag: "wx" });
 }
 
-async function hashFile(path: string): Promise<string> {
+async function resolveWithDeadline(value: Promise<string>, startedAt: number, deadlineMs: number): Promise<string> {
+  const remaining = deadlineMs - (Date.now() - startedAt);
+  if (remaining <= 0) throw new MediaEvidenceError("TIMEOUT");
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      value,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new MediaEvidenceError("TIMEOUT")), remaining); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function ensureRealDirectoryTree(path: string, startedAt: number, deadlineMs: number): Promise<string> {
+  const absolute = resolve(path);
+  const volumeRoot = parse(absolute).root;
+  let current = volumeRoot;
+  for (const component of relative(volumeRoot, absolute).split(sep).filter(Boolean)) {
+    assertDeadline(startedAt, deadlineMs);
+    current = join(current, component);
+    await makeDirectory(current);
+    const info = await lstat(current);
+    const actual = await realpath(current);
+    if (!info.isDirectory() || info.isSymbolicLink() || !samePath(current, actual)) {
+      throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+    }
+  }
+  return absolute;
+}
+
+async function ensureEvidenceDirectory(root: string, relativePath: string, startedAt: number, deadlineMs: number): Promise<string> {
+  let current = root;
+  for (const [index, component] of relativePath.split("/").entries()) {
+    if ((index === 0 && component !== "assets") || (index > 0 && !/^[a-f0-9]{24,64}$/.test(component))) {
+      throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+    }
+    assertDeadline(startedAt, deadlineMs);
+    current = join(current, component);
+    await makeDirectory(current);
+    const info = await lstat(current);
+    const actual = await realpath(current);
+    if (!info.isDirectory() || info.isSymbolicLink() || !samePath(current, actual) || !isWithin(root, actual)) {
+      throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
+    }
+  }
+  return current;
+}
+
+async function makeDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path);
+  } catch (error) {
+    if (!hasCode(error, "EEXIST")) throw error;
+  }
+}
+
+function assertDeadline(startedAt: number, deadlineMs: number): void {
+  if (Date.now() - startedAt >= deadlineMs) throw new MediaEvidenceError("TIMEOUT");
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === code);
+}
+
+async function hashFile(path: string, startedAt?: number, deadlineMs?: number): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  let bytes = 0;
+  for await (const chunk of createReadStream(path)) {
+    if (startedAt !== undefined && deadlineMs !== undefined) assertDeadline(startedAt, deadlineMs);
+    bytes += chunk.length;
+    if (bytes > MAX_SOURCE_BYTES) throw new MediaEvidenceError("EVIDENCE_LIMIT_EXCEEDED");
+    hash.update(chunk);
+  }
   return hash.digest("hex");
 }
 
@@ -516,4 +617,12 @@ function extensionFor(contentType: MediaEvidenceArtifact["contentType"]): string
 function isWithin(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
   return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
