@@ -7,7 +7,7 @@ import { z } from "zod";
 import { AssetHandleSchema, type AssetHandle } from "./schema-v2.js";
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const evidenceRefSchema = z.string().regex(/^assets\/[a-f0-9]{24}\/[a-f0-9]{64}\/[a-f0-9]{64}\/[a-f0-9]{64}\/(?:index\.json|(?:probe|selected-frame|contact-sheet|scene-boundaries|audio-summary)-[a-f0-9]{64}\.(?:json|png|jpg))$/);
+const evidenceRefSchema = z.string().regex(/^media-evidence\/[a-f0-9]{24}\/[a-f0-9]{24}\/(?:index\.json|(?:probe|selected-frame|contact-sheet|scene-boundaries|audio-summary)-[a-f0-9]{64}\.(?:json|png|jpg))$/);
 const MediaEvidenceArtifactSchema = z.object({
   kind: z.enum(["probe", "selected_frame", "contact_sheet", "scene_boundaries", "audio_summary"]),
   ref: evidenceRefSchema,
@@ -121,6 +121,8 @@ export function parseMediaProbeOutput(value: string): {
     throw new MediaEvidenceError("INVALID_TOOL_OUTPUT");
   }
   const rawSchema = z.object({
+    programs: z.array(z.unknown()).max(64).optional(),
+    stream_groups: z.array(z.unknown()).max(64).optional(),
     streams: z.array(z.object({
       index: z.number().int().nonnegative(),
       codec_type: z.enum(["video", "audio", "subtitle", "data", "attachment"]),
@@ -227,8 +229,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
     loudnessTarget: { integratedLufs: -16, truePeakDbtp: -1.5, rangeLufs: 11 },
   };
   const configHash = sha256(stableJson(config));
-  const assetKey = sha256(handle.data.assetId).slice(0, 24);
-  const baseRef = `assets/${assetKey}/${handle.data.sha256}/${configHash}`;
+  const baseRef = `media-evidence/${sha256(`${handle.data.assetId}:${handle.data.sha256}:${configHash}`).slice(0, 24)}`;
 
   let basePath: string;
   let stagePath: string | undefined;
@@ -321,7 +322,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
       sourceSha256: handle.data.sha256,
       artifacts: artifacts.map(({ kind, sha256: hash, sizeBytes, contentType, timestampMs }) => ({ kind, sha256: hash, sizeBytes, contentType, ...(timestampMs !== undefined ? { timestampMs } : {}) })),
     }));
-    const runRef = `${baseRef}/${runHash}`;
+    const runRef = `${baseRef}/${runHash.slice(0, 24)}`;
     const indexedArtifacts = artifacts.map((artifact, index) => ({
       ...artifact,
       ref: `${runRef}/${artifactFiles[index].kind.replaceAll("_", "-")}-${artifact.sha256}.${extensionFor(artifact.contentType)}`,
@@ -352,7 +353,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
       }
     }
     await writeFile(join(stageRoot, "index.json"), indexContents, { flag: "wx" });
-    const finalPath = join(basePath, runHash);
+    const finalPath = join(basePath, runHash.slice(0, 24));
     try {
       await rename(stageRoot, finalPath);
       stagePath = undefined;
@@ -534,7 +535,7 @@ async function ensureRealDirectoryTree(path: string, startedAt: number, deadline
 async function ensureEvidenceDirectory(root: string, relativePath: string, startedAt: number, deadlineMs: number): Promise<string> {
   let current = root;
   for (const [index, component] of relativePath.split("/").entries()) {
-    if ((index === 0 && component !== "assets") || (index > 0 && !/^[a-f0-9]{24,64}$/.test(component))) {
+    if ((index === 0 && component !== "media-evidence") || (index > 0 && !/^[a-f0-9]{24}$/.test(component))) {
       throw new MediaEvidenceError("UNSAFE_EVIDENCE_ROOT");
     }
     assertDeadline(startedAt, deadlineMs);
