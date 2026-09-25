@@ -1,0 +1,279 @@
+{
+  "evaluation_date": "2026-09-23",
+  "candidate": {
+    "version": "1.26.0",
+    "commit": "f33d0c80dcac5dc9f07c8654dc10ccac657be4a6",
+    "contract_version": "1.0"
+  },
+  "environment": {
+    "os": "Windows 11 Home Single Language 10.0.26200 x64",
+    "cpu": "12th Gen Intel Core i7-12650H, 10 cores / 16 logical processors",
+    "memory_gb": 15.6,
+    "gpu": [
+      "NVIDIA GeForce RTX 3070 Laptop GPU",
+      "Intel UHD Graphics"
+    ],
+    "python": "3.13.5",
+    "node": "24.14.0 (not used for these checks)",
+    "ffmpeg": "9.0.1-full_build-www.gyan.dev",
+    "ffprobe": "9.0.1-full_build-www.gyan.dev",
+    "ffmpeg_binary_source": "Gyan WinGet package, direct binary path; PATH symlinks were not used"
+  },
+  "fixture": {
+    "path": "fixtures/synthetic-2s-320x180.mp4",
+    "bytes": 12539,
+    "sha256": "6ea6118f29b7553be8604b2c48a394a73c47b35e3a353a88c516760605157cbd",
+    "duration_s": 2.0,
+    "video": "320x180, 24 fps, synthetic blue field",
+    "audio": "48 kHz mono AAC; 440 Hz tone for the first second, silence for the second"
+  },
+  "contract_capture": {
+    "contract_command": "python scripts/_contract.py --json",
+    "doctor_command": "python scripts/_contract.py doctor --json",
+    "combined_elapsed_s_approx": 6.0,
+    "contract_exit_code": 0,
+    "doctor_exit_code": 1,
+    "contract_tools": 42,
+    "doctor_missing": [
+      "filter:drawtext"
+    ],
+    "doctor_unknown": [],
+    "doctor_unusable_tools": {
+      "graphics": [
+        "filter:drawtext"
+      ]
+    },
+    "doctor_error": "drawtext is present but a one-frame render crashed with Windows exit 3221225477; upstream suggests an explicit font file"
+  },
+  "tool_runs": [
+    {
+      "tool": "probe",
+      "input": {
+        "inputs": ["fixtures/synthetic-2s-320x180.mp4"]
+      },
+      "elapsed_ms": 837.1,
+      "exit_code": 0,
+      "result": {
+        "duration_s": 2.0,
+        "width": 320,
+        "height": 180,
+        "fps": 24.0,
+        "audio_channels": 1
+      }
+    },
+    {
+      "tool": "look",
+      "input": {
+        "tiles": "2x2",
+        "no_timecode": true,
+        "output": "outputs/contact-sheet.png"
+      },
+      "elapsed_ms": 834.5,
+      "exit_code": 0,
+      "status": "completed",
+      "dry_run": false,
+      "verified": true,
+      "output_bytes": 4427,
+      "output_sha256": "af6c78f339d403d4bda38d96f3faf2a0a40231b2bd54ae50c0687fd313008a8b"
+    },
+    {
+      "tool": "scenes",
+      "input": {
+        "shots": true,
+        "speech": true,
+        "audio_peaks": true
+      },
+      "elapsed_ms_observed": [302.3, 1085.3],
+      "exit_code": 0,
+      "status": "completed",
+      "result": {
+        "scene_count": 1,
+        "shot_label": "static",
+        "speech_samples": 2,
+        "audio_peak_samples": 1
+      }
+    },
+    {
+      "tool": "cropdetect",
+      "input": {
+        "motion_centre": true,
+        "samples": 2,
+        "seconds": 1
+      },
+      "elapsed_ms": 325.1,
+      "exit_code": 0,
+      "status": "completed",
+      "result": {
+        "crop": {
+          "width": 320,
+          "height": 176,
+          "x": 0,
+          "y": 2
+        },
+        "motion_centre_samples": 0
+      },
+      "interpretation": "Uniform-color synthetic video did not exercise useful motion; crop output is not accepted as a product decision"
+    },
+    {
+      "tool": "silence",
+      "input": {
+        "list": true
+      },
+      "elapsed_ms": 136.5,
+      "exit_code": 0,
+      "status": "completed",
+      "result": {
+        "silence_range_s": [1.0, 2.0],
+        "suggested_removed_seconds": 0.85,
+        "output_written": false
+      }
+    },
+    {
+      "tool": "loudness",
+      "input": {
+        "measure_only": true
+      },
+      "elapsed_ms": 150.8,
+      "exit_code": 0,
+      "status": "completed",
+      "result": {
+        "input_i_lufs": -26.36,
+        "input_tp_dbtp": -21.37,
+        "input_lra_lu": 0.0,
+        "output_written": false
+      }
+    },
+    {
+      "tool": "cut",
+      "input": {
+        "start_s": 0.25,
+        "end_s": 1.75,
+        "accurate": true,
+        "dry_run": true,
+        "output": "outputs/cut-dry-run.mp4"
+      },
+      "elapsed_ms": 127.6,
+      "exit_code": 0,
+      "status": "completed",
+      "dry_run": true,
+      "verified": false,
+      "command_count": 1,
+      "output_written": false
+    },
+    {
+      "tool": "cut",
+      "input": {
+        "start_s": 0.25,
+        "end_s": 1.75,
+        "accurate": true
+      },
+      "elapsed_ms": 1792.9,
+      "exit_code": 0,
+      "status": "completed",
+      "verified": true,
+      "result": {
+        "expected_duration_s": 1.5,
+        "reported_duration_error_ms": 21.333,
+        "ffprobe_duration_s": 1.521333,
+        "video": "320x180 at 24 fps",
+        "output_bytes": 16865,
+        "output_sha256": "bea7083931b979c231732cb37f6a3606c29c67fd99341fc61156a8e76647ed0d"
+      },
+      "repeat_output_sha256_equal": true
+    },
+    {
+      "tool": "probe",
+      "input": {
+        "inputs": ["outputs/cut-accurate-measured.mp4"]
+      },
+      "elapsed_ms": 105.0,
+      "exit_code": 0,
+      "result": {
+        "duration_s": 1.521333,
+        "width": 320,
+        "height": 180,
+        "fps": 24.0,
+        "audio_channels": 1
+      }
+    },
+    {
+      "tool": "check",
+      "input": {
+        "aspect": "16:9",
+        "max_duration_s": 5,
+        "max_mb": 5,
+        "no_loudness": true
+      },
+      "elapsed_ms_observed": [99.6, 824.9],
+      "exit_code": 0,
+      "status": "completed",
+      "ok": true,
+      "failed_checks": 0,
+      "warnings": ["resolution below 720 short side", "no subtitle track"],
+      "note": "The 824.9 ms repeat includes an outer Python wrapper start; timings are not a benchmark"
+    },
+    {
+      "tool": "fit",
+      "input": {
+        "aspect": "9:16",
+        "fit": "crop",
+        "dry_run": true
+      },
+      "elapsed_ms": 134.0,
+      "exit_code": 0,
+      "dry_run": true,
+      "verified": false,
+      "command_count": 1,
+      "output_written": false
+    },
+    {
+      "tool": "export",
+      "input": {
+        "preset": "reels",
+        "dry_run": true
+      },
+      "elapsed_ms": 133.7,
+      "exit_code": 0,
+      "dry_run": true,
+      "verified": false,
+      "command_count": 1,
+      "output_written": false
+    }
+  ],
+  "adversarial_checks": {
+    "malformed_ffprobe_json": {
+      "method": "isolated monkeypatch of the pinned parser's ffprobe result on the synthetic fixture",
+      "result": {
+        "status": "failed",
+        "exit_code": 1,
+        "error_kind": "ffmpeg",
+        "error_code": "FFMPEG_EXECUTION_FAILED",
+        "retryable": false
+      },
+      "false_success": false
+    },
+    "immutable_input": {
+      "result": "fixture SHA-256 before and after the actual cut was equal"
+    },
+    "output_symlink": {
+      "runtime_test": "not run; source-level path guard reviewed",
+      "source_behavior": "cut calls os.path.realpath-based refuse_output_is_input before planning its render"
+    },
+    "partial_output_cleanup": {
+      "runtime_test": "not run",
+      "source_behavior": "failed ffmpeg runs compare output state and remove new/changed partials; existing outputs are staged in a sibling temp before replacement"
+    },
+    "timeout_and_cancel": {
+      "runtime_test": "not run",
+      "source_behavior": "per-process timeout kills the direct child; signal handler terminates tracked direct children; no process-group/job-object kill was found; Windows source comment says SIGTERM is not delivered, only Ctrl-C"
+    },
+    "stale_plan": {
+      "runtime_test": "not run; plan mode deliberately not invoked",
+      "source_behavior": "plan stores argv, command strings, cwd and fingerprints; fingerprint is file size plus SHA-256 of first and last 8 MiB, so a same-size middle-only change in a file larger than 16 MiB is not detected"
+    }
+  },
+  "warnings": [
+    "Contract/doctor generation under Python 3.13.5 emitted two SyntaxWarning messages for invalid escape sequences in drawtext and ASS helper source; both commands still returned the recorded exit codes.",
+    "The FFmpeg executable reports --enable-gpl and --enable-version3; this FFmpeg build is separate from the candidate's MIT source license."
+  ]
+}

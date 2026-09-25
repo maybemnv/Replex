@@ -1,6 +1,8 @@
 # Replex V2 dependency-ordered implementation plan
 
-**Status:** V2 Core Foundation implemented and independently validated on `feat/v2-core-foundation`; later phases remain planned.
+**Status:** V2 Core Foundation and the PR-A candidate are implemented. Gate A passed independent validation on `e38b792`; PR-A is ready for review and merge is pending. Phase 2 has not started and remains gated on PR-A merge and Gate B.
+
+**PR-A validation (25 September 2026):** `npm run build` passed. The serial full suite passed 26/26 files and 193/193 tests with direct FFmpeg/FFprobe 9.0.1 binaries supplied through `REPLEX_FFMPEG_PATH` and `REPLEX_FFPROBE_PATH`. Without those overrides, this environment's inaccessible WinGet links caused 17 FFmpeg-dependent failures across five capture/browser files (166 passed, 10 skipped); rerunning with direct binaries resolved them. Independent validation passed; no GitHub CI result was available during this review.
 
 **Architecture:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md)
 
@@ -89,11 +91,14 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ### V2-104: Stabilize the early transport-independent service contract
 
+**Implementation status:** PR-A freezes explicit service-contract v1 projections and boundary tests. Independent validation met Gate A at `e38b792`; see the PR-A validation record above.
+
 - **Objective:** Define versioned, backend-owned schemas for `ProjectSnapshot`, `ProjectSummary`, `CapabilitySet`, asset/revision views, jobs, events, errors, command metadata, agent edits, operation application, render, browser capture, and recapture.
 - **Why:** Gurbaaz and later executors need one contract before HTTP, event transport, or worker implementation exists.
 - **Dependencies:** V2-101 and V2-103.
 - **Likely files:** new `src/service-contract/` or generated schema artifact; contract fixtures and tests; architecture/frontend handoff references.
 - **Contracts:** Revision-mutating commands require `baseRevisionId`; derived jobs reference an immutable `revisionId`; every request has an idempotency key and explicit contract version.
+- **Version boundary:** Public views and the user-facing semantic-operation snapshot are defined by service-contract v1 schemas, not live `ProjectV2` or reducer unions. Import and recapture use their service commands; all edit operations still pass through the canonical reducer. External shape changes require a deliberate contract version evolution.
 - **Migration concerns:** This is a read/contract addition only; V1 command routing remains unchanged and version bumps are explicit.
 - **Tests:** Strict request/response parsing, discriminated job/input/error states, stale-revision metadata, unknown-version rejection, deterministic fixture serialization.
 - **Acceptance:** Frontend mocks can import or generate these types without inventing project state or transport semantics; no HTTP/SSE/WebSocket or executor is required.
@@ -103,6 +108,8 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 ## Phase 1.5: Evaluate ffmpeg-skill before duplicating media plumbing
 
 ### V2-150: Run the ffmpeg-skill capability and contract spike
+
+**Implementation status:** Completed and independently reviewed; decision is **PARTIAL-GO**. Evidence and capability recommendations are in [`ffmpeg-skill-spike.md`](ffmpeg-skill-spike.md); no production adapter or dependency was added.
 
 - **Objective:** Evaluate one released, pinned ffmpeg-skill version and contract version in an isolated research harness and produce a GO/NO-GO/PARTIAL-GO report.
 - **Why:** Probe, contact sheets, scene measurements, cuts, audio analysis, and delivery checks may be cheaper and safer to delegate than to reimplement.
@@ -115,7 +122,11 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 - **Non-goals:** Full MCP exposure, production adapter, canonical ffmpeg-skill project files, or changing the native backend.
 - **Rollback:** Delete isolated spike artifacts; repository runtime remains unchanged.
 
+**Approved future read-only evidence subset:** `probe`, `look`/contact sheets, `scenes`, `silence --list`, `loudness --measure-only`, and `check`. This is an internal Phase 2 provider study, not approval for an agent-facing tool surface or the Phase 4 production adapter.
+
 ## Phase 2: Local media ingestion and baseline render
+
+Phase 2 starts only after PR-A passes Gate A. The PARTIAL-GO permits a small internal, read-only `MediaEvidenceProvider` study if it helps V2-202. It may use only the approved V2-150 subset, pinned-version capability checks, authorized asset handles, private Replex staging/evidence roots, strict known-JSON parsing, command-field stripping, and owned deadlines. It never mutates canonical state. Keep a native provider/fallback; ffmpeg-skill availability is not required for product operation. This provider is not `FfmpegSkillBackend` and adds no public service command.
 
 ### V2-201: Import immutable local assets
 
@@ -134,9 +145,9 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 - **Objective:** Generate versioned shot ranges, selected frames/contact sheets, motion/audio measurements, and optional transcript references.
 - **Why:** Models need compact evidence rather than full video context.
-- **Dependencies:** V2-201 and V2-150; use the spike matrix to delegate or retain a native fallback rather than reimplementing blindly.
+- **Dependencies:** V2-201, the PR-A/Gate A pass, and V2-150's bounded PARTIAL-GO; retain the native path unless the approved read-only provider is measurably cheaper or safer.
 - **Likely files:** new `src/analyze.ts`, `src/evidence.ts`, inspection extensions; tests and small media fixtures.
-- **Contracts:** `AnalysisRequest`, `MediaEvidenceIndex`, per-artifact hashes/version/source hash.
+- **Contracts:** Internal `MediaEvidenceProvider` methods `probe`, `contactSheet`, `scenes`, `silence`, `loudness`, and `check`; versioned `MediaEvidenceIndex` with per-artifact hashes, generator/config version, and source hash. The provider returns evidence only; it cannot write operations or revisions.
 - **Migration concerns:** Derived evidence is regenerable and must not change asset identity.
 - **Tests:** deterministic fixture outputs/tolerances, silent/no-audio media, variable frame rate, invalidation after source mismatch, evidence size limits.
 - **Acceptance:** The same source/config produces equivalent indexed evidence; inspection can request bounded subsets.
@@ -186,17 +197,17 @@ Each task starts with a failing contract/regression check, makes the smallest ch
 
 ## Phase 4: Chosen media backend adapter
 
-### V2-401: Implement `FfmpegSkillBackend` when the spike warrants it
+### V2-401: Integrate only the approved read-only evidence subset
 
-- **Objective:** Translate validated frozen `MediaExecutionJob` and authorized asset handles into the approved pinned structured contract.
-- **Why:** Reuse deterministic mechanics without ceding semantics.
-- **Dependencies:** V2-150 GO or PARTIAL-GO; V2-203 baseline; chosen capability map and ADR-002 boundary.
-- **Likely files:** new `src/backends/ffmpeg-skill.ts`, backend interface/registry, lockfile/config, tests.
-- **Contracts:** `probe`, `inspect`, `execute`, `verify`; capability/version handshake; structured error mapping.
+- **Objective:** If Phase 2 evidence shows an advantage, wrap only the approved V2-150 read-only evidence subset behind authorized handles and Replex-owned staging.
+- **Why:** Reuse bounded measurements without ceding editing or verification semantics.
+- **Dependencies:** V2-203 baseline and Phase 2 parity evidence. V2-150 PARTIAL-GO alone does not authorize a runtime adapter.
+- **Likely files:** a narrow evidence adapter and tests; no general execution registry unless a second backend requires it.
+- **Contracts:** `probe`, `look`, `scenes`, `silence --list`, `loudness --measure-only`, and `check`; pinned capability handshake, strict result parsing, safe error mapping.
 - **Migration concerns:** Outputs record backend; projects do not.
-- **Tests:** golden dry plans, native parity, timeout/cancel, missing capability, changed input, malformed JSON, partial output cleanup, path containment.
-- **Acceptance:** Supported jobs pass through adapter with no raw command/filter fields; native fallback remains selectable.
-- **Non-goals:** Every ffmpeg-skill tool, canonical MCP, backend access to mutable project state, automatic fallback after partial execution.
+- **Tests:** read-only native parity, timeout/cancel, missing capability, changed input, malformed JSON, bounded output, path containment, no command-field exposure.
+- **Acceptance:** Only approved evidence results pass through the adapter; source/job data remain read-only and the native provider stays available.
+- **Non-goals:** Mutating media execution, every ffmpeg-skill tool, canonical MCP, backend access to mutable project state, automatic fallback after partial execution. Any mutating capability requires a separate parity test, architecture review, and allowlist extension.
 - **Rollback:** Select native backend; preserve adapter-produced outputs as historical artifacts.
 
 ## Phase 5: Richer 2D composition

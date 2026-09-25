@@ -1,6 +1,6 @@
 # Replex V2 architecture
 
-**Status:** Architecture-approved, not implemented
+**Status:** Normative architecture. The V2 Core Foundation is implemented; PR-A is sealing service-contract v1. Local media runtime and later phases remain unimplemented and gated.
 
 **Date:** 19 September 2026
 
@@ -84,7 +84,7 @@ V2 supersedes these V1 assumptions:
 
 ## 4. Canonical Project Schema V2
 
-The structures below are design contracts, not source code added by this change. Exact Zod syntax belongs in Phase 1.
+The structures below define the canonical design. Current ProjectV2 schemas and the reducer are implemented in `src/schema-v2.ts` and `src/operations-v2.ts`; service-contract v1 uses separate wire projections as recorded in [`ADR-007`](ADR-007-service-contract-v1.md).
 
 ```ts
 type AssetType =
@@ -368,10 +368,10 @@ native FFmpeg         |
       final media pipeline
 ```
 
-The existing native FFmpeg renderer remains the compatibility backend. A cheap
-ffmpeg-skill capability/contract spike runs at the Phase 1/2 boundary before
-new media plumbing is duplicated. The later `FfmpegSkillBackend` implementation
-is conditional on that GO or PARTIAL-GO result. See [`ADR-004`](ADR-004-ffmpeg-skill.md).
+The existing native FFmpeg renderer remains the compatibility backend. The
+V2-150 PARTIAL-GO permits only the bounded read-only evidence study recorded in
+[`ADR-004`](ADR-004-ffmpeg-skill.md). It does not approve a production adapter;
+that requires Phase 2 parity evidence and a separate architecture review.
 
 Ordinary media processing stays separate from motion composition. A motion backend consumes typed presets and keyframes, emits an intermediate or final visual stream, and cannot mutate project state. Remotion is a candidate because it supports programmatic React-based video and server rendering, but the adapter must prove determinism, performance, cancellation, and licensing suitability before adoption. Its current special license can require a company license, so legal/commercial review is an explicit gate rather than an assumption.
 
@@ -380,17 +380,18 @@ The first motion POC proves a small preset set: 3D device/screen tilt, camera pu
 ## 9. Local and cloud execution
 
 One service/job protocol supports separate execution targets. Its
-transport-independent domain contracts are stabilized early, after the V2
-schema/reducer, so the frontend can mock against backend-owned types. HTTP,
-SSE/WebSocket, process supervision, and executors remain later implementation
-work:
+transport-independent service-contract v1 projects explicit wire types from the
+canonical model; it does not define a second project model. The v1 snapshot and
+local discovery boundary are recorded in [`ADR-007`](ADR-007-service-contract-v1.md).
+HTTP, SSE/WebSocket, process supervision, and executors remain later
+implementation work:
 
 ```text
 Frontend -> Replex Service API -> Job orchestration -> Local executor
                                              \-----> Cloud executor
 ```
 
-The protocol exposes conceptual commands `createProject`, `importAsset`, `startBrowserCapture`, `requestAgentEdit`, `applyOperations`, `verifyRevision`, `renderPreview`, `renderRevision`, `recaptureBrowserScene`, and `cancelJob`. Revision-mutating requests include a required base revision and idempotency key; derived jobs reference an explicit immutable revision and do not mutate canonical state.
+The protocol exposes `create_project`, `open_project`, `import_asset`, `start_browser_capture`, `recapture_browser_scene`, `request_agent_edit`, `apply_operations`, `verify_revision`, `render_preview`, `render_final`, `cancel_job`, and `submit_job_input`. Revision-mutating requests include a required base revision and idempotency key; derived jobs reference an explicit immutable revision and do not mutate canonical state. The local host selects and validates authorized project roots, then supplies project and revision IDs; service v1 has no project-list endpoint or database.
 
 Executors receive the same immutable job envelope and return the same status/events/results. Infrastructure differs: local jobs use local files and processes; cloud jobs use object storage, queues, and isolated workers. Canonical semantics do not differ.
 
