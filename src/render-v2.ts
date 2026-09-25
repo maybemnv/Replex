@@ -102,6 +102,13 @@ export interface MediaExecutionPreflight {
   assetSha256: string;
 }
 
+export interface CompositionExecutionPreflight {
+  status: "passed";
+  sourceRevisionId: string;
+  sourceRevisionHash: string;
+  assets: Array<{ assetId: string; sha256: string }>;
+}
+
 export interface RenderArtifactV2 {
   outputId: string;
   ref: string;
@@ -412,8 +419,8 @@ function pathInside(root: string, candidate: string): boolean {
   return relation !== "" && !relation.startsWith(`..${sep}`) && relation !== ".." && !isAbsolute(relation);
 }
 
-async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandle, payload: JobPayload): Promise<string> {
-  if (handle.assetId !== payload.assetHandle.assetId || handle.sha256 !== payload.assetHandle.sha256 || handle.ref !== payload.assetHandle.ref) {
+async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandle, expected: AssetHandle): Promise<string> {
+  if (handle.assetId !== expected.assetId || handle.sha256 !== expected.sha256 || handle.ref !== expected.ref) {
     throw new Error("resolved asset handle does not match the frozen job");
   }
   const root = await realpath(projectRoot);
@@ -423,9 +430,9 @@ async function checkedSourcePath(projectRoot: string, handle: ResolvedAssetHandl
     throw new Error("authorized asset handle escapes the project root");
   }
   const [rootReal, fileReal, fileStat, linkStat] = await Promise.all([realpath(root), realpath(resolvedHandle), stat(resolvedHandle), lstat(resolvedHandle)]);
-  if (!pathInside(rootReal, fileReal) || !fileStat.isFile() || linkStat.isSymbolicLink()) throw new Error("authorized asset handle is not a regular project media file");
+  if (!pathInside(rootReal, fileReal) || !fileStat.isFile() || linkStat.isSymbolicLink() || linkStat.nlink !== 1) throw new Error("authorized asset handle is not a regular project media file");
   const actualHash = await digestFile(fileReal);
-  if (actualHash !== payload.assetHandle.sha256) throw new Error("uploaded source bytes changed since the job was planned");
+  if (actualHash !== expected.sha256) throw new Error("uploaded source bytes changed since the job was planned");
   return fileReal;
 }
 
@@ -438,7 +445,7 @@ async function checkPreflight(
   }
   const resolved = authorization.resolvedHandles.find(({ assetId }) => assetId === payload.assetHandle.assetId);
   if (!resolved) throw new Error("authorized asset handle was not resolved for this job");
-  const sourcePath = await checkedSourcePath(authorization.projectRoot, resolved, payload);
+  const sourcePath = await checkedSourcePath(authorization.projectRoot, resolved, payload.assetHandle);
   return {
     sourcePath,
     result: {
@@ -451,12 +458,45 @@ async function checkPreflight(
   };
 }
 
+async function checkCompositionPreflight(
+  payload: CompositionJobPayload,
+  authorization: MediaExecutionAuthorization,
+): Promise<{ result: CompositionExecutionPreflight; sourcePaths: Map<string, string> }> {
+  if (!await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) throw new Error("media execution job revision is no longer current");
+  const sourcePaths = new Map<string, string>();
+  for (const input of payload.assetInputs) {
+    const resolved = authorization.resolvedHandles.find(({ assetId }) => assetId === input.assetId);
+    if (!resolved) throw new Error("authorized asset handle was not resolved for this job");
+    sourcePaths.set(input.assetId, await checkedSourcePath(authorization.projectRoot, resolved, input.handle));
+  }
+  return {
+    sourcePaths,
+    result: {
+      status: "passed",
+      sourceRevisionId: payload.sourceRevisionId,
+      sourceRevisionHash: payload.sourceRevisionHash,
+      assets: payload.assetInputs.map(({ assetId, handle }) => ({ assetId, sha256: handle.sha256 })),
+    },
+  };
+}
+
 /** Checks job/revision authorization and immutable source identity before any backend work. */
 export async function verifyMediaExecutionPreflight(
   job: MediaExecutionJob,
   authorization: MediaExecutionAuthorization,
 ): Promise<MediaExecutionPreflight> {
   return (await checkPreflight(assertJobHash(job), authorization)).result;
+}
+
+/** Checks every source handle and the pinned revision before multi-input composition. */
+export async function verifyCompositionExecutionPreflight(
+  job: CompositionExecutionJob,
+  authorization: MediaExecutionAuthorization,
+): Promise<CompositionExecutionPreflight> {
+  const { jobHash, ...payloadInput } = job;
+  const payload = compositionJobPayloadSchema.parse(payloadInput);
+  if (digest(canonicalJson(payload)) !== jobHash) throw new Error("media execution job hash does not match its frozen plan");
+  return (await checkCompositionPreflight(payload, authorization)).result;
 }
 
 interface ProcessResult { stdout: string; stderr: string }
@@ -747,7 +787,7 @@ export async function executeMediaExecutionJob(
     const evidenceSha256 = digest(receiptBytes);
 
     // Pin revision and source again at the final publication boundary.
-    const sourceAgain = await checkedSourcePath(root, handle, payload);
+    const sourceAgain = await checkedSourcePath(root, handle, payload.assetHandle);
     if (sourceAgain !== sourcePath || !await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
       throw new Error("media execution revision or source changed before output promotion");
     }
@@ -758,7 +798,7 @@ export async function executeMediaExecutionJob(
     try {
       promotedOutput = await publishExclusive(stagedPath, outputPath, verified.sha256);
       promotedEvidence = await publishExclusive(stagedEvidencePath, evidencePath, evidenceSha256);
-      const finalSource = await checkedSourcePath(root, handle, payload);
+      const finalSource = await checkedSourcePath(root, handle, payload.assetHandle);
       if (finalSource !== sourcePath || !await authorization.isRevisionCurrent(payload.sourceRevisionId, payload.sourceRevisionHash)) {
         throw new Error("media execution revision or source changed after output promotion");
       }

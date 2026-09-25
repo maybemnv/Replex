@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { semanticHashV2 } from "../src/operations-v2.js";
 import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
-import { buildCompositionExecutionJob } from "../src/render-v2.js";
+import { buildCompositionExecutionJob, verifyCompositionExecutionPreflight } from "../src/render-v2.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -86,5 +89,30 @@ describe("V2 composition render planning", () => {
     const handles = Object.values(project.assets).map((asset) => ({ assetId: asset.id, sha256: asset.sha256, ref: asset.path! }));
 
     expect(() => buildCompositionExecutionJob(project, handles)).toThrow("contiguous");
+  });
+
+  it("authorizes every source and rejects a hard-linked immutable asset", async () => {
+    const project = mixedProject();
+    const handles = Object.values(project.assets).map((asset) => ({ assetId: asset.id, sha256: asset.sha256, ref: asset.path! }));
+    const job = buildCompositionExecutionJob(project, handles);
+    const root = await mkdtemp(join(tmpdir(), "replex-composition-preflight-"));
+    await mkdir(join(root, "assets"));
+    const resolvedHandles = [] as Array<{ assetId: string; sha256: string; ref: string; path: string }>;
+    try {
+      for (const handle of handles) {
+        const path = join(root, ...handle.ref.split("/"));
+        await writeFile(path, handle.assetId);
+        resolvedHandles.push({ ...handle, path });
+      }
+      const authorization = { projectRoot: root, resolvedHandles, isRevisionCurrent: async () => true };
+      await expect(verifyCompositionExecutionPreflight(job, authorization)).resolves.toMatchObject({
+        status: "passed", sourceRevisionId: project.currentRevisionId, assets: handles.map(({ assetId, sha256 }) => ({ assetId, sha256 })),
+      });
+      await expect(verifyCompositionExecutionPreflight(job, { ...authorization, resolvedHandles: resolvedHandles.slice(0, -1) })).rejects.toThrow("not resolved");
+      await link(resolvedHandles[0]!.path, join(root, "assets", "second-link"));
+      await expect(verifyCompositionExecutionPreflight(job, authorization)).rejects.toThrow("regular project media file");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
