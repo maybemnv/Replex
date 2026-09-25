@@ -6,7 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { semanticHashV2 } from "./operations-v2.js";
-import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
+import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const positiveInt = z.number().int().finite().positive();
@@ -89,6 +89,59 @@ export interface RenderArtifactV2 {
     artifactSha256: string;
     checks: { probe: true; decode: true; hash: true };
   };
+}
+
+/** Records a verified render as derived project state without changing its semantic revision. */
+export function registerRenderArtifactV2(projectInput: ProjectV2, artifact: RenderArtifactV2): ProjectV2 {
+  const project = ProjectV2Schema.parse(projectInput);
+  const revision = project.revisions.find(({ id }) => id === project.currentRevisionId);
+  const verification = artifact.verification;
+  if (!revision || revision.manifestSha256 !== semanticHashV2(project)
+    || artifact.sourceRevisionId !== project.currentRevisionId
+    || artifact.sourceRevisionHash !== revision.manifestSha256) {
+    throw new Error("render artifact does not target the current project revision");
+  }
+  if (verification.status !== "passed" || verification.id !== artifact.verificationRefId
+    || verification.revisionId !== artifact.sourceRevisionId
+    || verification.sourceRevisionHash !== artifact.sourceRevisionHash
+    || verification.renderJobHash !== artifact.renderJobHash
+    || verification.artifactSha256 !== artifact.sha256
+    || !verification.checks.probe || !verification.checks.decode || !verification.checks.hash
+    || !/^[a-f0-9]{64}$/.test(verification.evidenceSha256)
+    || verification.evidenceRefs.length === 0) {
+    throw new Error("render artifact verification receipt is inconsistent");
+  }
+
+  const output = RenderOutputSchemaV2.parse({
+    outputId: artifact.outputId,
+    ref: artifact.ref,
+    sha256: artifact.sha256,
+    probe: artifact.probe,
+    sourceRevisionId: artifact.sourceRevisionId,
+    revisionId: artifact.sourceRevisionId,
+    renderJobHash: artifact.renderJobHash,
+    backendId: artifact.backendId,
+    backendVersion: artifact.backendVersion,
+    verificationRefId: artifact.verificationRefId,
+  });
+  const verificationRef = VerificationRefSchema.parse({
+    id: artifact.verificationRefId,
+    revisionId: artifact.sourceRevisionId,
+    status: "passed",
+    evidenceRefs: artifact.verification.evidenceRefs,
+  });
+  const existingOutput = project.outputs.find(({ outputId }) => outputId === output.outputId);
+  if (existingOutput && canonicalJson(existingOutput) !== canonicalJson(output)) throw new Error("render output ID already refers to different data");
+  const existingRef = project.verification.refs.find(({ id }) => id === verificationRef.id);
+  if (existingRef && canonicalJson(existingRef) !== canonicalJson(verificationRef)) throw new Error("verification ID already refers to different data");
+
+  if (!existingOutput) project.outputs.push(output);
+  project.verification = {
+    revisionId: artifact.sourceRevisionId,
+    status: "passed",
+    refs: existingRef ? project.verification.refs : [...project.verification.refs, verificationRef],
+  };
+  return ProjectV2Schema.parse(project);
 }
 
 function freezeDeep<T>(value: T): DeepReadonly<T> {
@@ -333,8 +386,8 @@ function buildFfmpegArgs(job: JobPayload, sourcePath: string, stagedPath: string
   const scale = numberText(clip.transform.scale);
   const rotation = numberText(clip.transform.rotation * Math.PI / 180);
   const opacity = numberText(clip.opacity);
-  // V2 maps x/y to canvas pixels, scale to a multiplier, rotation to degrees,
-  // and anchor to a normalized point on the transformed clip rectangle.
+  // V2 crops in normalized source space before contain-fit; anchors align the transformed clip in canvas slack.
+  // x/y are signed canvas-pixel offsets applied after alignment; scale is a multiplier and rotation uses degrees.
   const videoFilter = `[0:v]trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},setpts=(PTS-STARTPTS)/${numberText(clip.speed)}${cropFilter},fps=${numberText(fps)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=rgba,scale=w='max(2,trunc(iw*${scale}/2)*2)':h='max(2,trunc(ih*${scale}/2)*2)',rotate=${rotation}:ow=rotw(iw):oh=roth(ih):c=none,colorchannelmixer=aa=${opacity}[clip]`;
   const audioInput = job.source.hasAudio ? "[0:a]" : "[2:a]";
   const audioStart = job.source.hasAudio ? seconds(clip.sourceInMs) : "0";
