@@ -1,18 +1,23 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalExecutorServer } from "../src/service/http.js";
+import { ffmpegPath, mediaAvailable } from "./media.js";
 
 describe("LocalExecutorServer", () => {
   let workspaceRoot: string | undefined;
   let server: LocalExecutorServer | undefined;
+  const extraRoots: string[] = [];
 
   afterEach(async () => {
     await server?.stop();
     server = undefined;
     if (workspaceRoot) await rm(workspaceRoot, { recursive: true, force: true });
     workspaceRoot = undefined;
+    await Promise.all(extraRoots.map((root) => rm(root, { recursive: true, force: true })));
+    extraRoots.length = 0;
   });
 
   it("serves typed local commands with loopback binding, bearer auth, CORS, jobs, and event replay", async () => {
@@ -48,7 +53,7 @@ describe("LocalExecutorServer", () => {
     const capabilities = await call("/capabilities", { headers: { origin: "http://localhost:5173" } });
     expect(capabilities.status).toBe(200);
     expect(capabilities.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
-    expect(await capabilities.json()).toMatchObject({ contractVersion: "v1", target: "local", jobKinds: ["apply_operations"] });
+    expect(await capabilities.json()).toMatchObject({ contractVersion: "v1", target: "local", jobKinds: ["asset_import", "apply_operations"] });
 
     const createdResponse = await call("/projects/create", {
       method: "POST",
@@ -108,6 +113,46 @@ describe("LocalExecutorServer", () => {
     expect(restarted.url).toBe(session.url);
     expect(restarted.token).not.toBe(session.token);
   });
+
+  it.skipIf(!mediaAvailable)("authorizes a selected local file inside configured roots and imports it without exposing its path", async () => {
+    workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-import-workspace-"));
+    const sourceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-import-source-"));
+    const outsideRoot = await mkdtemp(join(tmpdir(), "replex-local-http-import-outside-"));
+    extraRoots.push(sourceRoot, outsideRoot);
+    const sourcePath = join(sourceRoot, "selected.mp4");
+    const outsidePath = join(outsideRoot, "outside.mp4");
+    for (const path of [sourcePath, outsidePath]) {
+      const fixture = spawnSync(ffmpegPath, ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=8:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", path], { windowsHide: true, shell: false, timeout: 30_000 });
+      expect(fixture.status, fixture.stderr?.toString()).toBe(0);
+    }
+    server = new LocalExecutorServer({ workspaceRoot, importRoots: [sourceRoot] });
+    const session = await server.start();
+    const call = (path: string, body: unknown) => fetch(session.url + path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const projectResponse = await call("/projects/create", { contractVersion: "v1", idempotencyKey: "create-http-import", name: "HTTP import" });
+    const project = await projectResponse.json() as { projectId: string; revisionId: string };
+    const outside = await call("/local/imports/authorize", { sourcePath: outsidePath });
+    expect(outside.status).toBe(403);
+    expect(JSON.stringify(await outside.json())).not.toContain(outsidePath);
+
+    const authorized = await call("/local/imports/authorize", { sourcePath });
+    expect(authorized.status).toBe(201);
+    const selection = await authorized.json() as { token: string; filename: string; sizeBytes: number };
+    expect(selection).toMatchObject({ filename: "selected.mp4", sizeBytes: expect.any(Number) });
+    expect(JSON.stringify(selection)).not.toContain(sourcePath);
+
+    const submittedResponse = await call("/jobs/import-asset", {
+      contractVersion: "v1", idempotencyKey: "http-import", projectId: project.projectId, baseRevisionId: project.revisionId,
+      source: { kind: "local_token", ref: selection.token }, declaredFilename: selection.filename,
+    });
+    expect(submittedResponse.status).toBe(202);
+    const submitted = await submittedResponse.json() as { id: string };
+    const completed = await server.waitForJob(submitted.id, 30_000);
+    expect(completed).toMatchObject({ state: "succeeded", result: { assetId: expect.any(String) } });
+  }, 60_000);
 
   it("rejects invalid JSON and contract payloads with bounded errors", async () => {
     workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-errors-"));
