@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,8 @@ import { ProjectV2Schema, type AssetHandle, type ProjectV2 } from "../src/schema
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const ffmpegPath = process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
 const ffprobePath = process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-const mediaToolsAvailable = spawnSync(ffmpegPath, ["-version"], { windowsHide: true, shell: false }).status === 0
+const mediaToolsAvailable = isAbsolute(ffmpegPath) && isAbsolute(ffprobePath)
+  && spawnSync(ffmpegPath, ["-version"], { windowsHide: true, shell: false }).status === 0
   && spawnSync(ffprobePath, ["-version"], { windowsHide: true, shell: false }).status === 0;
 
 function apply(project: ProjectV2, operation: unknown): ProjectV2 {
@@ -175,7 +176,7 @@ describe("V2 camera-push execution", () => {
     })).rejects.toThrow();
   });
 
-  it("renders a verified silent push intermediate into a verified final composition without double speed", async () => {
+  it.skipIf(!mediaToolsAvailable)("renders a verified silent push intermediate into a verified final composition without double speed", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-motion-e2e-"));
     try {
       const source = await makeSource(root);
