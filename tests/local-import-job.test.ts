@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalExecutor } from "../src/service/executor.js";
 import { LocalProjectStore } from "../src/service/project-store.js";
-import { importLocalAssetV2 } from "../src/import-v2.js";
+import { authorizeLocalImport, importLocalAssetV2 } from "../src/import-v2.js";
 import { ffmpegPath, mediaAvailable } from "./media.js";
 
 describe("local asset import jobs", () => {
@@ -44,6 +44,14 @@ describe("local asset import jobs", () => {
     expect((await executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "import-fixture", projectId: project.projectId, baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename })).id).toBe(submitted.id);
     await expect(executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "reuse-consumed-token", projectId: project.projectId, baseRevisionId: completed.result.revisionId!, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
     await executor.stop();
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("bounds outstanding import handles and rejects authorization after stop", async () => {
+    const { executor, sourceRoot, sourcePath } = await setup();
+    for (let index = 0; index < 16; index += 1) await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+    await expect(executor.authorizeLocalImport(sourcePath, [sourceRoot])).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await executor.stop();
+    await expect(executor.authorizeLocalImport(sourcePath, [sourceRoot])).rejects.toMatchObject({ code: "EXECUTOR_OFFLINE" });
   }, 60_000);
 
   it.skipIf(!mediaAvailable)("rejects unauthorized, corrupt, and stale imports without canonical mutation", async () => {
@@ -123,7 +131,7 @@ describe("local asset import jobs", () => {
     await executor.stop();
     vi.useRealTimers();
 
-    const recoveredSource = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+    const recoveredSource = await authorizeLocalImport(sourcePath, [sourceRoot]);
     const store = new LocalProjectStore(roots[0]!);
     const current = await store.current(project.projectId);
     const imported = await importLocalAssetV2(current, await store.projectRoot(project.projectId), recoveredSource);

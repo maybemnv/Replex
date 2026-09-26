@@ -30,6 +30,7 @@ import { closeAuthorizedLocalImport, type AuthorizedLocalImport } from "../impor
 
 const MAX_JOB_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JOB_EVENTS = 20_000;
+const MAX_AUTHORIZED_IMPORTS = 16;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -131,7 +132,13 @@ export class LocalJobRuntime {
     await Promise.allSettled([...this.tasks]);
   }
 
-  registerAuthorizedImport(source: AuthorizedLocalImport): void {
+  async registerAuthorizedImport(source: AuthorizedLocalImport): Promise<void> {
+    if (!this.started || this.imports.size >= MAX_AUTHORIZED_IMPORTS) {
+      await closeAuthorizedLocalImport(source).catch(() => undefined);
+      throw new LocalExecutorError(this.started ? "VALIDATION_FAILED" : "EXECUTOR_OFFLINE", this.started
+        ? "Too many local files are awaiting import."
+        : "The local executor is not running.");
+    }
     this.imports.set(source.token, source);
   }
 

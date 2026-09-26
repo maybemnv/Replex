@@ -55,7 +55,7 @@ export class LocalExecutor {
 
   async authorizeLocalImport(sourcePath: string, approvedRoots: string[], importMethod: "file_picker" | "path" = "file_picker"): Promise<AuthorizedLocalImport> {
     const source = await authorizeLocalImport(sourcePath, approvedRoots, importMethod);
-    this.jobs.registerAuthorizedImport(source);
+    await this.jobs.registerAuthorizedImport(source);
     return source;
   }
 

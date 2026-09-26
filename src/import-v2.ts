@@ -97,6 +97,8 @@ export async function authorizeLocalImport(sourcePath: string, approvedRoots: st
   const lexicalSource = resolve(sourcePath);
   const lexicalRoots = approvedRoots.map((root) => resolve(root));
   if (!lexicalRoots.some((root) => isWithin(root, lexicalSource))) fail("SOURCE_NOT_AUTHORIZED", "source is outside approved import roots");
+  const filename = basename(lexicalSource);
+  if (!filename || filename.length > 255 || /[\\/:\0-\x1f]/.test(filename)) fail("SOURCE_NOT_AUTHORIZED", "source filename is not supported");
 
   let file: FileHandle | undefined;
   try {
@@ -121,7 +123,7 @@ export async function authorizeLocalImport(sourcePath: string, approvedRoots: st
     }
     if (openedStat.size > BigInt(Number.MAX_SAFE_INTEGER)) fail("SOURCE_NOT_AUTHORIZED", "source is too large to import safely");
 
-    const handle = Object.freeze({ token: randomUUID(), filename: basename(lexicalSource), sizeBytes: Number(openedStat.size) });
+    const handle = Object.freeze({ token: randomUUID(), filename, sizeBytes: Number(openedStat.size) });
     authorizedSources.set(handle, { file, filename: handle.filename, importMethod, initialStat: openedStat, consumed: false });
     file = undefined;
     return handle;
