@@ -96,7 +96,12 @@ async function captureResult(root: string, videoPath: string): Promise<CaptureRe
     runPath: join(runRoot, "run.json"),
     rawVideoPath: join(runRoot, "raw-video", "recording.webm"),
     logs: { actionsPath: join(runRoot, "logs", "actions.jsonl"), consolePath: join(runRoot, "logs", "console.jsonl") },
-    actionEvents: [],
+    actionEvents: normalFlow("https://example.test").steps
+      .filter((step) => step.sceneKey === "apply-filter")
+      .map((step, index) => ({
+        actionId: step.id, attempt: 1, atMs: (index + 1) * 100, target: step.target,
+        checkpoint: step.checkpoint, outcome: "passed" as const,
+      })),
     captures: [{
       sceneKey: "apply-filter", sourcePath, sha256: sha(await readFile(sourcePath)),
       width: probe.width, height: probe.height, durationMs: Math.round(probe.durationSeconds * 1000), runId: id,
@@ -193,6 +198,11 @@ describe("V2 selective browser recapture", () => {
     wrongHash.captures[0]!.sha256 = "0".repeat(64);
     await expect(recaptureBrowserSceneV2(store, { ...request, capture: wrongHash }, { ffmpegPath, ffprobePath }))
       .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+
+    const failedCheckpoint = structuredClone(capture);
+    failedCheckpoint.actionEvents[1]!.outcome = "failed";
+    await expect(recaptureBrowserSceneV2(store, { ...request, capture: failedCheckpoint }, { ffmpegPath, ffprobePath }))
+      .rejects.toMatchObject({ code: "CAPTURE_FAILED" });
 
     expect(await store.current(project.projectId)).toEqual(project);
     const projectRoot = projectDirectory(root, project.projectId);

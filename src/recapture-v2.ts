@@ -18,6 +18,7 @@ import { LocalProjectStore, LocalProjectStoreError } from "./service/project-sto
 const datetime = z.string().datetime({ offset: true });
 const CapturedRunSchema = z.object({
   id: IdSchema,
+  attempt: z.number().int().positive(),
   status: z.enum(["passed", "failed"]),
   startedAt: datetime,
   endedAt: datetime,
@@ -137,7 +138,7 @@ async function validateRun(capture: CaptureResult, sceneKey: string): Promise<{ 
       reject("SCENE_INVALID", "capture run identity does not match its local artifacts");
     }
     const record = CapturedRunSchema.safeParse(JSON.parse(await readFile(canonicalRunPath, "utf8")) as unknown);
-    if (!record.success || record.data.id !== capture.run.id || record.data.status !== "passed"
+    if (!record.success || record.data.id !== capture.run.id || record.data.attempt !== capture.run.attempt || record.data.status !== "passed"
       || record.data.startedAt !== capture.run.startedAt || record.data.endedAt !== capture.run.endedAt) {
       reject("CAPTURE_FAILED", "capture run record does not match the result");
     }
@@ -150,7 +151,13 @@ async function validateRun(capture: CaptureResult, sceneKey: string): Promise<{ 
   }
 }
 
-function checkFlow(project: ProjectV2, previousAsset: MediaAsset, scene: CaptureResult["captures"][number], changedActionIds: string[]): void {
+function checkFlow(
+  project: ProjectV2,
+  previousAsset: MediaAsset,
+  scene: CaptureResult["captures"][number],
+  changedActionIds: string[],
+  capture: CaptureResult,
+): void {
   if (previousAsset.provenance.kind !== "browser") reject("FLOW_MISMATCH", "previous asset has no browser provenance");
   const flow = project.browser?.flows[previousAsset.provenance.flowId];
   if (!flow || flow.id !== previousAsset.provenance.flowId) reject("FLOW_MISMATCH", "approved browser flow is unavailable");
@@ -164,6 +171,12 @@ function checkFlow(project: ProjectV2, previousAsset: MediaAsset, scene: Capture
     || previousAsset.provenance.checkpointActionId !== stepIds.at(-1)) {
     reject("FLOW_MISMATCH", "selected capture does not match the approved browser scene");
   }
+  const actionEvents = capture.actionEvents.filter((event) => stepIds.includes(event.actionId));
+  if (actionEvents.length !== steps.length || actionEvents.some((event, index) => {
+    const step = steps[index]!;
+    return event.actionId !== step.id || event.attempt !== capture.run.attempt || event.outcome !== "passed"
+      || canonicalJson(event.checkpoint) !== canonicalJson(step.checkpoint);
+  })) reject("CAPTURE_FAILED", "selected browser scene lacks matching passed checkpoint evidence");
   if (changedActionIds.length === 0 || new Set(changedActionIds).size !== changedActionIds.length
     || changedActionIds.some((actionId) => !stepIds.includes(actionId))) {
     reject("INVALID_REQUEST", "changed action IDs must be unique host assertions within the selected scene");
@@ -298,7 +311,7 @@ export async function recaptureBrowserSceneV2(
     reject("INVALID_OPERATION", "previous browser capture is not used by a project clip");
   }
   const { runRoot, scene } = await validateRun(request.capture, request.sceneKey);
-  checkFlow(before, previousAsset, scene, request.changedActionIds);
+  checkFlow(before, previousAsset, scene, request.changedActionIds, request.capture);
 
   let source;
   try {
