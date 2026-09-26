@@ -1,6 +1,6 @@
 # V2-901 Selective Browser Recapture Core Proof
 
-**Status:** Implementation in progress under the master program's Phase 9 core-proof authorization
+**Status:** Core-proof candidate implemented on PR #20; review and merge remain pending
 
 **Base:** `main` at `5950983e5a398421e5855702c5e025e419593cbb`
 
@@ -11,6 +11,12 @@
 Prove that one selected browser-origin scene can be recaptured from its approved flow, registered as a new immutable content-addressed V2 `browser_capture`, and committed through one `replace_browser_capture` semantic operation while preserving unrelated mixed-media project state.
 
 This is the core domain proof. It does not complete local-executor integration, formal human review, Phase 10 evaluation, or production authorization. The three supplied Gate D reviews remain synthetic and count as zero independent reviewers.
+
+## Candidate status and trust limits
+
+PR #20 contains the implementation and deterministic mixed-project E2E. The local report records seven passing preservation checks; the branch is not merged, so main-branch Gate E status remains open. Build and full-suite evidence is recorded in the implementation plan. The hosted PR check rollup contains GitGuardian Security Checks success; no GitHub CI test result is claimed.
+
+`captureRoots` is trusted host configuration and must not come from user or model input when this path is wired to a service. On rollback, the project pointer remains canonical; a second filesystem cleanup failure can leave unreferenced staging/blob files for later safe cleanup. The candidate does not wire a service command or executor job.
 
 ## Existing boundaries to reuse
 
