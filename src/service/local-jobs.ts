@@ -26,7 +26,8 @@ import {
 } from "../service-contract/index.js";
 import { LocalProjectService } from "./local.js";
 import { LocalProjectStoreError } from "./project-store.js";
-import { closeAuthorizedLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
+import { closeAuthorizedLocalImport, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
+import type { OperationBatchResult } from "../operations-v2.js";
 
 const MAX_JOB_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JOB_EVENTS = 20_000;
@@ -36,6 +37,7 @@ const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema]),
   job: JobViewSchema,
+  commitFenced: z.boolean().default(false),
 }).strict();
 const CancelKeySchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -104,9 +106,15 @@ export class LocalJobRuntime {
           });
           changed.push(this.appendJobEvent(state, record.job));
         } else if (record.job.state === "running") {
+          const importFinalizing = record.job.kind === "asset_import" && record.commitFenced;
           record.job = JobViewSchema.parse({
-            ...record.job, state: "queued", stage: "queued", progress: undefined,
-            cancellable: true, cancellationRequested: false, updatedAt: now(),
+            ...record.job,
+            state: "queued",
+            stage: "queued",
+            progress: undefined,
+            cancellable: importFinalizing ? false : true,
+            cancellationRequested: false,
+            updatedAt: now(),
           });
           changed.push(this.appendJobEvent(state, record.job));
           resume.push(record.job.id);
@@ -186,7 +194,7 @@ export class LocalJobRuntime {
         createdAt,
         updatedAt: createdAt,
       });
-      state.jobs[jobId] = { fingerprint, request, job };
+      state.jobs[jobId] = { fingerprint, request, job, commitFenced: false };
       const event = this.appendJobEvent(state, job);
       await this.save(state);
       return { job, event, schedule: true };
@@ -254,7 +262,7 @@ export class LocalJobRuntime {
         if (!prior) await this.save(state);
         return { response: CancelJobResponseSchema.parse({ disposition: "requested", job: record.job }), event: undefined };
       }
-      if (!record.job.cancellable) throw new LocalExecutorError("JOB_NOT_CANCELLABLE", "The job can no longer be cancelled.");
+      if (!record.job.cancellable || record.commitFenced) throw new LocalExecutorError("JOB_NOT_CANCELLABLE", "The job can no longer be cancelled.");
       record.job = JobViewSchema.parse({
         ...record.job,
         state: "cancelling",
@@ -359,12 +367,13 @@ export class LocalJobRuntime {
           return { event, cancelled: true as const, request: record.request };
         }
         if (record.job.state !== "queued") return { event: undefined, cancelled: false as const };
+        const importFinalizing = record.job.kind === "asset_import" && record.commitFenced;
         record.job = JobViewSchema.parse({
           ...record.job,
           state: "running",
-          stage: record.job.kind === "asset_import" ? "importing" : "applying_revision",
-          progress: { completed: 0, total: 1, percent: 0, unit: "batch" },
-          cancellable: false,
+          stage: importFinalizing ? "finalizing" : record.job.kind === "asset_import" ? "importing" : "applying_revision",
+          progress: importFinalizing ? record.job.progress : { completed: 0, total: 1, percent: 0, unit: "batch" },
+          cancellable: importFinalizing ? false : record.job.kind === "asset_import",
           cancellationRequested: false,
           updatedAt: now(),
         });
@@ -380,9 +389,10 @@ export class LocalJobRuntime {
 
       const controller = new AbortController();
       this.abortControllers.set(jobId, controller);
-      const result = "source" in start.request
-        ? await this.projects.importAsset(start.request, importToken ? this.imports.get(importToken) : undefined, controller.signal)
-        : await this.projects.applyOperations(start.request);
+      const importing = "source" in start.request;
+      const result = importing
+        ? await this.projects.importAsset(start.request as ImportAssetRequest, importToken ? this.imports.get(importToken) : undefined, controller.signal, (apply) => this.prepareImportCommit(jobId, apply))
+        : await this.projects.applyOperations(start.request as ApplyOperationsRequest);
       if (!result.ok) {
         await this.finishFailure(jobId, failureFor(result.code));
         return;
@@ -406,6 +416,27 @@ export class LocalJobRuntime {
         if (source) await closeAuthorizedLocalImport(source).catch(() => undefined);
       }
     }
+  }
+
+  private async prepareImportCommit(jobId: string, apply: () => Promise<OperationBatchResult>): Promise<OperationBatchResult> {
+    const event = await this.exclusive(async (state) => {
+      const record = state.jobs[jobId];
+      if (!record || record.job.state !== "running") throw new LocalImportError("IMPORT_CANCELLED", "local import was cancelled");
+      const fencedAt = now();
+      record.commitFenced = true;
+      record.job = JobViewSchema.parse({
+        ...record.job,
+        stage: "finalizing",
+        cancellable: false,
+        cancellationRequested: false,
+        updatedAt: fencedAt,
+      });
+      const event = this.appendJobEvent(state, record.job);
+      await this.save(state);
+      return event;
+    });
+    this.publish(event);
+    return apply();
   }
 
   private async finishSuccess(jobId: string, revisionId: string, revision: RevisionView, assetId?: string): Promise<void> {

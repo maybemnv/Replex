@@ -76,7 +76,7 @@ export class LocalProjectService {
     return publicOutcome(result);
   }
 
-  async importAsset(requestInput: ImportAssetRequest, source: AuthorizedLocalImport | undefined, signal: AbortSignal): Promise<ApplyOperationsOutcome & { assetId?: string }> {
+  async importAsset(requestInput: ImportAssetRequest, source: AuthorizedLocalImport | undefined, signal: AbortSignal, commit?: (apply: () => Promise<OperationBatchResult>) => Promise<OperationBatchResult>): Promise<ApplyOperationsOutcome & { assetId?: string }> {
     const request = ImportAssetRequestSchema.parse(requestInput);
     if (request.source.kind !== "local_token") return { ok: false, code: "UNSUPPORTED_OPERATION", detail: "upload sessions are not available in the local executor" };
     const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
@@ -93,15 +93,24 @@ export class LocalProjectService {
     }
     if (currentProject.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this import could be applied" };
     if (!source) throw new LocalImportError("UPLOAD_INTERRUPTED", "the authorized source handle was lost during restart");
-    const imported = await importLocalAssetV2(currentProject, await this.store.projectRoot(request.projectId), source, { signal });
-    const result = await this.store.applyBatch(request.projectId, {
-      baseRevisionId: request.baseRevisionId,
-      actor: "user",
-      intentId,
-      evidenceRefs: [],
-      operations: [{ type: "import_asset", asset: imported.asset }],
-      createdAt: new Date().toISOString(),
+    let committed: OperationBatchResult | undefined;
+    const imported = await importLocalAssetV2(currentProject, await this.store.projectRoot(request.projectId), source, {
+      signal,
+      commit: async (prepared) => {
+        const batch = {
+          baseRevisionId: request.baseRevisionId,
+          actor: "user" as const,
+          intentId,
+          evidenceRefs: [],
+          operations: [{ type: "import_asset" as const, asset: prepared.asset }],
+          createdAt: new Date().toISOString(),
+        };
+        committed = await (commit ?? (() => this.store.applyBatch(request.projectId, batch)))(() => this.store.applyBatch(request.projectId, batch));
+        if (!committed.ok) throw new LocalImportError("IMPORT_REJECTED", `canonical import was rejected: ${committed.detail}`);
+      },
     });
+    if (!committed) throw new LocalImportError("STORAGE_FAILED", "canonical import did not commit");
+    const result = committed;
     if (!result.ok) return result;
     return { ...publicOutcome(result), assetId: imported.asset.id };
   }

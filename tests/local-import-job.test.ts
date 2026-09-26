@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -46,6 +46,80 @@ describe("local asset import jobs", () => {
     await executor.stop();
   }, 60_000);
 
+  it.skipIf(!mediaAvailable)("cancels a running import without publishing bytes or a revision", async () => {
+    const { executor, project, sourceRoot } = await setup();
+    let unsubscribe = () => {};
+    try {
+      const sourcePath = join(sourceRoot, "slow-fixture.mp4");
+      const fixture = spawnSync(ffmpegPath, ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=60:duration=10", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", sourcePath], { windowsHide: true, shell: false, timeout: 60_000 });
+      expect(fixture.status, fixture.stderr?.toString()).toBe(0);
+      const source = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+      const events: Array<{ type: string; job?: { id: string; state: string } }> = [];
+      unsubscribe = executor.onEvent((event) => events.push(event));
+      const submitted = await executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "cancel-running-import", projectId: project.projectId, baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename });
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const current = await executor.getJob(submitted.id);
+        if (current.state === "running") break;
+        if (current.state !== "queued" && current.state !== "cancelling") throw new Error("import completed before the running state was observed");
+        if (Date.now() >= deadline) throw new Error("import did not enter the running state");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const projectRoot = await new LocalProjectStore(roots[0]!).projectRoot(project.projectId);
+      const assetsBefore = await readdir(join(projectRoot, "media", "assets")).catch(() => [] as string[]);
+      await executor.cancelJob({ contractVersion: "v1", idempotencyKey: "cancel-running-import-request", projectId: project.projectId, jobId: submitted.id });
+      expect(await executor.waitForJob(submitted.id, 30_000)).toMatchObject({ state: "cancelled" });
+      expect(events.some((event) => event.type === "job.updated" && event.job?.id === submitted.id && event.job.state === "cancelled")).toBe(true);
+      const snapshot = await executor.openProject({ contractVersion: "v1", idempotencyKey: "open-after-running-cancel", projectId: project.projectId, revisionId: project.revisionId });
+      expect(snapshot.summary.currentRevisionId).toBe(project.revisionId);
+      expect(snapshot.assets).toHaveLength(0);
+      expect(await readdir(join(projectRoot, "media", "assets")).catch(() => [] as string[])).toEqual(assetsBefore);
+      expect(await readdir(join(projectRoot, ".replex-staging")).catch(() => [] as string[])).toHaveLength(0);
+    } finally {
+      unsubscribe();
+      await executor.stop();
+    }
+  }, 120_000);
+
+  it.skipIf(!mediaAvailable)("rejects cancellation after the import enters its commit stage", async () => {
+    const { executor, project, sourceRoot, sourcePath } = await setup();
+    let unsubscribe = () => {};
+    let lateCancellation: Promise<unknown> | undefined;
+    const events: Array<{ type: string; job?: { id: string; state: string; stage: string; cancellable: boolean } }> = [];
+    try {
+      const source = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+      unsubscribe = executor.onEvent((event) => {
+        events.push(event);
+        if (event.type === "job.updated" && event.job.state === "running" && event.job.stage === "finalizing") {
+          lateCancellation = executor.cancelJob({ contractVersion: "v1", idempotencyKey: "late-cancel-request", projectId: project.projectId, jobId: event.job.id }).then(
+            (response) => response,
+            (error: unknown) => error,
+          );
+        }
+      });
+      const submitted = await executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "late-cancel", projectId: project.projectId, baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename });
+      const deadline = Date.now() + 15_000;
+      while (!events.some((event) => event.type === "job.updated" && event.job?.id === submitted.id && event.job.state === "running" && event.job.stage === "finalizing" && !event.job.cancellable)) {
+        const current = await executor.getJob(submitted.id);
+        if (current.state !== "queued" && current.state !== "running") throw new Error("import completed before its commit event was observed");
+        if (Date.now() >= deadline) throw new Error("import did not publish its non-cancellable commit event");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(lateCancellation).toBeDefined();
+      const cancellation = await lateCancellation!;
+      const completed = await executor.waitForJob(submitted.id, 30_000);
+      expect(completed).toMatchObject({ state: "succeeded" });
+      if (completed.state !== "succeeded") throw new Error("late cancellation did not succeed");
+      if (cancellation instanceof Error) expect(cancellation).toMatchObject({ code: "JOB_NOT_CANCELLABLE" });
+      else expect(cancellation).toMatchObject({ disposition: "already_terminal" });
+      const snapshot = await executor.openProject({ contractVersion: "v1", idempotencyKey: "open-late-cancel", projectId: project.projectId, revisionId: completed.result.revisionId! });
+      expect(snapshot.summary.currentRevisionId).not.toBe(project.revisionId);
+      expect(snapshot.assets).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      await executor.stop();
+    }
+  }, 60_000);
   it.skipIf(!mediaAvailable)("bounds outstanding import handles and rejects authorization after stop", async () => {
     const { executor, sourceRoot, sourcePath } = await setup();
     for (let index = 0; index < 16; index += 1) await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
@@ -144,12 +218,35 @@ describe("local asset import jobs", () => {
     });
     expect(committed.ok).toBe(true);
 
+    const jobsPath = join(roots[0]!, ".replex-service", "jobs.json");
+    const state = JSON.parse(await readFile(jobsPath, "utf8")) as { jobs: Record<string, { job: Record<string, unknown>; commitFenced?: boolean }> };
+    state.jobs[submitted.id]!.commitFenced = true;
+    Object.assign(state.jobs[submitted.id]!.job, { state: "running", stage: "finalizing", cancellable: false, cancellationRequested: false });
+    await writeFile(jobsPath, JSON.stringify(state));
+
     const restarted = new LocalExecutor({ workspaceRoot: roots[0]! });
-    await restarted.start();
-    const recovered = await restarted.waitForJob(submitted.id, 30_000);
-    expect(recovered).toMatchObject({ state: "succeeded", result: { assetId: imported.asset.id, revisionId: expect.any(String) } });
-    if (recovered.state !== "succeeded") throw new Error("committed import was not recovered");
-    expect((await restarted.openProject({ contractVersion: "v1", idempotencyKey: "open-recovered-import", projectId: project.projectId, revisionId: recovered.result.revisionId! })).assets).toHaveLength(1);
-    await restarted.stop();
+    let unsubscribe = () => {};
+    let lateCancellation: Promise<unknown> | undefined;
+    try {
+      unsubscribe = restarted.onEvent((event) => {
+        if (event.type === "job.updated" && event.job.id === submitted.id && event.job.state === "running" && event.job.stage === "finalizing") {
+          lateCancellation = restarted.cancelJob({ contractVersion: "v1", idempotencyKey: "cancel-recovered-import", projectId: project.projectId, jobId: submitted.id }).then(
+            (response) => response,
+            (error: unknown) => error,
+          );
+        }
+      });
+      await restarted.start();
+      const recovered = await restarted.waitForJob(submitted.id, 30_000);
+      expect(recovered).toMatchObject({ state: "succeeded", result: { assetId: imported.asset.id, revisionId: expect.any(String) } });
+      if (recovered.state !== "succeeded") throw new Error("committed import was not recovered");
+      expect(lateCancellation).toBeDefined();
+      const cancellation = await lateCancellation!;
+      expect(cancellation).toMatchObject({ code: "JOB_NOT_CANCELLABLE" });
+      expect((await restarted.openProject({ contractVersion: "v1", idempotencyKey: "open-recovered-import", projectId: project.projectId, revisionId: recovered.result.revisionId! })).assets).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      await restarted.stop();
+    }
   }, 60_000);
 });
