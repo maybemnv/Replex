@@ -401,8 +401,14 @@ One service/job protocol supports separate execution targets. Its
 transport-independent service-contract v1 projects explicit wire types from the
 canonical model; it does not define a second project model. The v1 snapshot and
 local discovery boundary are recorded in [`ADR-007`](ADR-007-service-contract-v1.md).
-HTTP, SSE/WebSocket, process supervision, and executors remain later
-implementation work:
+The V2-701 POC candidate adds a loopback HTTP/JSON local executor for project
+create/open and asynchronous semantic-operation jobs. It shares a typed
+dispatcher with a one-shot command CLI and permits one supported runtime owner
+per workspace. This candidate does not yet expose media import, evidence,
+conversational agent, browser capture/recapture, preview, verification, or render
+jobs; its scope and limitations are recorded in
+[`ADR-011`](ADR-011-local-executor-transport.md). SSE/WebSocket delivery,
+general process supervision, and cloud execution remain later work:
 
 ```text
 Frontend -> Replex Service API -> Job orchestration -> Local executor

@@ -11,12 +11,14 @@ import {
   CreateProjectRequestSchema,
   ProjectCreatedResponseSchema,
   ErrorSchema,
+  ServiceErrorResponseSchema,
   ImportAssetRequestSchema,
   LayerViewSchema,
   JobInputRequestSchema,
   JobInputSubmissionResultSchema,
   JobProgressSchema,
   JobEventSchema,
+  JobEventPageSchema,
   JobSchema,
   JobStateSchema,
   JobViewSchema,
@@ -342,6 +344,26 @@ describe("transport-independent service contract", () => {
     expect(CapabilitySetSchema.safeParse({ ...mockCapabilitySet, availableCommands: [...mockCapabilitySet.availableCommands, "unknown_command"] }).success).toBe(false);
     expect(CapabilitySetSchema.safeParse({ ...mockCapabilitySet, target: "cloud", availableCommands: ["start_browser_capture"] }).success).toBe(false);
     expect(CapabilitySetSchema.safeParse({ ...mockCapabilitySet, availableCommands: ["open_project", "open_project"] }).success).toBe(false);
+  });
+
+  it("freezes the local transport error and replay-page envelopes", () => {
+    const error = { contractVersion: "v1" as const, error: { code: "UNAUTHORIZED" as const, message: "A valid local executor token is required.", retryable: false } };
+    expect(ServiceErrorResponseSchema.parse(error)).toEqual(error);
+    expect(ServiceErrorResponseSchema.safeParse({ ...error, path: "C:\\private" }).success).toBe(false);
+
+    const event = mockProjectEvents[0]!;
+    const page = {
+      contractVersion: "v1" as const,
+      projectId: event.projectId,
+      afterSequence: 0,
+      latestSequence: event.sequence,
+      cursorExpired: false,
+      hasMore: false,
+      events: [event],
+    };
+    expect(JobEventPageSchema.parse(page)).toEqual(page);
+    expect(JobEventPageSchema.safeParse({ ...page, events: [{ ...event, projectId: "another-project" }] }).success).toBe(false);
+    expect(JobEventPageSchema.safeParse({ ...page, afterSequence: page.latestSequence + 1 }).success).toBe(false);
   });
 
   it("serializes fixture snapshots deterministically", () => {
