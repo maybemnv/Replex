@@ -39,8 +39,11 @@ export interface LocalAssetBatchRequest {
   source: AuthorizedLocalImport;
   buildAsset: (facts: LocalAssetFacts, project: ProjectV2) => MediaAsset;
   buildBatch: (asset: MediaAsset, project: ProjectV2) => OperationBatchInput;
+  buildEvidence?: (result: Extract<OperationBatchResult, { ok: true }>) => { id: string; value: unknown };
   options?: LocalImportOptions;
 }
+
+type EvidenceWrite = { reference: string; createdPath?: string };
 
 class LocalAssetBatchRejected extends Error {
   constructor(readonly result: Extract<OperationBatchResult, { ok: false }>) {
@@ -138,6 +141,12 @@ export class LocalProjectStore {
   }
 
   async operationLog(projectId: string): Promise<OperationLogRecord[]> {
+    const project = await this.current(projectId);
+    const committedRevisions = new Set(project.revisions.map((revision) => revision.id));
+    return (await this.readOperationLog(projectId)).filter((record) => committedRevisions.has(record.resultRevisionId));
+  }
+
+  private async readOperationLog(projectId: string): Promise<OperationLogRecord[]> {
     const root = await this.root();
     const directory = await this.projectDirectory(root, projectId, false);
     const path = join(directory, OPERATION_LOG_RELATIVE_PATH);
@@ -157,11 +166,11 @@ export class LocalProjectStore {
     });
   }
 
-  async applyBatchWithLocalAsset(projectId: string, request: LocalAssetBatchRequest): Promise<OperationBatchResult> {
+  async applyBatchWithLocalAsset(projectId: string, request: LocalAssetBatchRequest): Promise<OperationBatchResult & { evidenceRef?: string }> {
     return this.withProjectLock(projectId, async () => {
       const current = await this.current(projectId);
       const committed = new Set(current.revisions.map((revision) => revision.id));
-      const hasPriorIntent = (await this.operationLog(projectId)).some((record) =>
+      const hasPriorIntent = (await this.readOperationLog(projectId)).some((record) =>
         committed.has(record.resultRevisionId) && record.intentId === request.intentId);
       if (request.baseRevisionId !== current.currentRevisionId && !hasPriorIntent) {
         return { ok: false, code: "STALE_REVISION", detail: "base revision is not current" };
@@ -170,6 +179,7 @@ export class LocalProjectStore {
       const root = await this.root();
       const directory = await this.projectDirectory(root, projectId, false);
       let facts: LocalAssetFacts | undefined;
+      let evidence: EvidenceWrite | undefined;
       try {
         return await withLocalAssetV2(directory, request.source, (candidate) => {
           facts = candidate;
@@ -182,11 +192,15 @@ export class LocalProjectStore {
           if (batch.baseRevisionId !== request.baseRevisionId || batch.intentId !== request.intentId) {
             throw new LocalProjectStoreError("INVALID_OPERATION", "local asset batch does not match its pinned revision and intent");
           }
-          const result = await this.applyBatchLocked(projectId, current, batch);
+          const result = await this.applyBatchLocked(projectId, current, batch, async (accepted) => {
+            const pending = request.buildEvidence?.(accepted);
+            if (pending) evidence = await this.writeEvidenceLocked(directory, root, pending.id, pending.value);
+          });
           if (!result.ok) throw new LocalAssetBatchRejected(result);
-          return result;
+          return evidence ? { ...result, evidenceRef: evidence.reference } : result;
         }, request.options);
       } catch (error) {
+        if (evidence?.createdPath) await this.removeCreatedFile(evidence.createdPath, root).catch(() => undefined);
         if (error instanceof LocalAssetBatchRejected) return error.result;
         throw error;
       }
@@ -195,34 +209,54 @@ export class LocalProjectStore {
 
   async writeEvidence(projectId: string, evidenceId: string, value: unknown): Promise<string> {
     if (!IdSchema.safeParse(evidenceId).success) throw new LocalProjectStoreError("INVALID_OPERATION", "evidence ID is invalid");
-    let text: string;
-    try {
-      text = canonicalJson(value);
-    } catch {
-      throw invalidStorage();
-    }
-    if (Buffer.byteLength(text, "utf8") > MAX_EVIDENCE_BYTES) throw invalidStorage();
-
     return this.withProjectLock(projectId, async () => {
       const root = await this.root();
       const directory = await this.projectDirectory(root, projectId, false);
-      const evidenceRoot = await this.ensureDirectory(directory, "evidence", root);
-      const recaptureRoot = await this.ensureDirectory(evidenceRoot, "recapture", root);
-      const fileName = `${sha256(evidenceId)}.json`;
-      const filePath = join(recaptureRoot, fileName);
-      const relativePath = `evidence/recapture/${fileName}`;
-      const existing = await this.readJsonIfExists<unknown>(filePath, root);
-      if (existing !== undefined) {
-        if (canonicalJson(existing) === text) return relativePath;
-        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "evidence ID was already used for different content");
-      }
-      await this.writeJsonAtomic(filePath, value, root);
-      return relativePath;
+      return (await this.writeEvidenceLocked(directory, root, evidenceId, value)).reference;
     });
   }
 
-  private async applyBatchLocked(projectId: string, current: ProjectV2, batch: OperationBatchInput): Promise<OperationBatchResult> {
-    const log = await this.operationLog(projectId);
+  private async writeEvidenceLocked(directory: string, root: string, evidenceId: string, value: unknown): Promise<EvidenceWrite> {
+    if (!IdSchema.safeParse(evidenceId).success) throw new LocalProjectStoreError("INVALID_OPERATION", "evidence ID is invalid");
+    let text: string;
+    try { text = canonicalJson(value); }
+    catch { throw invalidStorage(); }
+    if (Buffer.byteLength(text, "utf8") > MAX_EVIDENCE_BYTES) throw invalidStorage();
+
+    const evidenceRoot = await this.ensureDirectory(directory, "evidence", root);
+    const recaptureRoot = await this.ensureDirectory(evidenceRoot, "recapture", root);
+    const fileName = `${sha256(evidenceId)}.json`;
+    const filePath = join(recaptureRoot, fileName);
+    const reference = `evidence/recapture/${fileName}`;
+    const existing = await this.readJsonIfExists<unknown>(filePath, root);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) === text) return { reference };
+      throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "evidence ID was already used for different content");
+    }
+    await this.writeJsonAtomic(filePath, value, root);
+    return { reference, createdPath: filePath };
+  }
+
+  private async removeCreatedFile(path: string, root: string): Promise<void> {
+    try {
+      const parent = await realpath(join(path, ".."));
+      const info = await lstat(path);
+      const real = await realpath(path);
+      if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1 || !within(root, parent) || !within(root, real)) throw invalidStorage();
+      await unlink(real);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+
+  private async applyBatchLocked(
+    projectId: string,
+    current: ProjectV2,
+    batch: OperationBatchInput,
+    ensureEvidence?: (result: Extract<OperationBatchResult, { ok: true }>) => Promise<void>,
+  ): Promise<OperationBatchResult> {
+    const log = await this.readOperationLog(projectId);
     const committedRevisions = new Set(current.revisions.map((revision) => revision.id));
     const committedLog = log.filter((record) => committedRevisions.has(record.resultRevisionId));
     const prior = committedLog.filter((record) => record.intentId === batch.intentId);
@@ -235,15 +269,40 @@ export class LocalProjectStore {
           && canonicalJson(record.input) === canonicalJson(inputs[index]));
       if (!sameRequest) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
       const revisionId = prior[0]!.resultRevisionId;
+      await ensureEvidence?.({
+        ok: true,
+        project: await this.revisionFromCurrent(current, revisionId),
+        revisionId,
+        operationLog: prior,
+      });
       return { ok: true, project: current, revisionId, operationLog: prior };
     }
 
     const result = applyOperationBatch(current, batch);
     if (!result.ok) return result;
+    await ensureEvidence?.(result);
     const root = await this.root();
     const directory = await this.projectDirectory(root, projectId, false);
 
-    await this.writeJsonAtomic(this.revisionPath(directory, result.revisionId), result.project, root);
+    const revisionPath = this.revisionPath(directory, result.revisionId);
+    const operationLogPath = join(directory, OPERATION_LOG_RELATIVE_PATH);
+    const projectPath = join(directory, "project.json");
+    const previousSnapshot = await this.readTextIfExists(revisionPath, root);
+    let existingSnapshot: unknown;
+    if (previousSnapshot !== undefined) {
+      try { existingSnapshot = JSON.parse(previousSnapshot) as unknown; }
+      catch { throw invalidStorage(); }
+    }
+    if (existingSnapshot !== undefined) {
+      const parsed = ProjectV2Schema.safeParse(existingSnapshot);
+      if (!parsed.success || parsed.data.currentRevisionId !== result.revisionId) throw invalidStorage();
+      this.assertProjectIntegrity(parsed.data);
+      const revisionHistory = (project: ProjectV2) => project.revisions.map(({ createdAt: _createdAt, ...revision }) => revision);
+      if (semanticHashV2(parsed.data) !== semanticHashV2(result.project)
+        || canonicalJson(revisionHistory(parsed.data)) !== canonicalJson(revisionHistory(result.project))) throw invalidStorage();
+    }
+    const previousLog = await this.readTextIfExists(operationLogPath, root);
+    if (previousLog === undefined) throw invalidStorage();
     const byId = new Map(committedLog.map((record) => [record.id, record]));
     for (const record of result.operationLog) {
       const existing = byId.get(record.id);
@@ -251,8 +310,20 @@ export class LocalProjectStore {
       byId.set(record.id, record);
     }
     const nextLog = [...byId.values()];
-    await this.writeTextAtomic(join(directory, OPERATION_LOG_RELATIVE_PATH), nextLog.map(canonicalJson).join("\n") + "\n", root);
-    await this.writeJsonAtomic(join(directory, "project.json"), result.project, root);
+    let wroteRevision = false;
+    try {
+      await this.writeJsonAtomic(revisionPath, result.project, root);
+      wroteRevision = true;
+      await this.writeTextAtomic(operationLogPath, nextLog.map(canonicalJson).join("\n") + "\n", root);
+      await this.writeJsonAtomic(projectPath, result.project, root);
+    } catch (error) {
+      await this.writeTextAtomic(operationLogPath, previousLog, root).catch(() => undefined);
+      if (wroteRevision) {
+        if (previousSnapshot === undefined) await this.removeCreatedFile(revisionPath, root).catch(() => undefined);
+        else await this.writeTextAtomic(revisionPath, previousSnapshot, root).catch(() => undefined);
+      }
+      throw error;
+    }
     return result;
   }
 
@@ -265,7 +336,7 @@ export class LocalProjectStore {
   private async assertOperationLog(project: ProjectV2): Promise<void> {
     const root = await this.root();
     const directory = await this.projectDirectory(root, project.projectId, false);
-    const log = await this.operationLog(project.projectId);
+    const log = await this.readOperationLog(project.projectId);
     const revisions = new Map(project.revisions.map((revision) => [revision.id, revision]));
     const snapshots = new Map<string, ProjectV2>();
     const recordsByRevision = new Map<string, OperationLogRecord[]>();

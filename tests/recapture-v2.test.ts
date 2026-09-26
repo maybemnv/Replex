@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalFlow } from "../fixtures/apps/normal/flow.js";
 import { probeVideo, type CaptureResult } from "../src/capture.js";
 import { canonicalJson } from "../src/canonical-json.js";
@@ -84,24 +84,27 @@ async function captureResult(root: string, videoPath: string): Promise<CaptureRe
   const id = "run-recapture-test";
   const runRoot = join(root, id);
   const captureRoot = join(runRoot, "captures");
-  await mkdir(captureRoot, { recursive: true });
+  const logsRoot = join(runRoot, "logs");
+  await Promise.all([mkdir(captureRoot, { recursive: true }), mkdir(logsRoot, { recursive: true })]);
   const sourcePath = join(captureRoot, `${Buffer.from("apply-filter").toString("hex")}.webm`);
   await writeFile(sourcePath, await readFile(videoPath));
   const startedAt = "2026-09-27T00:01:00.000Z";
   const endedAt = "2026-09-27T00:01:02.000Z";
   await writeFile(join(runRoot, "run.json"), JSON.stringify({ id, attempt: 1, startedAt, endedAt, status: "passed" }));
+  const actionEvents = normalFlow("https://example.test").steps
+    .filter((step) => step.sceneKey === "apply-filter")
+    .map((step, index) => ({
+      actionId: step.id, attempt: 1, atMs: (index + 1) * 100, target: step.target,
+      checkpoint: step.checkpoint, outcome: "passed" as const,
+    }));
+  await writeFile(join(logsRoot, "actions.jsonl"), actionEvents.map((event) => JSON.stringify(event)).join("\n") + "\n");
   const probe = probeVideo(ffprobePath, sourcePath);
   return {
     run: { id, attempt: 1, startedAt, endedAt, status: "passed" },
     runPath: join(runRoot, "run.json"),
     rawVideoPath: join(runRoot, "raw-video", "recording.webm"),
     logs: { actionsPath: join(runRoot, "logs", "actions.jsonl"), consolePath: join(runRoot, "logs", "console.jsonl") },
-    actionEvents: normalFlow("https://example.test").steps
-      .filter((step) => step.sceneKey === "apply-filter")
-      .map((step, index) => ({
-        actionId: step.id, attempt: 1, atMs: (index + 1) * 100, target: step.target,
-        checkpoint: step.checkpoint, outcome: "passed" as const,
-      })),
+    actionEvents,
     captures: [{
       sceneKey: "apply-filter", sourcePath, sha256: sha(await readFile(sourcePath)),
       width: probe.width, height: probe.height, durationMs: Math.round(probe.durationSeconds * 1000), runId: id,
@@ -119,7 +122,17 @@ describe("V2 selective browser recapture", () => {
     const newVideoPath = join(root, "new.webm");
     makeVideo(oldVideoPath, "red");
     makeVideo(newVideoPath, "green");
-    const { store, project, oldBytes } = await seedProject(root, oldVideoPath);
+    const seeded = await seedProject(root, oldVideoPath);
+    const priorEdit = await seeded.store.applyBatch(seeded.project.projectId, {
+      baseRevisionId: seeded.project.currentRevisionId,
+      actor: "user",
+      intentId: "prior-browser-audio-edit",
+      evidenceRefs: [],
+      operations: [{ type: "set_volume", clipId: "clip-browser-scene", audioGainDb: -3 }],
+    });
+    if (!priorEdit.ok) throw new Error("could not seed prior revision history");
+    const { store, oldBytes } = seeded;
+    const project = priorEdit.project;
     const capture = await captureResult(join(root, "runs"), newVideoPath);
     const result = await recaptureBrowserSceneV2(store, {
       projectId: project.projectId,
@@ -130,9 +143,9 @@ describe("V2 selective browser recapture", () => {
       changedActionIds: ["apply-filter"],
       reason: "Updated the filter result",
       intentId: "replace-apply-filter-run",
-    }, { ffmpegPath, ffprobePath });
+    }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] });
 
-    expect(result.project.revisions).toHaveLength(2);
+    expect(result.project.revisions).toHaveLength(3);
     expect(result.operationLog).toHaveLength(1);
     expect(result.operationLog[0]).toMatchObject({
       baseRevisionId: project.currentRevisionId,
@@ -146,11 +159,15 @@ describe("V2 selective browser recapture", () => {
     expect(result.project.browser?.recaptureLineage).toHaveLength(1);
     expect(result.project.browser?.recaptureLineage[0]).toMatchObject({
       previousAssetId: "asset-browser-old", replacementAssetId: result.replacementAsset.id,
-      changedActionIds: ["apply-filter"], revisionId: result.revisionId,
+      changedActionIds: ["apply-filter"], reason: "Updated the filter result", revisionId: result.revisionId,
     });
+    expect(result.operationLog[0]?.input).toMatchObject({ reason: "Updated the filter result" });
+    expect(result.project.composition.clips[0]?.audioGainDb).toBe(-3);
     expect(result.report.changedActionIds).toEqual({ source: "host_asserted", ids: ["apply-filter"] });
-    expect(result.report.checks).toHaveLength(6);
+    expect(result.report.checks).toHaveLength(7);
     expect(result.report.checks.every((check) => check.passed)).toBe(true);
+    expect(result.report.checks.map(({ name }) => name)).toContain("revision-history-preserved");
+    expect(result.project.revisions.slice(0, -1)).toEqual(project.revisions);
     expect(canonicalJson(await store.current(project.projectId))).toBe(canonicalJson(result.project));
 
     const projectRoot = projectDirectory(root, project.projectId);
@@ -185,30 +202,151 @@ describe("V2 selective browser recapture", () => {
       reason: "Updated the filter result",
       intentId: "reject-apply-filter-run",
     };
-    await expect(recaptureBrowserSceneV2(store, { ...request, baseRevisionId: "revision-stale" }, { ffmpegPath, ffprobePath }))
+    await expect(recaptureBrowserSceneV2(store, { ...request, baseRevisionId: "revision-stale" }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] }))
       .rejects.toMatchObject({ code: "STALE_REVISION" });
 
     const forgedPath = structuredClone(capture);
     forgedPath.captures[0]!.sourcePath = join(root, "outside.webm");
     await writeFile(forgedPath.captures[0]!.sourcePath, await readFile(newVideoPath));
-    await expect(recaptureBrowserSceneV2(store, { ...request, capture: forgedPath }, { ffmpegPath, ffprobePath }))
+    await expect(recaptureBrowserSceneV2(store, { ...request, capture: forgedPath }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] }))
       .rejects.toMatchObject({ code: "SOURCE_NOT_AUTHORIZED" });
 
     const wrongHash = structuredClone(capture);
     wrongHash.captures[0]!.sha256 = "0".repeat(64);
-    await expect(recaptureBrowserSceneV2(store, { ...request, capture: wrongHash }, { ffmpegPath, ffprobePath }))
+    await expect(recaptureBrowserSceneV2(store, { ...request, capture: wrongHash }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] }))
       .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
 
     const failedCheckpoint = structuredClone(capture);
     failedCheckpoint.actionEvents[1]!.outcome = "failed";
-    await expect(recaptureBrowserSceneV2(store, { ...request, capture: failedCheckpoint }, { ffmpegPath, ffprobePath }))
+    await expect(recaptureBrowserSceneV2(store, { ...request, capture: failedCheckpoint }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] }))
       .rejects.toMatchObject({ code: "CAPTURE_FAILED" });
+
+    const fakeRoot = join(root, "outside", capture.run.id);
+    const fakeCapturePath = join(fakeRoot, "captures", `${Buffer.from("apply-filter").toString("hex")}.webm`);
+    await Promise.all([mkdir(join(fakeRoot, "logs"), { recursive: true }), mkdir(join(fakeRoot, "captures"), { recursive: true })]);
+    await writeFile(fakeCapturePath, await readFile(newVideoPath));
+    await writeFile(join(fakeRoot, "run.json"), JSON.stringify(capture.run));
+    await writeFile(join(fakeRoot, "logs", "actions.jsonl"), capture.actionEvents.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const fakeRun = structuredClone(capture);
+    fakeRun.runPath = join(fakeRoot, "run.json");
+    fakeRun.logs.actionsPath = join(fakeRoot, "logs", "actions.jsonl");
+    fakeRun.captures[0]!.sourcePath = fakeCapturePath;
+    await expect(recaptureBrowserSceneV2(store, { ...request, capture: fakeRun }, {
+      ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")],
+    })).rejects.toMatchObject({ code: "SOURCE_NOT_AUTHORIZED" });
 
     expect(await store.current(project.projectId)).toEqual(project);
     const projectRoot = projectDirectory(root, project.projectId);
     expect(await readFile(join(projectRoot, project.assets["asset-browser-old"]!.path!))).toEqual(await readFile(oldVideoPath));
     expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);
     expect(await readdir(join(projectRoot, ".replex-staging"))).toEqual([]);
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("leaves no canonical edit or new media when preservation evidence cannot be written", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-recapture-evidence-failure-"));
+    roots.push(root);
+    const oldVideoPath = join(root, "old.webm");
+    const newVideoPath = join(root, "new.webm");
+    makeVideo(oldVideoPath, "red");
+    makeVideo(newVideoPath, "green");
+    const { store, project } = await seedProject(root, oldVideoPath);
+    const capture = await captureResult(join(root, "runs"), newVideoPath);
+    const projectRoot = projectDirectory(root, project.projectId);
+    await writeFile(join(projectRoot, "evidence", "recapture"), "blocks evidence directory creation");
+
+    await expect(recaptureBrowserSceneV2(store, {
+      projectId: project.projectId,
+      baseRevisionId: project.currentRevisionId,
+      previousAssetId: "asset-browser-old",
+      capture,
+      sceneKey: "apply-filter",
+      changedActionIds: ["apply-filter"],
+      reason: "Updated the filter result",
+      intentId: "evidence-failure-run",
+    }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] })).rejects.toMatchObject({ code: "EVIDENCE_FAILED" });
+
+    expect(await store.current(project.projectId)).toEqual(project);
+    expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);
+    expect(await readdir(join(projectRoot, ".replex-staging"))).toEqual([]);
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("rolls back evidence, revision, operation log, and imported bytes when project publication fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-recapture-publish-failure-"));
+    roots.push(root);
+    const oldVideoPath = join(root, "old.webm");
+    const newVideoPath = join(root, "new.webm");
+    makeVideo(oldVideoPath, "red");
+    makeVideo(newVideoPath, "green");
+    const { store, project } = await seedProject(root, oldVideoPath);
+    const capture = await captureResult(join(root, "runs"), newVideoPath);
+    const projectRoot = projectDirectory(root, project.projectId);
+    const revisionRoot = join(projectRoot, "revisions");
+    const writeJsonAtomic = (store as unknown as {
+      writeJsonAtomic(path: string, value: unknown, storageRoot: string): Promise<void>;
+    }).writeJsonAtomic.bind(store);
+    const writeProjectFailure = vi.spyOn(store as unknown as {
+      writeJsonAtomic(path: string, value: unknown, storageRoot: string): Promise<void>;
+    }, "writeJsonAtomic").mockImplementation(async (path, value, storageRoot) => {
+      if (path === join(projectRoot, "project.json")) throw new Error("simulated final project pointer failure");
+      await writeJsonAtomic(path, value, storageRoot);
+    });
+
+    try {
+      await expect(recaptureBrowserSceneV2(store, {
+        projectId: project.projectId,
+        baseRevisionId: project.currentRevisionId,
+        previousAssetId: "asset-browser-old",
+        capture,
+        sceneKey: "apply-filter",
+        changedActionIds: ["apply-filter"],
+        reason: "Updated the filter result",
+        intentId: "publish-failure-run",
+      }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] })).rejects.toMatchObject({ code: "EVIDENCE_FAILED" });
+    } finally {
+      writeProjectFailure.mockRestore();
+    }
+
+    expect(await store.current(project.projectId)).toEqual(project);
+    expect(await store.operationLog(project.projectId)).toEqual([]);
+    expect(await readdir(revisionRoot)).toHaveLength(1);
+    expect(await readdir(join(projectRoot, "evidence", "recapture"))).toEqual([]);
+    expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);
+    expect(await readdir(join(projectRoot, ".replex-staging"))).toEqual([]);
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("returns the committed preservation result for a concurrent idempotent retry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-recapture-concurrent-retry-"));
+    roots.push(root);
+    const oldVideoPath = join(root, "old.webm");
+    const newVideoPath = join(root, "new.webm");
+    makeVideo(oldVideoPath, "red");
+    makeVideo(newVideoPath, "green");
+    const { store, project } = await seedProject(root, oldVideoPath);
+    const capture = await captureResult(join(root, "runs"), newVideoPath);
+    const request = {
+      projectId: project.projectId,
+      baseRevisionId: project.currentRevisionId,
+      previousAssetId: "asset-browser-old",
+      capture,
+      sceneKey: "apply-filter",
+      changedActionIds: ["apply-filter"],
+      reason: "Updated the filter result",
+      intentId: "concurrent-recapture-run",
+    };
+    const options = { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] };
+    const [first, retry] = await Promise.all([
+      recaptureBrowserSceneV2(store, request, options),
+      recaptureBrowserSceneV2(store, request, options),
+    ]);
+
+    expect(first.revisionId).toBe(retry.revisionId);
+    expect(retry.project.revisions).toHaveLength(2);
+    expect(retry.report).toEqual(first.report);
+    const replay = await recaptureBrowserSceneV2(store, request, options);
+    expect(replay.revisionId).toBe(first.revisionId);
+    expect(replay.report).toEqual(first.report);
+    expect(replay.project.revisions).toHaveLength(2);
+    expect(await store.operationLog(project.projectId)).toHaveLength(1);
   }, 60_000);
 
   it.skipIf(!mediaAvailable)("rolls back promoted bytes when replacement media is incompatible with retained clips", async () => {
@@ -233,7 +371,7 @@ describe("V2 selective browser recapture", () => {
         changedActionIds: ["apply-filter"],
         reason: `Rejected ${caseId} incompatibility`,
         intentId: `reject-${caseId}-run`,
-      }, { ffmpegPath, ffprobePath })).rejects.toMatchObject({ code: "INVALID_OPERATION" });
+      }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "runs")] })).rejects.toMatchObject({ code: "INVALID_OPERATION" });
       expect(await store.current(project.projectId)).toEqual(project);
       const projectRoot = projectDirectory(root, project.projectId);
       expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);

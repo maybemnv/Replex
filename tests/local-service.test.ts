@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyOperationBatch } from "../src/operations-v2.js";
 import { MediaAssetSchema, type ProjectV2 } from "../src/schema-v2.js";
 import { authorizeLocalImport, type LocalAssetFacts } from "../src/import-v2.js";
-import { LocalProjectStore } from "../src/service/project-store.js";
+import { LocalProjectStore, LocalProjectStoreError } from "../src/service/project-store.js";
 import { LocalProjectService } from "../src/service/local.js";
 import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 
@@ -306,6 +306,56 @@ describe("LocalProjectService", () => {
       projectId: created.projectId, revisionId: retried.revisionId,
     });
     expect(current.composition.layers).toHaveLength(1);
+    expect(JSON.parse(await readFile(projectPath(workspaceRoot!, created.projectId), "utf8"))).toEqual(
+      JSON.parse(await readFile(revisionSnapshotPath(workspaceRoot!, created.projectId, retried.revisionId), "utf8")),
+    );
+  });
+
+  it("restores an orphan snapshot and log when publishing its recovered project fails", async () => {
+    const service = await createService();
+    const created = await createProject(service, "create-orphan-rollback", "Orphan rollback");
+    const request = titleRequest(created.projectId, created.revisionId, "retry-orphan-rollback");
+    const canonical = JSON.parse(await readFile(projectPath(workspaceRoot!, created.projectId), "utf8")) as ProjectV2;
+    const predicted = applyOperationBatch(canonical, {
+      baseRevisionId: request.baseRevisionId,
+      actor: "user",
+      intentId: "intent-" + createHash("sha256").update(request.idempotencyKey).digest("hex").slice(0, 32),
+      evidenceRefs: [],
+      operations: request.operations,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(predicted.ok).toBe(true);
+    if (!predicted.ok) return;
+
+    const projectRoot = projectDirectory(workspaceRoot!, created.projectId);
+    const snapshotPath = revisionSnapshotPath(workspaceRoot!, created.projectId, predicted.revisionId);
+    const logPath = operationLogPath(workspaceRoot!, created.projectId);
+    await writeFile(snapshotPath, JSON.stringify(predicted.project));
+    await writeFile(logPath, predicted.operationLog.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const orphanSnapshot = await readFile(snapshotPath, "utf8");
+    const orphanLog = await readFile(logPath, "utf8");
+    const store = (service as unknown as { store: LocalProjectStore }).store;
+    const internals = store as unknown as {
+      writeJsonAtomic(path: string, value: unknown, storageRoot: string): Promise<void>;
+    };
+    const writeJsonAtomic = internals.writeJsonAtomic.bind(store);
+    const failProjectPublish = vi.spyOn(internals, "writeJsonAtomic").mockImplementation(async (path, value, storageRoot) => {
+      if (path === projectPath(workspaceRoot!, created.projectId)) {
+        throw new LocalProjectStoreError("STORAGE_FAILED", "simulated recovered project pointer failure");
+      }
+      await writeJsonAtomic(path, value, storageRoot);
+    });
+
+    try {
+      await expect(service.applyOperations(request)).rejects.toMatchObject({ code: "STORAGE_FAILED" });
+    } finally {
+      failProjectPublish.mockRestore();
+    }
+
+    expect(await readFile(snapshotPath, "utf8")).toBe(orphanSnapshot);
+    expect(await readFile(logPath, "utf8")).toBe(orphanLog);
+    expect(JSON.parse(await readFile(projectPath(workspaceRoot!, created.projectId), "utf8"))).toEqual(canonical);
+    expect(await store.operationLog(created.projectId)).toEqual([]);
   });
 
   it("fails closed when a committed operation is missing from the operation log", async () => {

@@ -228,7 +228,7 @@ describe("V2 local selective recapture integration", () => {
       changedActionIds: ["apply-filter"],
       reason: "The selected filter result changed",
       intentId: `replace-${secondCapture.run.id}-apply-filter`,
-    }, { ffmpegPath, ffprobePath });
+    }, { ffmpegPath, ffprobePath, captureRoots: [join(root, "captures")] });
 
     expect(result.project.revisions).toHaveLength(2);
     expect(result.operationLog).toHaveLength(1);
