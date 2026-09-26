@@ -1,12 +1,12 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** PR-A through PR-D, including the native evidence decision and bounded mixed-media composition, are merged to `main` at `2dc4035`; corrective PR #16 closes the retrospective Gate A event-identity finding at `517b4f4` without changing service-contract v1 shapes. Frozen V2-104 types and mock fixtures remain unchanged. PR-C adds a bounded V2 agent library and injected-client OpenAI Responses adapter; deterministic Gate C passed, but no live model call was made and the agent is not wired into a frontend transport or runtime service. PR-D's bounded local composition preview passed technical validation. PR #15 remains an open draft for one bounded `camera-push.v1` preset, with a verified local motion-to-composition preview and same-thread follow-up. Gate D remains open pending human review of representative software-product footage; Phase 7 local runtime and later gated work have not started. No live-provider quality or production readiness is claimed. See the [motion spike report](motion-spike-report.md).
+**Status:** PR-A through PR-D, including the native evidence decision and bounded mixed-media composition, are merged to `main` at `2dc4035`; corrective PR #16 closed the retrospective Gate A event-identity finding at `517b4f4`. V2-701 is merged to `main` at `9cfe6cf` with bounded loopback transport, project create/open, and asynchronous semantic-operation jobs. PR #15 is open and ready for review with one bounded `camera-push.v1` implementation candidate, a verified local motion-to-composition preview, and same-thread follow-up. Gate D remains open: synthetic internal reviews are pipeline-only (0/3 independent human reviews; correction times unmeasured), and representative human quality review is still required. Media import, evidence, conversational agent, browser capture/recapture, preview/render service jobs, and a complete local workflow remain outstanding. No live-provider quality, formal POC result, or production readiness is claimed. See the [motion spike report](motion-spike-report.md).
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
 **Contract/discovery decision:** [`../architecture/ADR-007-service-contract-v1.md`](../architecture/ADR-007-service-contract-v1.md)
 
-**Contract timing:** Gurbaaz can mock against the frozen V2-104 wire v1 types and fixtures. HTTP/SSE/WebSocket, job scheduling, executors, and runtime capability reporting remain later work (Phase 7).
+**Contract timing:** Gurbaaz can mock against the V2-104 wire v1 types and fixtures. The bounded V2-701 HTTP/JSON executor is now on `main`; it still does not provide media import, evidence, agent, browser capture, preview, render, or recapture jobs.
 
 ## Product experience
 
@@ -82,7 +82,15 @@ Create requests carry contract version and idempotency metadata before a project
 
 Contract v1 has no `list_projects`/`attach_project` command and introduces no database. The local host shell lists only authorized project roots, validates the selected project manifest, and supplies its `projectId` and current `revisionId` to `open_project`; `create_project` returns the new ID. The service contract receives IDs, not host paths or local tokens. A mocked project list is host-shell fixture data, not a service endpoint.
 
-HTTP endpoints, event delivery/reconnect behavior, executors, and process supervision remain later implementation work (Phase 7).
+Project discovery remains host-owned. The current local service adds no project-list endpoint, database, filesystem path, or local token field to the project contract.
+
+## Local executor slice (V2-701)
+
+The merged V2-701 slice exposes a loopback-only HTTP/JSON service. `npm run service:v2 -- --workspace <path> [--allow-origin <local-origin>]` starts the daemon and prints its URL plus a per-start bearer token to the host CLI. The supported command path is `npm run service:v2:command -- --workspace <path> --command <create_project|open_project|apply_operations|cancel_job> --input <json-file>`. Both bind the same fixed port derived from the canonical workspace; run one at a time for a workspace. The command CLI and HTTP routes use the same typed dispatcher.
+
+The HTTP routes are `GET /v1/capabilities`, `POST /v1/projects/create`, `POST /v1/projects/open`, `POST /v1/jobs/apply-operations`, `GET /v1/jobs/:id`, `POST /v1/jobs/cancel`, and `GET /v1/projects/:id/events`. Event responses use the frozen `JobEventPageSchema`: clients advance from the last event sequence, fetch additional pages when `hasMore` is true, and reopen a current snapshot if `cursorExpired` is true. The public error wrapper is `ServiceErrorResponseSchema`.
+
+The live capability set advertises only project create/open, operation application, and cancellation; `apply_operations` is the only implemented job kind. Cancellation is supported while an edit is queued; a running edit reports itself as non-cancellable. There is no import/evidence/agent/capture/verify/render service path yet. Store/runtime modules are internal to the local service; the fixed loopback listener is the single-owner workspace boundary, not a general multi-process lock.
 
 ## Agent progress UX
 
@@ -170,9 +178,12 @@ Use the finalized contract types now; wait for a live backend before:
 - implementing preview asset URL lifetime/caching rules;
 - promising browser capture steps or editable provenance fields.
 
-Also defer real asynchronous transport, process supervision, local executor
-restart/recovery, cloud targets, real upload tokens, and backend-specific
-motion controls until those services advertise the corresponding capabilities.
+The merged V2-701 slice implements bounded loopback async transport and
+persisted project/job recovery for semantic-operation jobs. Frontend integration
+must still follow the live capability set rather than assuming unavailable media,
+agent, capture, preview, render, or recapture jobs. Broader process supervision,
+cloud targets, real upload tokens, and backend-specific motion controls remain
+deferred until their services advertise the corresponding capabilities.
 
 ### Do not assume yet
 

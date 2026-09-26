@@ -11,6 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cli": "tsx src/cli.ts",
+    "service:v2": "tsx src/service/cli.ts",
+    "service:v2:command": "tsx src/service/command-cli.ts",
     "fixtures": "tsx fixtures/operator.ts"
   },
   "dependencies": {

@@ -544,6 +544,11 @@ export const ErrorSchema = z.object({
   requiredCapability: text.max(128).regex(/^[a-z][a-z0-9_]*$/).optional(),
 }).strict();
 
+export const ServiceErrorResponseSchema = z.object({
+  contractVersion: ContractVersionSchema,
+  error: ErrorSchema,
+}).strict();
+
 export const JobInputOptionSchema = z.object({
   id: IdSchema,
   label: safePublicText(120),
@@ -788,6 +793,27 @@ export const CancelJobResponseSchema = z.discriminatedUnion("disposition", [
   z.object({ disposition: z.literal("already_terminal"), job: terminalJobState }).strict(),
 ]);
 
+export const JobEventPageSchema = z.object({
+  contractVersion: ContractVersionSchema,
+  projectId: IdSchema,
+  afterSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  latestSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  cursorExpired: z.boolean(),
+  hasMore: z.boolean(),
+  events: z.array(JobEventSchema).max(1000),
+}).strict().superRefine((page, context) => {
+  if (page.afterSequence > page.latestSequence) {
+    context.addIssue({ code: "custom", path: ["afterSequence"], message: "event cursor cannot be ahead of the latest sequence" });
+  }
+  let previous = page.afterSequence;
+  for (const [index, event] of page.events.entries()) {
+    if (event.projectId !== page.projectId || event.sequence <= previous || event.sequence > page.latestSequence) {
+      context.addIssue({ code: "custom", path: ["events", index], message: "event page must contain ordered events for its project and cursor" });
+    }
+    previous = event.sequence;
+  }
+});
+
 export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
 export type AssetView = z.infer<typeof AssetViewSchema>;
 export type ClipView = z.infer<typeof ClipViewSchema>;
@@ -815,6 +841,7 @@ export type RenderFinalRequest = z.infer<typeof RenderFinalRequestSchema>;
 export type CancelJobRequest = z.infer<typeof CancelJobRequestSchema>;
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type ContractError = z.infer<typeof ErrorSchema>;
+export type ServiceErrorResponse = z.infer<typeof ServiceErrorResponseSchema>;
 export type JobInputOption = z.infer<typeof JobInputOptionSchema>;
 export type CredentialAction = z.infer<typeof CredentialActionSchema>;
 export type JobInputRequest = z.infer<typeof JobInputRequestSchema>;
@@ -827,6 +854,7 @@ export type Job = z.infer<typeof JobSchema>;
 export type JobState = z.infer<typeof JobStateSchema>;
 export type JobInputSubmissionResult = z.infer<typeof JobInputSubmissionResultSchema>;
 export type JobEvent = z.infer<typeof JobEventSchema>;
+export type JobEventPage = z.infer<typeof JobEventPageSchema>;
 export type ProjectEvent = JobEvent;
 export type CancelJobResponse = z.infer<typeof CancelJobResponseSchema>;
 export type SemanticOperation = z.infer<typeof SemanticOperationV1Schema>;
