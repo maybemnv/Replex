@@ -9,6 +9,7 @@ import {
   type ContractError,
   type ServiceCommand,
 } from "../service-contract/index.js";
+import { LocalImportAuthorizationRequestV1Schema, LocalImportAuthorizationResponseV1Schema } from "../service-contract/local-host-v1.js";
 import { IdSchema } from "../schema.js";
 import { LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 import { LocalExecutor } from "./executor.js";
@@ -18,15 +19,6 @@ import { LocalProjectStoreError } from "./project-store.js";
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const JobLookupSchema = z.object({ jobId: IdSchema }).strict();
-const LocalImportAuthorizationRequestSchema = z.object({
-  sourcePath: z.string().min(1).max(4096),
-  importMethod: z.enum(["file_picker", "path"]).optional(),
-}).strict();
-const LocalImportAuthorizationResponseSchema = z.object({
-  token: IdSchema,
-  filename: z.string().min(1).max(255),
-  sizeBytes: z.number().int().positive().max(268_435_456),
-}).strict();
 
 export class LocalExecutorServer {
   private readonly executor: LocalExecutor;
@@ -206,9 +198,9 @@ export class LocalExecutorServer {
 
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "POST" && url.pathname === "/v1/local/imports/authorize") {
-      const body = LocalImportAuthorizationRequestSchema.parse(await readJson(request));
+      const body = LocalImportAuthorizationRequestV1Schema.parse(await readJson(request));
       const selected = await this.authorizeLocalImport(body.sourcePath, body.importMethod);
-      sendJson(response, 201, LocalImportAuthorizationResponseSchema.parse(selected));
+      sendJson(response, 201, LocalImportAuthorizationResponseV1Schema.parse({ hostContractVersion: "v1", ...selected }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/capabilities") {

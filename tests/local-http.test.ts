@@ -134,14 +134,17 @@ describe("LocalExecutorServer", () => {
     });
     const projectResponse = await call("/projects/create", { contractVersion: "v1", idempotencyKey: "create-http-import", name: "HTTP import" });
     const project = await projectResponse.json() as { projectId: string; revisionId: string };
-    const outside = await call("/local/imports/authorize", { sourcePath: outsidePath });
+    const outside = await call("/local/imports/authorize", { hostContractVersion: "v1", sourcePath: outsidePath });
     expect(outside.status).toBe(403);
     expect(JSON.stringify(await outside.json())).not.toContain(outsidePath);
+    const callerRoots = await call("/local/imports/authorize", { hostContractVersion: "v1", sourcePath: outsidePath, approvedRoots: [outsideRoot] });
+    expect(callerRoots.status).toBe(400);
+    expect(JSON.stringify(await callerRoots.json())).not.toContain(outsidePath);
 
-    const authorized = await call("/local/imports/authorize", { sourcePath });
+    const authorized = await call("/local/imports/authorize", { hostContractVersion: "v1", sourcePath });
     expect(authorized.status).toBe(201);
-    const selection = await authorized.json() as { token: string; filename: string; sizeBytes: number };
-    expect(selection).toMatchObject({ filename: "selected.mp4", sizeBytes: expect.any(Number) });
+    const selection = await authorized.json() as { hostContractVersion: string; token: string; filename: string; sizeBytes: number };
+    expect(selection).toMatchObject({ hostContractVersion: "v1", filename: "selected.mp4", sizeBytes: expect.any(Number) });
     expect(JSON.stringify(selection)).not.toContain(sourcePath);
 
     const submittedResponse = await call("/jobs/import-asset", {
