@@ -175,7 +175,8 @@ export class LocalProjectStore {
           facts = candidate;
           return request.buildAsset(candidate, current);
         }, async (asset) => {
-          if (!facts || asset.path !== facts.path || asset.sha256 !== facts.sha256 || asset.type !== facts.type
+          const typeMatches = facts && (asset.type === facts.type || (facts.type === "uploaded_video" && asset.type === "browser_capture"));
+          if (!facts || asset.path !== facts.path || asset.sha256 !== facts.sha256 || !typeMatches
             || canonicalJson(asset.probe) !== canonicalJson(facts.probe)) throw invalidStorage();
           const batch = request.buildBatch(asset, current);
           if (batch.baseRevisionId !== request.baseRevisionId || batch.intentId !== request.intentId) {

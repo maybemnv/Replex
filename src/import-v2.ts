@@ -260,7 +260,8 @@ export async function withLocalAssetV2<T>(
           importMethod: entry.importMethod,
           importedAt: new Date().toISOString(),
         }));
-        if (asset.path !== assetRelativePath || asset.sha256 !== staged.sha256 || asset.type !== media.type) {
+        const typeMatches = asset.type === media.type || (media.type === "uploaded_video" && asset.type === "browser_capture");
+        if (asset.path !== assetRelativePath || asset.sha256 !== staged.sha256 || !typeMatches) {
           fail("STORAGE_FAILED", "asset metadata does not match validated media bytes");
         }
         publishing = true;
