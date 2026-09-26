@@ -7,6 +7,7 @@ import { canonicalJson } from "../canonical-json.js";
 import { IdSchema } from "../schema.js";
 import {
   ApplyOperationsRequestSchema,
+  ImportAssetRequestSchema,
   CancelJobRequestSchema,
   CancelJobResponseSchema,
   ErrorSchema,
@@ -14,6 +15,7 @@ import {
   JobEventPageSchema,
   JobViewSchema,
   type ApplyOperationsRequest,
+  type ImportAssetRequest,
   type CancelJobRequest,
   type CancelJobResponse,
   type ContractError,
@@ -24,13 +26,14 @@ import {
 } from "../service-contract/index.js";
 import { LocalProjectService } from "./local.js";
 import { LocalProjectStoreError } from "./project-store.js";
+import { closeAuthorizedLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
 
 const MAX_JOB_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JOB_EVENTS = 20_000;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  request: ApplyOperationsRequestSchema,
+  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema]),
   job: JobViewSchema,
 }).strict();
 const CancelKeySchema = z.object({
@@ -47,6 +50,7 @@ const JobStateSchema = z.object({
 }).strict();
 type JobState = z.infer<typeof JobStateSchema>;
 type JobRecord = z.infer<typeof JobRecordSchema>;
+type JobRequest = ApplyOperationsRequest | ImportAssetRequest;
 
 export class LocalExecutorError extends Error {
   constructor(readonly code: "VALIDATION_FAILED" | "STORAGE_FAILED" | "IDEMPOTENCY_CONFLICT" | "JOB_NOT_FOUND" | "JOB_NOT_CANCELLABLE" | "EXECUTOR_OFFLINE" | "EXECUTION_FAILED", message: string) {
@@ -80,6 +84,8 @@ export class LocalJobRuntime {
   private readonly scheduled = new Map<string, NodeJS.Timeout>();
   private readonly tasks = new Set<Promise<void>>();
   private readonly emitter = new EventEmitter();
+  private readonly imports = new Map<string, AuthorizedLocalImport>();
+  private readonly abortControllers = new Map<string, AbortController>();
 
   constructor(private readonly workspaceRoot: string, private readonly projects: LocalProjectService) {}
 
@@ -117,7 +123,23 @@ export class LocalJobRuntime {
     this.started = false;
     for (const timer of this.scheduled.values()) clearTimeout(timer);
     this.scheduled.clear();
+    for (const controller of this.abortControllers.values()) controller.abort();
+    for (const source of this.imports.values()) await closeAuthorizedLocalImport(source);
+    this.imports.clear();
     await Promise.allSettled([...this.tasks]);
+  }
+
+  registerAuthorizedImport(source: AuthorizedLocalImport): void {
+    this.imports.set(source.token, source);
+  }
+
+  async submitImportAsset(requestInput: ImportAssetRequest): Promise<JobView> {
+    let request: ImportAssetRequest;
+    try { request = ImportAssetRequestSchema.parse(requestInput); }
+    catch { throw new LocalExecutorError("VALIDATION_FAILED", "The import-asset request is invalid."); }
+    if (request.source.kind !== "local_token") throw new LocalExecutorError("VALIDATION_FAILED", "Only local import tokens are supported.");
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(request, "asset_import");
   }
 
   async submitApplyOperations(requestInput: ApplyOperationsRequest): Promise<JobView> {
@@ -126,6 +148,10 @@ export class LocalJobRuntime {
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "The apply-operations request is invalid."); }
     if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
 
+    return this.submitJob(request, "apply_operations");
+  }
+
+  private async submitJob(request: JobRequest, kind: "asset_import" | "apply_operations"): Promise<JobView> {
     const result = await this.exclusive(async (state) => {
       const fingerprint = digest(canonicalJson(request));
       const jobId = "job-" + digest(request.projectId + "|" + request.idempotencyKey).slice(0, 24);
@@ -134,12 +160,15 @@ export class LocalJobRuntime {
         if (existing.fingerprint !== fingerprint) throw new LocalExecutorError("IDEMPOTENCY_CONFLICT", "The idempotency key was used for a different request.");
         return { job: existing.job, event: undefined, schedule: false };
       }
+      if (kind === "asset_import" && (!(("source" in request) && this.imports.has(request.source.ref)))) {
+        throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
+      }
 
       const createdAt = now();
       const job = JobViewSchema.parse({
         id: jobId,
         projectId: request.projectId,
-        kind: "apply_operations",
+        kind,
         baseRevisionId: request.baseRevisionId,
         state: "queued",
         stage: "queued",
@@ -231,6 +260,14 @@ export class LocalJobRuntime {
       return { response: CancelJobResponseSchema.parse({ disposition: "requested", job: record.job }), event };
     });
     if (result.event) this.publish(result.event);
+    this.abortControllers.get(request.jobId)?.abort();
+    if (result.response.disposition === "requested") {
+      const record = await this.exclusive((state) => state.jobs[request.jobId]);
+      if (record && "source" in record.request && record.request.source.kind === "local_token") {
+        const source = this.imports.get(record.request.source.ref);
+        if (source && record.job.state === "cancelling") await closeAuthorizedLocalImport(source);
+      }
+    }
     if (result.response.disposition === "requested") this.schedule(request.jobId);
     return result.response;
   }
@@ -298,7 +335,7 @@ export class LocalJobRuntime {
         record.job = JobViewSchema.parse({
           ...record.job,
           state: "running",
-          stage: "applying_revision",
+          stage: record.job.kind === "asset_import" ? "importing" : "applying_revision",
           progress: { completed: 0, total: 1, percent: 0, unit: "batch" },
           cancellable: false,
           cancellationRequested: false,
@@ -311,24 +348,32 @@ export class LocalJobRuntime {
       if (start.event) this.publish(start.event);
       if (start.cancelled || !start.request) return;
 
-      const result = await this.projects.applyOperations(start.request);
+      const controller = new AbortController();
+      this.abortControllers.set(jobId, controller);
+      const result = "source" in start.request
+        ? await this.projects.importAsset(start.request, this.imports.get(start.request.source.ref)!, controller.signal)
+        : await this.projects.applyOperations(start.request);
       if (!result.ok) {
         await this.finishFailure(jobId, failureFor(result.code));
         return;
       }
       applied = true;
-      await this.finishSuccess(jobId, result.revisionId, result.revision);
+      await this.finishSuccess(jobId, result.revisionId, result.revision, "assetId" in result && typeof result.assetId === "string" ? result.assetId : undefined);
     } catch (error) {
       if (!applied) {
-        try { await this.finishFailure(jobId, failureForError(error)); }
+        try {
+          if (error instanceof Error && "code" in error && (error.code === "IMPORT_CANCELLED" || error.code === "IMPORT_TIMEOUT")) await this.finishCancelled(jobId);
+          else await this.finishFailure(jobId, failureForError(error));
+        }
         catch { /* Keep it nonterminal; recovery can retry the durable request. */ }
       }
     } finally {
+      this.abortControllers.delete(jobId);
       this.running.delete(jobId);
     }
   }
 
-  private async finishSuccess(jobId: string, revisionId: string, revision: RevisionView): Promise<void> {
+  private async finishSuccess(jobId: string, revisionId: string, revision: RevisionView, assetId?: string): Promise<void> {
     const events = await this.exclusive(async (state) => {
       const record = state.jobs[jobId];
       if (!record || record.job.state !== "running") return [];
@@ -348,7 +393,7 @@ export class LocalJobRuntime {
         cancellable: false,
         cancellationRequested: false,
         updatedAt: completedAt,
-        result: { revisionId },
+        result: { revisionId, ...(assetId ? { assetId } : {}) },
       });
       this.appendEvent(state, revisionEvent);
       const jobEvent = this.appendJobEvent(state, record.job);
@@ -371,6 +416,26 @@ export class LocalJobRuntime {
         cancellationRequested: false,
         updatedAt: now(),
         error: ErrorSchema.parse(errorInput),
+      });
+      const update = this.appendJobEvent(state, record.job);
+      await this.save(state);
+      return update;
+    });
+    if (event) this.publish(event);
+  }
+
+  private async finishCancelled(jobId: string): Promise<void> {
+    const event = await this.exclusive(async (state) => {
+      const record = state.jobs[jobId];
+      if (!record || terminal(record.job)) return undefined;
+      record.job = JobViewSchema.parse({
+        ...record.job,
+        state: "cancelled",
+        stage: "finalizing",
+        progress: { completed: 0, total: 1, percent: 0, unit: "batch" },
+        cancellable: false,
+        cancellationRequested: false,
+        updatedAt: now(),
       });
       const update = this.appendJobEvent(state, record.job);
       await this.save(state);
@@ -493,6 +558,13 @@ function failureFor(code: "STALE_REVISION" | "INVALID_OPERATION" | "UNSUPPORTED_
 }
 
 function failureForError(error: unknown): ContractError {
+  if (error instanceof Error && "code" in error && typeof error.code === "string") {
+    const code = error.code;
+    if (code === "SOURCE_NOT_AUTHORIZED") return { code: "UNAUTHORIZED", message: "The local import token is not authorized.", retryable: false };
+    if (code === "SOURCE_CHANGED") return { code: "ASSET_CHANGED", message: "The selected media changed before import completed.", retryable: false };
+    if (code === "IMPORT_CANCELLED" || code === "IMPORT_TIMEOUT") return { code: "CANCELLATION", message: "The local import was cancelled.", retryable: false };
+    if (code === "MEDIA_PROBE_FAILED" || code === "MEDIA_DECODE_FAILED" || code === "UNSUPPORTED_MEDIA") return { code: "ASSET_UNSUPPORTED", message: "The selected media is unsupported or invalid.", retryable: false };
+  }
   if (error instanceof LocalExecutorError) {
     return { code: error.code, message: error.message, retryable: error.code === "STORAGE_FAILED" };
   }

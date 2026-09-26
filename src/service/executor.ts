@@ -1,5 +1,6 @@
 import type {
   ApplyOperationsRequest,
+  ImportAssetRequest,
   CancelJobRequest,
   CancelJobResponse,
   CapabilitySet,
@@ -12,8 +13,10 @@ import type {
   ProjectSnapshot,
   ServiceCommand,
 } from "../service-contract/index.js";
+import { authorizeLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
 import {
   ApplyOperationsRequestSchema,
+  ImportAssetRequestSchema,
   CancelJobRequestSchema,
   CreateProjectRequestSchema,
   OpenProjectRequestSchema,
@@ -50,6 +53,16 @@ export class LocalExecutor {
     return this.jobs.submitApplyOperations(request);
   }
 
+  async authorizeLocalImport(sourcePath: string, approvedRoots: string[], importMethod: "file_picker" | "path" = "file_picker"): Promise<AuthorizedLocalImport> {
+    const source = await authorizeLocalImport(sourcePath, approvedRoots, importMethod);
+    this.jobs.registerAuthorizedImport(source);
+    return source;
+  }
+
+  submitImportAsset(request: ImportAssetRequest): Promise<JobView> {
+    return this.jobs.submitImportAsset(request);
+  }
+
   getJob(jobId: string): Promise<JobView> {
     return this.jobs.getJob(jobId);
   }
@@ -74,11 +87,12 @@ export class LocalExecutor {
     return this.projects.capabilities();
   }
 
-  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
+  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
     switch (command) {
       case "create_project": return this.createProject(CreateProjectRequestSchema.parse(input));
       case "open_project": return this.openProject(OpenProjectRequestSchema.parse(input));
       case "apply_operations": return this.submitApplyOperations(ApplyOperationsRequestSchema.parse(input));
+      case "import_asset": return this.submitImportAsset(ImportAssetRequestSchema.parse(input));
       case "cancel_job": return this.cancelJob(CancelJobRequestSchema.parse(input));
     }
   }

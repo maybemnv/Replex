@@ -8,7 +8,7 @@ import { LocalProjectStoreError } from "./project-store.js";
 import { LocalExecutorServer } from "./http.js";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
-type LocalCommand = Extract<ServiceCommand, "create_project" | "open_project" | "apply_operations" | "cancel_job">;
+type LocalCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">;
 interface CliIO { stdout(text: string): void; stderr(text: string): void }
 
 function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalCommand; inputPath: string } {
@@ -20,7 +20,7 @@ function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalComma
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new LocalExecutorError("VALIDATION_FAILED", `${key} requires a value.`);
     if (key === "--workspace" && !workspaceRoot) workspaceRoot = resolve(value);
-    else if (key === "--command" && !command && ["create_project", "open_project", "apply_operations", "cancel_job"].includes(value)) command = value as LocalCommand;
+    else if (key === "--command" && !command && ["create_project", "open_project", "import_asset", "apply_operations", "cancel_job"].includes(value)) command = value as LocalCommand;
     else if (key === "--input" && !inputPath) inputPath = resolve(value);
     else throw new LocalExecutorError("VALIDATION_FAILED", `Invalid or repeated service option: ${key}.`);
     index += 1;
@@ -64,7 +64,7 @@ export async function runServiceCommandCli(argv: string[], io: CliIO = {
     await server.start();
     let result = await server.dispatch(args.command, request);
     let exitCode = 0;
-    if (args.command === "apply_operations") {
+    if (args.command === "apply_operations" || args.command === "import_asset") {
       const job = result as { id: string };
       result = await server.waitForJob(job.id, 600_000);
       if ((result as { state?: string }).state !== "succeeded") exitCode = 1;

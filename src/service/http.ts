@@ -117,7 +117,7 @@ export class LocalExecutorServer {
     this.closing = false;
   }
 
-  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
+  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
     if (!this.ready || this.closing) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
     return this.executor.dispatch(command, input);
   }
@@ -205,6 +205,11 @@ export class LocalExecutorServer {
     if (request.method === "POST" && url.pathname === "/v1/jobs/apply-operations") {
       const body = await readJson(request);
       sendJson(response, 202, await this.dispatch("apply_operations", body));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/jobs/import-asset") {
+      const body = await readJson(request);
+      sendJson(response, 202, await this.dispatch("import_asset", body));
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/jobs/")) {
