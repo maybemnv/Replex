@@ -79,6 +79,8 @@ function eventSequence(state: JobState, projectId: string): number {
 
 export class LocalJobRuntime {
   private static readonly workspaceTails = new Map<string, Promise<void>>();
+  // ponytail: one in-process workspace queue; use durable shared scheduling if cross-process writers become supported.
+  private static readonly executionTails = new Map<string, Promise<void>>();
   private started = false;
   private readonly running = new Set<string>();
   private readonly scheduled = new Map<string, NodeJS.Timeout>();
@@ -308,17 +310,35 @@ export class LocalJobRuntime {
     // ponytail: a 25ms queue window keeps quick semantic jobs cancellable without another queue dependency.
     const timer = setTimeout(() => {
       this.scheduled.delete(jobId);
-      const task = this.run(jobId);
+      const task = this.enqueueRun(jobId);
       this.tasks.add(task);
       void task.then(() => this.tasks.delete(task), () => this.tasks.delete(task));
     }, 25);
     this.scheduled.set(jobId, timer);
   }
 
+  private async enqueueRun(jobId: string): Promise<void> {
+    const root = resolve(this.workspaceRoot);
+    const key = process.platform === "win32" ? root.toLowerCase() : root;
+    const previous = LocalJobRuntime.executionTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>((resolveHeld) => { release = resolveHeld; });
+    const tail = previous.then(() => held);
+    LocalJobRuntime.executionTails.set(key, tail);
+    await previous;
+    try {
+      await this.run(jobId);
+    } finally {
+      release();
+      if (LocalJobRuntime.executionTails.get(key) === tail) LocalJobRuntime.executionTails.delete(key);
+    }
+  }
+
   private async run(jobId: string): Promise<void> {
-    if (this.running.has(jobId)) return;
+    if (!this.started || this.running.has(jobId)) return;
     this.running.add(jobId);
     let applied = false;
+    let importToken: string | undefined;
     try {
       const start = await this.exclusive(async (state) => {
         const record = state.jobs[jobId];
@@ -329,7 +349,7 @@ export class LocalJobRuntime {
           });
           const event = this.appendJobEvent(state, record.job);
           await this.save(state);
-          return { event, cancelled: true as const };
+          return { event, cancelled: true as const, request: record.request };
         }
         if (record.job.state !== "queued") return { event: undefined, cancelled: false as const };
         record.job = JobViewSchema.parse({
@@ -346,12 +366,15 @@ export class LocalJobRuntime {
         return { event, cancelled: false as const, request: record.request };
       });
       if (start.event) this.publish(start.event);
+      if (start.request && "source" in start.request && start.request.source.kind === "local_token") {
+        importToken = start.request.source.ref;
+      }
       if (start.cancelled || !start.request) return;
 
       const controller = new AbortController();
       this.abortControllers.set(jobId, controller);
       const result = "source" in start.request
-        ? await this.projects.importAsset(start.request, this.imports.get(start.request.source.ref)!, controller.signal)
+        ? await this.projects.importAsset(start.request, importToken ? this.imports.get(importToken) : undefined, controller.signal)
         : await this.projects.applyOperations(start.request);
       if (!result.ok) {
         await this.finishFailure(jobId, failureFor(result.code));
@@ -370,6 +393,11 @@ export class LocalJobRuntime {
     } finally {
       this.abortControllers.delete(jobId);
       this.running.delete(jobId);
+      if (importToken) {
+        const source = this.imports.get(importToken);
+        this.imports.delete(importToken);
+        if (source) await closeAuthorizedLocalImport(source).catch(() => undefined);
+      }
     }
   }
 
@@ -560,6 +588,7 @@ function failureFor(code: "STALE_REVISION" | "INVALID_OPERATION" | "UNSUPPORTED_
 function failureForError(error: unknown): ContractError {
   if (error instanceof Error && "code" in error && typeof error.code === "string") {
     const code = error.code;
+    if (code === "UPLOAD_INTERRUPTED") return { code, message: "The local import was interrupted before its source could be read.", retryable: false };
     if (code === "SOURCE_NOT_AUTHORIZED") return { code: "UNAUTHORIZED", message: "The local import token is not authorized.", retryable: false };
     if (code === "SOURCE_CHANGED") return { code: "ASSET_CHANGED", message: "The selected media changed before import completed.", retryable: false };
     if (code === "IMPORT_CANCELLED" || code === "IMPORT_TIMEOUT") return { code: "CANCELLATION", message: "The local import was cancelled.", retryable: false };

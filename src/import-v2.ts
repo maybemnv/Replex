@@ -13,7 +13,7 @@ export interface AuthorizedLocalImport {
   readonly sizeBytes: number;
 }
 
-export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_TOO_LARGE" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "MEDIA_DECODE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED" | "IMPORT_CANCELLED" | "IMPORT_TIMEOUT";
+export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_TOO_LARGE" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "MEDIA_DECODE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED" | "IMPORT_CANCELLED" | "IMPORT_TIMEOUT" | "UPLOAD_INTERRUPTED";
 
 export class LocalImportError extends Error {
   constructor(readonly code: LocalImportErrorCode, message: string) {

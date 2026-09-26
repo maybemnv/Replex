@@ -19,8 +19,8 @@ import {
   type ProjectSnapshot,
   type RevisionView,
 } from "../service-contract/index.js";
-import { LocalProjectStore } from "./project-store.js";
-import { importLocalAssetV2, type AuthorizedLocalImport } from "../import-v2.js";
+import { LocalProjectStore, LocalProjectStoreError } from "./project-store.js";
+import { importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -76,16 +76,28 @@ export class LocalProjectService {
     return publicOutcome(result);
   }
 
-  async importAsset(requestInput: ImportAssetRequest, source: AuthorizedLocalImport, signal: AbortSignal): Promise<ApplyOperationsOutcome & { assetId?: string }> {
+  async importAsset(requestInput: ImportAssetRequest, source: AuthorizedLocalImport | undefined, signal: AbortSignal): Promise<ApplyOperationsOutcome & { assetId?: string }> {
     const request = ImportAssetRequestSchema.parse(requestInput);
     if (request.source.kind !== "local_token") return { ok: false, code: "UNSUPPORTED_OPERATION", detail: "upload sessions are not available in the local executor" };
-    const { current, selected } = await this.store.currentAndRevision(request.projectId, request.baseRevisionId);
-    if (current.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this import could be applied" };
-    const imported = await importLocalAssetV2(selected, await this.store.projectRoot(request.projectId), source, { signal });
+    const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
+    const currentProject = await this.store.current(request.projectId);
+    const committedRevisions = new Set(currentProject.revisions.map(({ id }) => id));
+    const prior = (await this.store.operationLog(request.projectId)).filter((record) => record.intentId === intentId && committedRevisions.has(record.resultRevisionId));
+    if (prior.length) {
+      const operation = prior[0]!.input;
+      if (prior.length !== 1 || operation.type !== "import_asset" || prior[0]!.baseRevisionId !== request.baseRevisionId) {
+        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
+      }
+      const result = publicOutcome({ ok: true, project: currentProject, revisionId: prior[0]!.resultRevisionId, operationLog: prior });
+      return { ...result, assetId: operation.asset.id };
+    }
+    if (currentProject.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this import could be applied" };
+    if (!source) throw new LocalImportError("UPLOAD_INTERRUPTED", "the authorized source handle was lost during restart");
+    const imported = await importLocalAssetV2(currentProject, await this.store.projectRoot(request.projectId), source, { signal });
     const result = await this.store.applyBatch(request.projectId, {
       baseRevisionId: request.baseRevisionId,
       actor: "user",
-      intentId: "intent-" + digest(request.idempotencyKey).slice(0, 32),
+      intentId,
       evidenceRefs: [],
       operations: [{ type: "import_asset", asset: imported.asset }],
       createdAt: new Date().toISOString(),
