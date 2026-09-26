@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, lstat, realpath, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "../canonical-json.js";
+import { withLocalAssetV2, type AuthorizedLocalImport, type LocalAssetFacts, type LocalImportOptions } from "../import-v2.js";
 import {
   applyOperationBatch,
   OperationLogRecordSchema,
@@ -11,7 +12,7 @@ import {
   type OperationLogRecord,
 } from "../operations-v2.js";
 import { IdSchema } from "../schema.js";
-import { ProjectV2Schema, type ProjectV2 } from "../schema-v2.js";
+import { MediaAssetSchema, ProjectV2Schema, type MediaAsset, type ProjectV2 } from "../schema-v2.js";
 
 export type LocalProjectStoreErrorCode =
   | "PROJECT_NOT_FOUND"
@@ -29,7 +30,23 @@ export class LocalProjectStoreError extends Error {
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 const MAX_PROJECT_BYTES = 128 * 1024 * 1024;
+const MAX_EVIDENCE_BYTES = 1_000_000;
 const OPERATION_LOG_RELATIVE_PATH = "operations/operations.jsonl";
+
+export interface LocalAssetBatchRequest {
+  baseRevisionId: string;
+  intentId: string;
+  source: AuthorizedLocalImport;
+  buildAsset: (facts: LocalAssetFacts, project: ProjectV2) => MediaAsset;
+  buildBatch: (asset: MediaAsset, project: ProjectV2) => OperationBatchInput;
+  options?: LocalImportOptions;
+}
+
+class LocalAssetBatchRejected extends Error {
+  constructor(readonly result: Extract<OperationBatchResult, { ok: false }>) {
+    super(result.detail);
+  }
+}
 
 function within(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
@@ -136,40 +153,106 @@ export class LocalProjectStore {
   async applyBatch(projectId: string, batch: OperationBatchInput): Promise<OperationBatchResult> {
     return this.withProjectLock(projectId, async () => {
       const current = await this.current(projectId);
-      const log = await this.operationLog(projectId);
-      const committedRevisions = new Set(current.revisions.map((revision) => revision.id));
-      const committedLog = log.filter((record) => committedRevisions.has(record.resultRevisionId));
-      const prior = committedLog.filter((record) => record.intentId === batch.intentId);
-      if (prior.length > 0) {
-        const inputs = Array.isArray(batch.operations) ? batch.operations : [];
-        const sameRequest = prior.length === inputs.length
-          && prior.every((record, index) =>
-            record.baseRevisionId === batch.baseRevisionId
-            && record.actor === batch.actor
-            && canonicalJson(record.input) === canonicalJson(inputs[index]));
-        if (!sameRequest) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
-        const revisionId = prior[0]!.resultRevisionId;
-        return { ok: true, project: current, revisionId, operationLog: prior };
+      return this.applyBatchLocked(projectId, current, batch);
+    });
+  }
+
+  async applyBatchWithLocalAsset(projectId: string, request: LocalAssetBatchRequest): Promise<OperationBatchResult> {
+    return this.withProjectLock(projectId, async () => {
+      const current = await this.current(projectId);
+      const committed = new Set(current.revisions.map((revision) => revision.id));
+      const hasPriorIntent = (await this.operationLog(projectId)).some((record) =>
+        committed.has(record.resultRevisionId) && record.intentId === request.intentId);
+      if (request.baseRevisionId !== current.currentRevisionId && !hasPriorIntent) {
+        return { ok: false, code: "STALE_REVISION", detail: "base revision is not current" };
       }
 
-      const result = applyOperationBatch(current, batch);
-      if (!result.ok) return result;
       const root = await this.root();
       const directory = await this.projectDirectory(root, projectId, false);
-
-      await this.writeJsonAtomic(this.revisionPath(directory, result.revisionId), result.project, root);
-      const byId = new Map(committedLog.map((record) => [record.id, record]));
-      for (const record of result.operationLog) {
-        const existing = byId.get(record.id);
-        if (existing && canonicalJson(existing) !== canonicalJson(record)) throw invalidStorage();
-        byId.set(record.id, record);
+      let facts: LocalAssetFacts | undefined;
+      try {
+        return await withLocalAssetV2(directory, request.source, (candidate) => {
+          facts = candidate;
+          return request.buildAsset(candidate, current);
+        }, async (asset) => {
+          if (!facts || asset.path !== facts.path || asset.sha256 !== facts.sha256 || asset.type !== facts.type
+            || canonicalJson(asset.probe) !== canonicalJson(facts.probe)) throw invalidStorage();
+          const batch = request.buildBatch(asset, current);
+          if (batch.baseRevisionId !== request.baseRevisionId || batch.intentId !== request.intentId) {
+            throw new LocalProjectStoreError("INVALID_OPERATION", "local asset batch does not match its pinned revision and intent");
+          }
+          const result = await this.applyBatchLocked(projectId, current, batch);
+          if (!result.ok) throw new LocalAssetBatchRejected(result);
+          return result;
+        }, request.options);
+      } catch (error) {
+        if (error instanceof LocalAssetBatchRejected) return error.result;
+        throw error;
       }
-      const nextLog = [...byId.values()];
-      await this.writeTextAtomic(join(directory, OPERATION_LOG_RELATIVE_PATH), nextLog.map(canonicalJson).join("\n") + "\n", root);
-      // This rename publishes the new canonical revision. Earlier failures leave project.json unchanged.
-      await this.writeJsonAtomic(join(directory, "project.json"), result.project, root);
-      return result;
     });
+  }
+
+  async writeEvidence(projectId: string, evidenceId: string, value: unknown): Promise<string> {
+    if (!IdSchema.safeParse(evidenceId).success) throw new LocalProjectStoreError("INVALID_OPERATION", "evidence ID is invalid");
+    let text: string;
+    try {
+      text = canonicalJson(value);
+    } catch {
+      throw invalidStorage();
+    }
+    if (Buffer.byteLength(text, "utf8") > MAX_EVIDENCE_BYTES) throw invalidStorage();
+
+    return this.withProjectLock(projectId, async () => {
+      const root = await this.root();
+      const directory = await this.projectDirectory(root, projectId, false);
+      const evidenceRoot = await this.ensureDirectory(directory, "evidence", root);
+      const recaptureRoot = await this.ensureDirectory(evidenceRoot, "recapture", root);
+      const fileName = `${sha256(evidenceId)}.json`;
+      const filePath = join(recaptureRoot, fileName);
+      const relativePath = `evidence/recapture/${fileName}`;
+      const existing = await this.readJsonIfExists<unknown>(filePath, root);
+      if (existing !== undefined) {
+        if (canonicalJson(existing) === text) return relativePath;
+        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "evidence ID was already used for different content");
+      }
+      await this.writeJsonAtomic(filePath, value, root);
+      return relativePath;
+    });
+  }
+
+  private async applyBatchLocked(projectId: string, current: ProjectV2, batch: OperationBatchInput): Promise<OperationBatchResult> {
+    const log = await this.operationLog(projectId);
+    const committedRevisions = new Set(current.revisions.map((revision) => revision.id));
+    const committedLog = log.filter((record) => committedRevisions.has(record.resultRevisionId));
+    const prior = committedLog.filter((record) => record.intentId === batch.intentId);
+    if (prior.length > 0) {
+      const inputs = Array.isArray(batch.operations) ? batch.operations : [];
+      const sameRequest = prior.length === inputs.length
+        && prior.every((record, index) =>
+          record.baseRevisionId === batch.baseRevisionId
+          && record.actor === batch.actor
+          && canonicalJson(record.input) === canonicalJson(inputs[index]));
+      if (!sameRequest) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
+      const revisionId = prior[0]!.resultRevisionId;
+      return { ok: true, project: current, revisionId, operationLog: prior };
+    }
+
+    const result = applyOperationBatch(current, batch);
+    if (!result.ok) return result;
+    const root = await this.root();
+    const directory = await this.projectDirectory(root, projectId, false);
+
+    await this.writeJsonAtomic(this.revisionPath(directory, result.revisionId), result.project, root);
+    const byId = new Map(committedLog.map((record) => [record.id, record]));
+    for (const record of result.operationLog) {
+      const existing = byId.get(record.id);
+      if (existing && canonicalJson(existing) !== canonicalJson(record)) throw invalidStorage();
+      byId.set(record.id, record);
+    }
+    const nextLog = [...byId.values()];
+    await this.writeTextAtomic(join(directory, OPERATION_LOG_RELATIVE_PATH), nextLog.map(canonicalJson).join("\n") + "\n", root);
+    await this.writeJsonAtomic(join(directory, "project.json"), result.project, root);
+    return result;
   }
 
   private assertProjectIntegrity(project: ProjectV2): void {

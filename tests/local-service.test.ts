@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyOperationBatch } from "../src/operations-v2.js";
-import type { ProjectV2 } from "../src/schema-v2.js";
+import { MediaAssetSchema, type ProjectV2 } from "../src/schema-v2.js";
+import { authorizeLocalImport, type LocalAssetFacts } from "../src/import-v2.js";
+import { LocalProjectStore } from "../src/service/project-store.js";
 import { LocalProjectService } from "../src/service/local.js";
+import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 
 const projectDirectory = (workspaceRoot: string, projectId: string) =>
   join(workspaceRoot, "projects", createHash("sha256").update(projectId).digest("hex"));
@@ -15,6 +18,7 @@ const operationLogPath = (workspaceRoot: string, projectId: string) =>
   join(projectDirectory(workspaceRoot, projectId), "operations", "operations.jsonl");
 const revisionSnapshotPath = (workspaceRoot: string, projectId: string, revisionId: string) =>
   join(projectDirectory(workspaceRoot, projectId), "revisions", createHash("sha256").update(revisionId).digest("hex") + ".json");
+const ppmFixture = () => Buffer.concat([Buffer.from("P6\n2 2\n255\n"), Buffer.from([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255])]);
 
 describe("LocalProjectService", () => {
   let workspaceRoot: string | undefined;
@@ -184,6 +188,83 @@ describe("LocalProjectService", () => {
     await expect(service.applyOperations(titleRequest(created.projectId, created.revisionId, "same-edit-key", "other-title")))
       .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
+
+  it.skipIf(!mediaAvailable)("publishes local media and one operation under a private project store transaction", async () => {
+    const service = await createService();
+    const created = await createProject(service, "create-media-transaction");
+    const store = new LocalProjectStore(workspaceRoot!);
+    const sourceRoot = join(workspaceRoot!, "authorized");
+    await mkdir(sourceRoot);
+    const sourcePath = join(sourceRoot, "store.ppm");
+    const sourceBytes = ppmFixture();
+    await writeFile(sourcePath, sourceBytes);
+    const source = await authorizeLocalImport(sourcePath, [sourceRoot]);
+    const buildAsset = (facts: LocalAssetFacts) => MediaAssetSchema.parse({
+      id: "asset-private-store-test", type: facts.type, path: facts.path, sha256: facts.sha256, probe: facts.probe,
+      provenance: {
+        kind: "upload", originalFilename: facts.originalFilename, importedAt: facts.importedAt,
+        sourceSha256: facts.sha256, importMethod: facts.importMethod, originalProbe: facts.probe,
+      },
+    });
+    const buildBatch = (asset: ReturnType<typeof buildAsset>, project: ProjectV2) => ({
+      baseRevisionId: project.currentRevisionId, actor: "user" as const, intentId: "import-through-store",
+      evidenceRefs: [], operations: [{ type: "import_asset", asset }],
+    });
+
+    const stale = await store.applyBatchWithLocalAsset(created.projectId, {
+      baseRevisionId: "revision-stale", intentId: "import-through-store", source, buildAsset, buildBatch,
+      options: { ffprobePath, ffmpegPath },
+    });
+    expect(stale).toMatchObject({ ok: false, code: "STALE_REVISION" });
+
+    const applied = await store.applyBatchWithLocalAsset(created.projectId, {
+      baseRevisionId: created.revisionId, intentId: "import-through-store", source, buildAsset, buildBatch,
+      options: { ffprobePath, ffmpegPath },
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.project.assets["asset-private-store-test"]?.sha256).toBe(createHash("sha256").update(sourceBytes).digest("hex"));
+    expect(applied.project.revisions).toHaveLength(2);
+    expect((await store.operationLog(created.projectId)).map((record) => record.input.type)).toEqual(["import_asset"]);
+    expect(await readFile(join(projectDirectory(workspaceRoot!, created.projectId), applied.project.assets["asset-private-store-test"]!.path!))).toHaveLength(source.sizeBytes);
+
+    const evidenceRef = await store.writeEvidence(created.projectId, "recapture-report", { schemaVersion: 1, preservation: true });
+    expect(evidenceRef).toMatch(/^evidence\/recapture\/[a-f0-9]{64}\.json$/);
+    expect(JSON.stringify({ evidenceRef })).not.toContain(workspaceRoot!);
+    expect(JSON.parse(await readFile(join(projectDirectory(workspaceRoot!, created.projectId), evidenceRef), "utf8"))).toEqual({ schemaVersion: 1, preservation: true });
+    await expect(store.writeEvidence(created.projectId, "recapture-report", { schemaVersion: 1, preservation: false })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  }, 30_000);
+
+  it.skipIf(!mediaAvailable)("cleans newly promoted local media when the project reducer rejects the batch", async () => {
+    const service = await createService();
+    const created = await createProject(service, "create-media-reject");
+    const store = new LocalProjectStore(workspaceRoot!);
+    const sourceRoot = join(workspaceRoot!, "authorized");
+    await mkdir(sourceRoot);
+    const sourcePath = join(sourceRoot, "reject.ppm");
+    await writeFile(sourcePath, ppmFixture());
+    const source = await authorizeLocalImport(sourcePath, [sourceRoot]);
+    const before = await store.current(created.projectId);
+    const rejected = await store.applyBatchWithLocalAsset(created.projectId, {
+      baseRevisionId: created.revisionId, intentId: "rejected-local-media", source,
+      buildAsset: (facts) => MediaAssetSchema.parse({
+        id: "asset-rejected-store-test", type: facts.type, path: facts.path, sha256: facts.sha256, probe: facts.probe,
+        provenance: {
+          kind: "upload", originalFilename: facts.originalFilename, importedAt: facts.importedAt,
+          sourceSha256: facts.sha256, importMethod: facts.importMethod, originalProbe: facts.probe,
+        },
+      }),
+      buildBatch: (asset, project) => ({
+        baseRevisionId: project.currentRevisionId, actor: "user", intentId: "rejected-local-media", evidenceRefs: [],
+        operations: [{ type: "replace_asset", clipId: "missing-clip", assetId: asset.id }],
+      }),
+      options: { ffprobePath, ffmpegPath },
+    });
+    expect(rejected).toMatchObject({ ok: false, code: "INVALID_OPERATION" });
+    expect(await store.current(created.projectId)).toEqual(before);
+    expect(await readdir(join(projectDirectory(workspaceRoot!, created.projectId), "media", "assets"))).toEqual([]);
+    expect(await readdir(join(projectDirectory(workspaceRoot!, created.projectId), ".replex-staging"))).toEqual([]);
+  }, 30_000);
   it("deduplicates create retries and rejects a reused key with different input", async () => {
     const service = await createService();
     const first = await createProject(service, "same-create-key", "Original name");
