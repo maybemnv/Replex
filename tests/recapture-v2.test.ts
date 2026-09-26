@@ -21,9 +21,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function makeVideo(path: string, color: "red" | "green"): void {
+function makeVideo(
+  path: string,
+  color: "red" | "green",
+  options: { width?: number; height?: number; duration?: number } = {},
+): void {
+  const { width = 64, height = 48, duration = 1 } = options;
   const result = spawnSync(ffmpegPath, [
-    "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=${color}:s=64x48:r=30:d=1`,
+    "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=${color}:s=${width}x${height}:r=30:d=${duration}`,
     "-an", "-c:v", "libvpx-vp9", "-threads", "1", "-y", path,
   ], { encoding: "utf8", windowsHide: true, shell: false, timeout: 30_000 });
   if (result.error || result.status !== 0) throw new Error("FFmpeg could not create the recapture fixture");
@@ -44,7 +49,11 @@ function browserAsset(id: string, bytes: Buffer, probe: ReturnType<typeof probeV
   });
 }
 
-async function seedProject(root: string, oldVideoPath: string): Promise<{ store: LocalProjectStore; project: ProjectV2; oldBytes: Buffer }> {
+async function seedProject(
+  root: string,
+  oldVideoPath: string,
+  options: { clipRangeMs?: number } = {},
+): Promise<{ store: LocalProjectStore; project: ProjectV2; oldBytes: Buffer }> {
   const oldBytes = await readFile(oldVideoPath);
   const oldProbe = probeVideo(ffprobePath, oldVideoPath);
   const oldAsset = browserAsset("asset-browser-old", oldBytes, oldProbe, "run-original");
@@ -57,7 +66,7 @@ async function seedProject(root: string, oldVideoPath: string): Promise<{ store:
   project.browser = { flows: { "normal-approved-flow": normalFlow("https://example.test") }, recaptureLineage: [] };
   project.composition.clips.push({
     id: "clip-browser-scene", assetId: oldAsset.id, trackId: "track-video", timelineStartMs: 0,
-    sourceInMs: 0, sourceOutMs: 500, speed: 1,
+    sourceInMs: 0, sourceOutMs: options.clipRangeMs ?? 500, speed: 1,
     transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
     opacity: 1, audioGainDb: 0, muted: false,
   });
@@ -120,7 +129,13 @@ describe("V2 selective browser recapture", () => {
 
     expect(result.project.revisions).toHaveLength(2);
     expect(result.operationLog).toHaveLength(1);
-    expect(result.operationLog[0]).toMatchObject({ actor: "recapture", input: { type: "replace_browser_capture" } });
+    expect(result.operationLog[0]).toMatchObject({
+      baseRevisionId: project.currentRevisionId,
+      resultRevisionId: result.revisionId,
+      actor: "recapture",
+      intentId: "replace-apply-filter-run",
+      input: { type: "replace_browser_capture" },
+    });
     expect(result.project.assets["asset-browser-old"]).toEqual(project.assets["asset-browser-old"]);
     expect(result.project.composition.clips[0]).toMatchObject({ id: "clip-browser-scene", assetId: result.replacementAsset.id, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 500 });
     expect(result.project.browser?.recaptureLineage).toHaveLength(1);
@@ -185,4 +200,34 @@ describe("V2 selective browser recapture", () => {
     expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);
     expect(await readdir(join(projectRoot, ".replex-staging"))).toEqual([]);
   }, 60_000);
+
+  it.skipIf(!mediaAvailable)("rolls back promoted bytes when replacement media is incompatible with retained clips", async () => {
+    for (const [caseId, seedOptions] of [
+      ["dimensions", { replacementWidth: 80, clipRangeMs: 500, previousDuration: 1 }],
+      ["clip-range", { replacementWidth: 64, clipRangeMs: 1_500, previousDuration: 2 }],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), `replex-recapture-${caseId}-`));
+      roots.push(root);
+      const oldVideoPath = join(root, "old.webm");
+      const newVideoPath = join(root, "new.webm");
+      makeVideo(oldVideoPath, "red", { duration: seedOptions.previousDuration });
+      makeVideo(newVideoPath, "green", { width: seedOptions.replacementWidth });
+      const { store, project } = await seedProject(root, oldVideoPath, { clipRangeMs: seedOptions.clipRangeMs });
+      const capture = await captureResult(join(root, "runs"), newVideoPath);
+      await expect(recaptureBrowserSceneV2(store, {
+        projectId: project.projectId,
+        baseRevisionId: project.currentRevisionId,
+        previousAssetId: "asset-browser-old",
+        capture,
+        sceneKey: "apply-filter",
+        changedActionIds: ["apply-filter"],
+        reason: `Rejected ${caseId} incompatibility`,
+        intentId: `reject-${caseId}-run`,
+      }, { ffmpegPath, ffprobePath })).rejects.toMatchObject({ code: "INVALID_OPERATION" });
+      expect(await store.current(project.projectId)).toEqual(project);
+      const projectRoot = projectDirectory(root, project.projectId);
+      expect(await readdir(join(projectRoot, "media", "assets"))).toEqual([project.assets["asset-browser-old"]!.sha256]);
+      expect(await readdir(join(projectRoot, ".replex-staging"))).toEqual([]);
+    }
+  }, 90_000);
 });

@@ -215,7 +215,9 @@ function buildReport(
     && revision.operationIds.length === 1
     && operationLog.length === 1
     && operation?.actor === "recapture"
+    && operation.baseRevisionId === request.baseRevisionId
     && operation.resultRevisionId === after.currentRevisionId
+    && operation.intentId === request.intentId
     && operation.input.type === "replace_browser_capture"
     && operation.input.previousAssetId === request.previousAssetId
     && operation.input.replacementAsset.id === replacementAsset.id
