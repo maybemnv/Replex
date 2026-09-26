@@ -9,7 +9,9 @@ import {
   type ContractError,
   type ServiceCommand,
 } from "../service-contract/index.js";
+import { LocalImportAuthorizationRequestV1Schema, LocalImportAuthorizationResponseV1Schema } from "../service-contract/local-host-v1.js";
 import { IdSchema } from "../schema.js";
+import { LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 import { LocalExecutor } from "./executor.js";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalProjectStoreError } from "./project-store.js";
@@ -22,6 +24,7 @@ export class LocalExecutorServer {
   private readonly executor: LocalExecutor;
   private workspaceRoot: string;
   private readonly allowedOrigins: Set<string>;
+  private readonly importRoots: string[];
   private configuredPort?: number;
   private token?: string;
   private server?: Server;
@@ -32,8 +35,9 @@ export class LocalExecutorServer {
   private startPromise?: Promise<{ url: string; token: string }>;
   private stopPromise?: Promise<void>;
 
-  constructor(options: { workspaceRoot: string; allowedOrigins?: string[] }) {
+  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[] }) {
     this.workspaceRoot = resolve(options.workspaceRoot);
+    this.importRoots = (options.importRoots?.length ? options.importRoots : [this.workspaceRoot]).map((root) => resolve(root));
     this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot });
     try { this.allowedOrigins = new Set((options.allowedOrigins ?? []).map(localOrigin)); }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "Only explicit local frontend origins are allowed."); }
@@ -117,7 +121,7 @@ export class LocalExecutorServer {
     this.closing = false;
   }
 
-  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
+  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
     if (!this.ready || this.closing) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
     return this.executor.dispatch(command, input);
   }
@@ -125,6 +129,11 @@ export class LocalExecutorServer {
   waitForJob(jobId: string, timeoutMs?: number) {
     if (!this.ready || this.closing) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
     return this.executor.waitForJob(jobId, timeoutMs);
+  }
+
+  authorizeLocalImport(sourcePath: string, importMethod: "file_picker" | "path" = "file_picker"): Promise<AuthorizedLocalImport> {
+    if (!this.ready || this.closing) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.executor.authorizeLocalImport(sourcePath, this.importRoots, importMethod);
   }
 
   private url(): string {
@@ -188,6 +197,12 @@ export class LocalExecutorServer {
     }
 
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (request.method === "POST" && url.pathname === "/v1/local/imports/authorize") {
+      const body = LocalImportAuthorizationRequestV1Schema.parse(await readJson(request));
+      const selected = await this.authorizeLocalImport(body.sourcePath, body.importMethod);
+      sendJson(response, 201, LocalImportAuthorizationResponseV1Schema.parse({ hostContractVersion: "v1", ...selected }));
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/v1/capabilities") {
       sendJson(response, 200, this.executor.capabilities());
       return;
@@ -205,6 +220,11 @@ export class LocalExecutorServer {
     if (request.method === "POST" && url.pathname === "/v1/jobs/apply-operations") {
       const body = await readJson(request);
       sendJson(response, 202, await this.dispatch("apply_operations", body));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/jobs/import-asset") {
+      const body = await readJson(request);
+      sendJson(response, 202, await this.dispatch("import_asset", body));
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/jobs/")) {
@@ -318,6 +338,11 @@ function safeError(error: unknown): { status: number; body: unknown } {
       : error.code === "EXECUTOR_OFFLINE" ? 503 : 500,
     body: serviceError(error.code, error.message, error.code === "STORAGE_FAILED"),
   };
+  if (error instanceof LocalImportError) {
+    if (error.code === "SOURCE_NOT_AUTHORIZED") return { status: 403, body: serviceError("UNAUTHORIZED", "The selected local file is not available under the configured import roots.", false) };
+    if (error.code === "SOURCE_TOO_LARGE") return { status: 413, body: serviceError("VALIDATION_FAILED", "The selected local file exceeds the import size limit.", false) };
+    return { status: 400, body: serviceError("VALIDATION_FAILED", "The selected local file could not be authorized.", false) };
+  }
   if (error instanceof LocalProjectStoreError) {
     const code: ContractError["code"] = error.code === "PROJECT_NOT_FOUND" ? "PROJECT_NOT_FOUND"
       : error.code === "REVISION_NOT_FOUND" ? "REVISION_NOT_FOUND"

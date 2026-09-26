@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, open, realpath, rm, rmdir, stat, unlink } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { FileHandle } from "node:fs/promises";
 import { applyOperationBatch, type OperationLogRecord } from "./operations-v2.js";
 import { MediaAssetSchema, MediaProbeV2Schema, ProjectV2Schema, type AssetType, type MediaAsset, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
@@ -13,7 +13,7 @@ export interface AuthorizedLocalImport {
   readonly sizeBytes: number;
 }
 
-export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_TOO_LARGE" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "MEDIA_DECODE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED" | "IMPORT_CANCELLED" | "IMPORT_TIMEOUT";
+export type LocalImportErrorCode = "SOURCE_NOT_AUTHORIZED" | "SOURCE_TOO_LARGE" | "SOURCE_CHANGED" | "UNSUPPORTED_MEDIA" | "MEDIA_PROBE_FAILED" | "MEDIA_DECODE_FAILED" | "PROJECT_ROOT_INVALID" | "STORAGE_FAILED" | "IMPORT_REJECTED" | "IMPORT_CANCELLED" | "IMPORT_TIMEOUT" | "UPLOAD_INTERRUPTED";
 
 export class LocalImportError extends Error {
   constructor(readonly code: LocalImportErrorCode, message: string) {
@@ -33,6 +33,7 @@ export interface LocalImportOptions {
   ffprobePath?: string;
   ffmpegPath?: string;
   signal?: AbortSignal;
+  commit?: (result: LocalImportResult) => Promise<void>;
 }
 
 interface SourceEntry {
@@ -97,6 +98,8 @@ export async function authorizeLocalImport(sourcePath: string, approvedRoots: st
   const lexicalSource = resolve(sourcePath);
   const lexicalRoots = approvedRoots.map((root) => resolve(root));
   if (!lexicalRoots.some((root) => isWithin(root, lexicalSource))) fail("SOURCE_NOT_AUTHORIZED", "source is outside approved import roots");
+  const filename = basename(lexicalSource);
+  if (!filename || filename.length > 255 || /[\\/:\0-\x1f]/.test(filename)) fail("SOURCE_NOT_AUTHORIZED", "source filename is not supported");
 
   let file: FileHandle | undefined;
   try {
@@ -121,7 +124,7 @@ export async function authorizeLocalImport(sourcePath: string, approvedRoots: st
     }
     if (openedStat.size > BigInt(Number.MAX_SAFE_INTEGER)) fail("SOURCE_NOT_AUTHORIZED", "source is too large to import safely");
 
-    const handle = Object.freeze({ token: randomUUID(), filename: basename(lexicalSource), sizeBytes: Number(openedStat.size) });
+    const handle = Object.freeze({ token: randomUUID(), filename, sizeBytes: Number(openedStat.size) });
     authorizedSources.set(handle, { file, filename: handle.filename, importMethod, initialStat: openedStat, consumed: false });
     file = undefined;
     return handle;
@@ -181,10 +184,10 @@ export async function importLocalAssetV2(
     if (await hashExistingFile(stagePath, signal, checkActive) !== staged.sha256) fail("STORAGE_FAILED", "staged source bytes failed integrity validation");
 
     const ffprobePath = options.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-    const media = probeMedia(stagePath, ffprobePath, signal, checkActive);
+    const media = await probeMedia(stagePath, ffprobePath, signal, checkActive);
     checkActive();
     const ffmpegPath = options.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
-    decodeMedia(stagePath, ffmpegPath, media.probe, signal, checkActive);
+    await decodeMedia(stagePath, ffmpegPath, media.probe, signal, checkActive);
     checkActive();
     const afterProbe = await entry.file.stat({ bigint: true });
     checkActive();
@@ -230,7 +233,9 @@ export async function importLocalAssetV2(
         });
         if (!applied.ok) fail("IMPORT_REJECTED", `canonical import was rejected: ${applied.detail}`);
 
-        return { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
+        const result = { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
+        await options.commit?.(result);
+        return result;
       } catch (error) {
         if (promotion.created) await removePromoted(finalPath);
         throw error;
@@ -316,13 +321,63 @@ async function copyAndHash(entry: SourceEntry, stagePath: string, signal: AbortS
   }
 }
 
-function probeMedia(path: string, ffprobePath: string, signal: AbortSignal, checkActive: () => void): ProbeResult {
+interface ProcessResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+  timedOut: boolean;
+}
+
+async function runProcess(command: string, args: string[], timeoutMs: number, signal: AbortSignal): Promise<ProcessResult> {
+  const maxBuffer = 2 * 1024 * 1024;
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, { windowsHide: true, shell: false });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let size = 0;
+    let error: Error | undefined;
+    let timedOut = false;
+    let overflowed = false;
+    let timer: NodeJS.Timeout | undefined;
+    const kill = () => { child.kill(); };
+    const onAbort = () => kill();
+    const collect = (target: Buffer[]) => (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBuffer) {
+        overflowed = true;
+        kill();
+        return;
+      }
+      target.push(chunk);
+    };
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", (cause) => { error = cause; });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    child.once("close", (status) => {
+      if (timer) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve({
+        status,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        error: overflowed ? new Error("child process output exceeded its limit") : error,
+        timedOut,
+      });
+    });
+  });
+}
+
+async function probeMedia(path: string, ffprobePath: string, signal: AbortSignal, checkActive: () => void): Promise<ProbeResult> {
   checkActive();
-  const result = spawnSync(ffprobePath, [
+  const result = await runProcess(ffprobePath, [
     "-v", "error", "-show_format", "-show_streams", "-of", "json", path,
-  ], { encoding: "utf8", windowsHide: true, shell: false, timeout: FFPROBE_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 });
+  ], FFPROBE_TIMEOUT_MS, signal);
   checkActive();
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") fail("IMPORT_TIMEOUT", "media probing exceeded its 15 second limit");
+  if (result.timedOut) fail("IMPORT_TIMEOUT", "media probing exceeded its 15 second limit");
   if (result.error || result.status !== 0 || !result.stdout) fail("MEDIA_PROBE_FAILED", "media could not be probed");
 
   let parsed: unknown;
@@ -386,14 +441,14 @@ function probeMedia(path: string, ffprobePath: string, signal: AbortSignal, chec
   }
 }
 
-function decodeMedia(path: string, ffmpegPath: string, probe: MediaProbeV2, signal: AbortSignal, checkActive: () => void): void {
+async function decodeMedia(path: string, ffmpegPath: string, probe: MediaProbeV2, signal: AbortSignal, checkActive: () => void): Promise<void> {
   checkActive();
-  const result = spawnSync(ffmpegPath, [
+  const result = await runProcess(ffmpegPath, [
     "-hide_banner", "-v", "error", "-xerror", "-nostdin", "-max_alloc", "268435456", "-err_detect", "explode", "-threads", "1",
     "-i", path, "-map", "0:v?", "-map", "0:a?", "-progress", "pipe:1", "-nostats", "-f", "null", "-",
-  ], { encoding: "utf8", windowsHide: true, shell: false, timeout: MEDIA_CHECK_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 });
+  ], MEDIA_CHECK_TIMEOUT_MS, signal);
   checkActive();
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") fail("IMPORT_TIMEOUT", "media decoding exceeded its 30 second limit");
+  if (result.timedOut) fail("IMPORT_TIMEOUT", "media decoding exceeded its 30 second limit");
   if (result.error || result.status !== 0) fail("MEDIA_DECODE_FAILED", "media failed full decode validation");
 
   if (probe.durationMs === undefined) return;
