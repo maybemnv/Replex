@@ -35,6 +35,16 @@ export interface LocalImportOptions {
   signal?: AbortSignal;
 }
 
+export interface LocalAssetFacts {
+  path: string;
+  sha256: string;
+  type: AssetType;
+  probe: MediaProbeV2;
+  originalFilename: string;
+  importMethod: "file_picker" | "path";
+  importedAt: string;
+}
+
 interface SourceEntry {
   file: FileHandle;
   filename: string;
@@ -147,6 +157,42 @@ export async function importLocalAssetV2(
   source: AuthorizedLocalImport,
   options: LocalImportOptions = {},
 ): Promise<LocalImportResult> {
+  return withLocalAssetV2(projectRoot, source, (facts) => MediaAssetSchema.parse({
+    id: `asset-${randomUUID()}`,
+    type: facts.type,
+    path: facts.path,
+    sha256: facts.sha256,
+    probe: facts.probe,
+    provenance: {
+      kind: "upload",
+      originalFilename: facts.originalFilename,
+      importedAt: facts.importedAt,
+      sourceSha256: facts.sha256,
+      importMethod: facts.importMethod,
+      originalProbe: facts.probe,
+    },
+  }), async (asset) => {
+    const applied = applyOperationBatch(project, {
+      baseRevisionId: project.currentRevisionId,
+      actor: "user",
+      intentId: `import-${randomUUID()}`,
+      evidenceRefs: [],
+      operations: [{ type: "import_asset", asset }],
+      createdAt: asset.provenance.kind === "upload" ? asset.provenance.importedAt : undefined,
+    });
+    if (!applied.ok) fail("IMPORT_REJECTED", `canonical import was rejected: ${applied.detail}`);
+    return { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
+  }, options);
+}
+
+/** Internal shared import transaction; the callback runs while the content-address lock is held. */
+export async function withLocalAssetV2<T>(
+  projectRoot: string,
+  source: AuthorizedLocalImport,
+  buildAsset: (facts: LocalAssetFacts) => MediaAsset,
+  publish: (asset: MediaAsset) => Promise<T>,
+  options: LocalImportOptions = {},
+): Promise<T> {
   const entry = authorizedSources.get(source);
   if (!entry || entry.consumed) fail("SOURCE_NOT_AUTHORIZED", "authorized source handle is invalid or already used");
   entry.consumed = true;
@@ -155,6 +201,7 @@ export async function importLocalAssetV2(
   let stageDirectory: string | undefined;
   const timeoutSignal = AbortSignal.timeout(IMPORT_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+  let publishing = false;
   const checkActive = (): void => {
     if (!signal.aborted) return;
     if (timeoutSignal.aborted) fail("IMPORT_TIMEOUT", "local import exceeded its 60 second limit");
@@ -204,39 +251,27 @@ export async function importLocalAssetV2(
           stageDirectory = undefined;
         }
         checkActive();
-        const now = new Date().toISOString();
-        const asset = MediaAssetSchema.parse({
-          id: `asset-${randomUUID()}`,
-          type: media.type,
+        const asset = MediaAssetSchema.parse(buildAsset({
           path: assetRelativePath,
           sha256: staged.sha256,
+          type: media.type,
           probe: media.probe,
-          provenance: {
-            kind: "upload",
-            originalFilename: entry.filename,
-            importedAt: now,
-            sourceSha256: staged.sha256,
-            importMethod: entry.importMethod,
-            originalProbe: media.probe,
-          },
-        });
-        const applied = applyOperationBatch(project, {
-          baseRevisionId: project.currentRevisionId,
-          actor: "user",
-          intentId: `import-${randomUUID()}`,
-          evidenceRefs: [],
-          operations: [{ type: "import_asset", asset }],
-          createdAt: now,
-        });
-        if (!applied.ok) fail("IMPORT_REJECTED", `canonical import was rejected: ${applied.detail}`);
-
-        return { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
+          originalFilename: entry.filename,
+          importMethod: entry.importMethod,
+          importedAt: new Date().toISOString(),
+        }));
+        if (asset.path !== assetRelativePath || asset.sha256 !== staged.sha256 || asset.type !== media.type) {
+          fail("STORAGE_FAILED", "asset metadata does not match validated media bytes");
+        }
+        publishing = true;
+        return await publish(asset);
       } catch (error) {
         if (promotion.created) await removePromoted(finalPath);
         throw error;
       }
     }, checkActive);
   } catch (error) {
+    if (publishing) throw error;
     if (signal.aborted) checkActive();
     if (error instanceof LocalImportError) throw error;
     return fail("STORAGE_FAILED", "local asset import failed before canonical publication");
