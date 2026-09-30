@@ -269,13 +269,14 @@ export class LocalProjectStore {
           && canonicalJson(record.input) === canonicalJson(inputs[index]));
       if (!sameRequest) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
       const revisionId = prior[0]!.resultRevisionId;
+      const project = await this.revisionFromCurrent(current, revisionId);
       await ensureEvidence?.({
         ok: true,
-        project: await this.revisionFromCurrent(current, revisionId),
+        project,
         revisionId,
         operationLog: prior,
       });
-      return { ok: true, project: current, revisionId, operationLog: prior };
+      return { ok: true, project, revisionId, operationLog: prior };
     }
 
     const result = applyOperationBatch(current, batch);

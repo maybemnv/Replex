@@ -342,11 +342,23 @@ describe("V2 selective browser recapture", () => {
     expect(first.revisionId).toBe(retry.revisionId);
     expect(retry.project.revisions).toHaveLength(2);
     expect(retry.report).toEqual(first.report);
+
+    const followup = await store.applyBatch(project.projectId, {
+      baseRevisionId: first.revisionId,
+      actor: "user",
+      intentId: "after-recapture-followup",
+      evidenceRefs: [],
+      operations: [{ type: "set_volume", clipId: "clip-browser-scene", audioGainDb: -2 }],
+    });
+    if (!followup.ok) throw new Error("could not advance the project after recapture");
+
     const replay = await recaptureBrowserSceneV2(store, request, options);
     expect(replay.revisionId).toBe(first.revisionId);
     expect(replay.report).toEqual(first.report);
     expect(replay.project.revisions).toHaveLength(2);
-    expect(await store.operationLog(project.projectId)).toHaveLength(1);
+    expect(replay.project.currentRevisionId).toBe(first.revisionId);
+    expect((await store.current(project.projectId)).currentRevisionId).toBe(followup.revisionId);
+    expect(await store.operationLog(project.projectId)).toHaveLength(2);
   }, 60_000);
 
   it.skipIf(!mediaAvailable)("rolls back promoted bytes when replacement media is incompatible with retained clips", async () => {
