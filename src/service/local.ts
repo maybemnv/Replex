@@ -92,6 +92,7 @@ export class LocalProjectService {
       return { ...result, assetId: operation.asset.id };
     }
     if (currentProject.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this import could be applied" };
+    if (signal.aborted) throw new LocalImportError("IMPORT_CANCELLED", "local import was cancelled");
     if (!source) throw new LocalImportError("UPLOAD_INTERRUPTED", "the authorized source handle was lost during restart");
     let committed: OperationBatchResult | undefined;
     const imported = await importLocalAssetV2(currentProject, await this.store.projectRoot(request.projectId), source, {

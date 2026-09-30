@@ -36,6 +36,16 @@ export interface LocalImportOptions {
   commit?: (result: LocalImportResult) => Promise<void>;
 }
 
+export interface LocalAssetFacts {
+  path: string;
+  sha256: string;
+  type: AssetType;
+  probe: MediaProbeV2;
+  originalFilename: string;
+  importMethod: "file_picker" | "path";
+  importedAt: string;
+}
+
 interface SourceEntry {
   file: FileHandle;
   filename: string;
@@ -150,12 +160,44 @@ export async function importLocalAssetV2(
   source: AuthorizedLocalImport,
   options: LocalImportOptions = {},
 ): Promise<LocalImportResult> {
-  const entry = authorizedSources.get(source);
-  if (!entry || entry.consumed) fail("SOURCE_NOT_AUTHORIZED", "authorized source handle is invalid or already used");
-  entry.consumed = true;
-  authorizedSources.delete(source);
+  return withLocalAssetV2(projectRoot, source, (facts) => MediaAssetSchema.parse({
+    id: `asset-${randomUUID()}`,
+    type: facts.type,
+    path: facts.path,
+    sha256: facts.sha256,
+    probe: facts.probe,
+    provenance: {
+      kind: "upload",
+      originalFilename: facts.originalFilename,
+      importedAt: facts.importedAt,
+      sourceSha256: facts.sha256,
+      importMethod: facts.importMethod,
+      originalProbe: facts.probe,
+    },
+  }), async (asset) => {
+    const applied = applyOperationBatch(project, {
+      baseRevisionId: project.currentRevisionId,
+      actor: "user",
+      intentId: `import-${randomUUID()}`,
+      evidenceRefs: [],
+      operations: [{ type: "import_asset", asset }],
+      createdAt: asset.provenance.kind === "upload" ? asset.provenance.importedAt : undefined,
+    });
+    if (!applied.ok) fail("IMPORT_REJECTED", `canonical import was rejected: ${applied.detail}`);
+    const result = { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
+    await options.commit?.(result);
+    return result;
+  }, options);
+}
 
-  let stageDirectory: string | undefined;
+/** Internal shared import transaction; the callback runs while the content-address lock is held. */
+export async function withLocalAssetV2<T>(
+  projectRoot: string,
+  source: AuthorizedLocalImport,
+  buildAsset: (facts: LocalAssetFacts) => MediaAsset,
+  publish: (asset: MediaAsset) => Promise<T>,
+  options: LocalImportOptions = {},
+): Promise<T> {
   const timeoutSignal = AbortSignal.timeout(IMPORT_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
   const checkActive = (): void => {
@@ -163,6 +205,14 @@ export async function importLocalAssetV2(
     if (timeoutSignal.aborted) fail("IMPORT_TIMEOUT", "local import exceeded its 60 second limit");
     fail("IMPORT_CANCELLED", "local import was cancelled");
   };
+  checkActive();
+  const entry = authorizedSources.get(source);
+  if (!entry || entry.consumed) fail("SOURCE_NOT_AUTHORIZED", "authorized source handle is invalid or already used");
+  entry.consumed = true;
+  authorizedSources.delete(source);
+
+  let stageDirectory: string | undefined;
+  let publishing = false;
   try {
     checkActive();
     const initialStat = await entry.file.stat({ bigint: true });
@@ -207,41 +257,28 @@ export async function importLocalAssetV2(
           stageDirectory = undefined;
         }
         checkActive();
-        const now = new Date().toISOString();
-        const asset = MediaAssetSchema.parse({
-          id: `asset-${randomUUID()}`,
-          type: media.type,
+        const asset = MediaAssetSchema.parse(buildAsset({
           path: assetRelativePath,
           sha256: staged.sha256,
+          type: media.type,
           probe: media.probe,
-          provenance: {
-            kind: "upload",
-            originalFilename: entry.filename,
-            importedAt: now,
-            sourceSha256: staged.sha256,
-            importMethod: entry.importMethod,
-            originalProbe: media.probe,
-          },
-        });
-        const applied = applyOperationBatch(project, {
-          baseRevisionId: project.currentRevisionId,
-          actor: "user",
-          intentId: `import-${randomUUID()}`,
-          evidenceRefs: [],
-          operations: [{ type: "import_asset", asset }],
-          createdAt: now,
-        });
-        if (!applied.ok) fail("IMPORT_REJECTED", `canonical import was rejected: ${applied.detail}`);
-
-        const result = { asset, project: applied.project, revisionId: applied.revisionId, operationLog: applied.operationLog };
-        await options.commit?.(result);
-        return result;
+          originalFilename: entry.filename,
+          importMethod: entry.importMethod,
+          importedAt: new Date().toISOString(),
+        }));
+        const typeMatches = asset.type === media.type || (media.type === "uploaded_video" && asset.type === "browser_capture");
+        if (asset.path !== assetRelativePath || asset.sha256 !== staged.sha256 || !typeMatches) {
+          fail("STORAGE_FAILED", "asset metadata does not match validated media bytes");
+        }
+        publishing = true;
+        return await publish(asset);
       } catch (error) {
         if (promotion.created) await removePromoted(finalPath);
         throw error;
       }
     }, checkActive);
   } catch (error) {
+    if (publishing) throw error;
     if (signal.aborted) checkActive();
     if (error instanceof LocalImportError) throw error;
     return fail("STORAGE_FAILED", "local asset import failed before canonical publication");

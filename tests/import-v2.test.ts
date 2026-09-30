@@ -6,8 +6,8 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { mediaAvailable, ffmpegPath, ffprobePath } from "./media.js";
 import { semanticHashV2 } from "../src/operations-v2.js";
-import { ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
-import { authorizeLocalImport, importLocalAssetV2 } from "../src/import-v2.js";
+import { MediaAssetSchema, ProjectV2Schema, type ProjectV2 } from "../src/schema-v2.js";
+import { authorizeLocalImport, importLocalAssetV2, withLocalAssetV2 } from "../src/import-v2.js";
 
 const roots: string[] = [];
 
@@ -177,6 +177,58 @@ describe("V2 local asset import", () => {
     expect(results[0].asset.id).not.toBe(results[1].asset.id);
     expect(await entries(join(projectRoot, "media", "assets"))).toEqual([results[0].asset.sha256]);
     expect((await stat(join(projectRoot, results[0].asset.path!))).nlink).toBe(1);
+  }, 30_000);
+
+  it.skipIf(!mediaAvailable)("removes only content newly promoted by a rejected publication callback", async () => {
+    const { sourceRoot, projectRoot } = await workspace();
+    const sourcePath = join(sourceRoot, "rollback.ppm");
+    await writeFile(sourcePath, ppmFixture());
+    const original = emptyProject();
+    const existing = await importLocalAssetV2(original, projectRoot, await authorizeLocalImport(sourcePath, [sourceRoot]), { ffprobePath, ffmpegPath });
+    const assetRoot = join(projectRoot, "media", "assets");
+    expect(await entries(assetRoot)).toEqual([existing.asset.sha256]);
+
+    await expect(withLocalAssetV2(
+      projectRoot,
+      await authorizeLocalImport(sourcePath, [sourceRoot]),
+      (facts) => MediaAssetSchema.parse({
+        id: "asset-rejected-publication",
+        type: facts.type,
+        path: facts.path,
+        sha256: facts.sha256,
+        probe: facts.probe,
+        provenance: {
+          kind: "upload", originalFilename: facts.originalFilename, importedAt: facts.importedAt,
+          sourceSha256: facts.sha256, importMethod: facts.importMethod, originalProbe: facts.probe,
+        },
+      }),
+      async () => { throw new Error("publication rejected"); },
+      { ffprobePath, ffmpegPath },
+    )).rejects.toThrow("publication rejected");
+
+    expect(await entries(assetRoot)).toEqual([existing.asset.sha256]);
+    expect(await readFile(join(projectRoot, existing.asset.path!))).toEqual(ppmFixture());
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
+
+    const otherPath = join(sourceRoot, "new.ppm");
+    const otherBytes = Buffer.from(ppmFixture());
+    otherBytes[otherBytes.length - 1] = 254;
+    await writeFile(otherPath, otherBytes);
+    await expect(withLocalAssetV2(
+      projectRoot,
+      await authorizeLocalImport(otherPath, [sourceRoot]),
+      (facts) => MediaAssetSchema.parse({
+        id: "asset-rejected-new-content", type: facts.type, path: facts.path, sha256: facts.sha256, probe: facts.probe,
+        provenance: {
+          kind: "upload", originalFilename: facts.originalFilename, importedAt: facts.importedAt,
+          sourceSha256: facts.sha256, importMethod: facts.importMethod, originalProbe: facts.probe,
+        },
+      }),
+      async () => { throw new Error("new content rejected"); },
+      { ffprobePath, ffmpegPath },
+    )).rejects.toThrow("new content rejected");
+    expect(await entries(assetRoot)).toEqual([existing.asset.sha256]);
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
   }, 30_000);
 
   it("rejects sources outside approved roots, hard links, and changed sources before staging", async () => {
