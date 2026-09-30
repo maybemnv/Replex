@@ -74,7 +74,7 @@ describe("LocalProjectService", () => {
     expect(persisted).toMatchObject({ schemaVersion: 2, projectId: created.projectId });
     expect(JSON.stringify(opened)).not.toContain(workspaceRoot);
     expect(service.capabilities().contractVersion).toBe("v1");
-    expect(service.capabilities().assetTypes).toEqual([]);
+    expect(service.capabilities().assetTypes).toEqual(["uploaded_video", "image", "audio"]);
   });
 
   it("returns a strict historical snapshot and replays an idempotent typed batch", async () => {

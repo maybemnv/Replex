@@ -9,6 +9,8 @@ import {
   OpenProjectRequestSchema,
   ProjectCreatedResponseSchema,
   ProjectSnapshotSchema,
+  ImportAssetRequestSchema,
+  type ImportAssetRequest,
   type ApplyOperationsRequest,
   type CapabilitySet,
   type CreateProjectRequest,
@@ -17,7 +19,8 @@ import {
   type ProjectSnapshot,
   type RevisionView,
 } from "../service-contract/index.js";
-import { LocalProjectStore } from "./project-store.js";
+import { LocalProjectStore, LocalProjectStoreError } from "./project-store.js";
+import { importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -71,6 +74,45 @@ export class LocalProjectService {
       createdAt: new Date().toISOString(),
     });
     return publicOutcome(result);
+  }
+
+  async importAsset(requestInput: ImportAssetRequest, source: AuthorizedLocalImport | undefined, signal: AbortSignal, commit?: (apply: () => Promise<OperationBatchResult>) => Promise<OperationBatchResult>): Promise<ApplyOperationsOutcome & { assetId?: string }> {
+    const request = ImportAssetRequestSchema.parse(requestInput);
+    if (request.source.kind !== "local_token") return { ok: false, code: "UNSUPPORTED_OPERATION", detail: "upload sessions are not available in the local executor" };
+    const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
+    const currentProject = await this.store.current(request.projectId);
+    const committedRevisions = new Set(currentProject.revisions.map(({ id }) => id));
+    const prior = (await this.store.operationLog(request.projectId)).filter((record) => record.intentId === intentId && committedRevisions.has(record.resultRevisionId));
+    if (prior.length) {
+      const operation = prior[0]!.input;
+      if (prior.length !== 1 || operation.type !== "import_asset" || prior[0]!.baseRevisionId !== request.baseRevisionId) {
+        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different operation batch");
+      }
+      const result = publicOutcome({ ok: true, project: currentProject, revisionId: prior[0]!.resultRevisionId, operationLog: prior });
+      return { ...result, assetId: operation.asset.id };
+    }
+    if (currentProject.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this import could be applied" };
+    if (!source) throw new LocalImportError("UPLOAD_INTERRUPTED", "the authorized source handle was lost during restart");
+    let committed: OperationBatchResult | undefined;
+    const imported = await importLocalAssetV2(currentProject, await this.store.projectRoot(request.projectId), source, {
+      signal,
+      commit: async (prepared) => {
+        const batch = {
+          baseRevisionId: request.baseRevisionId,
+          actor: "user" as const,
+          intentId,
+          evidenceRefs: [],
+          operations: [{ type: "import_asset" as const, asset: prepared.asset }],
+          createdAt: new Date().toISOString(),
+        };
+        committed = await (commit ?? (() => this.store.applyBatch(request.projectId, batch)))(() => this.store.applyBatch(request.projectId, batch));
+        if (!committed.ok) throw new LocalImportError("IMPORT_REJECTED", `canonical import was rejected: ${committed.detail}`);
+      },
+    });
+    if (!committed) throw new LocalImportError("STORAGE_FAILED", "canonical import did not commit");
+    const result = committed;
+    if (!result.ok) return result;
+    return { ...publicOutcome(result), assetId: imported.asset.id };
   }
 
   capabilities(): CapabilitySet {
@@ -130,15 +172,15 @@ function localCapabilities(): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "apply_operations", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
       "set_transition", "add_text_layer", "update_text_layer", "add_image_layer",
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
-    assetTypes: [],
-    jobKinds: ["apply_operations"],
+    assetTypes: ["uploaded_video", "image", "audio"],
+    jobKinds: ["asset_import", "apply_operations"],
     cancellationSupported: true,
     credentialActions: [],
   });
