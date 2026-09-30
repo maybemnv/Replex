@@ -1,12 +1,12 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status:** PR-A through PR-D, including the native evidence decision and bounded mixed-media composition, are merged to `main` at `2dc4035`; corrective PR #16 closed the retrospective Gate A event-identity finding at `517b4f4`. V2-701 is merged to `main` at `9cfe6cf` with bounded loopback transport, project create/open, and asynchronous semantic-operation jobs. PR #15 merged as `5950983` with one bounded `camera-push.v1` implementation candidate, a verified local motion-to-composition preview, and same-thread follow-up. Gate D remains open: synthetic internal reviews are pipeline-only (0/3 independent human reviews; correction times unmeasured), and representative human quality review is still required. Draft PR #19 proposes V2-702 local import jobs; agent editing, browser capture/recapture, preview/render service jobs, and a complete local workflow remain outstanding on `main`. No live-provider quality, formal POC result, or production readiness is claimed. See the [motion spike report](motion-spike-report.md).
+**Status (1 October 2026):** The local runtime now includes V2-702 immutable video/image/audio import jobs, in addition to project create/open and semantic-operation jobs. The bounded `camera-push.v1` motion path is implemented. A V2-901 core proof adapts an approved browser scene into a content-addressed browser asset, applies one selective replacement revision, and checks unrelated mixed-project state through machine-readable preservation evidence. Gate D remains open: supplied reviews are synthetic only (0/3 independent human reviews; correction times unmeasured). Selective recapture is not exposed as a local executor job, and evidence, agent-edit, browser-capture, preview, and render jobs are not integrated into a complete local workflow. No formal POC result or production readiness is claimed. See the [motion spike report](motion-spike-report.md).
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
 **Contract/discovery decision:** [`../architecture/ADR-007-service-contract-v1.md`](../architecture/ADR-007-service-contract-v1.md)
 
-**Contract timing:** Gurbaaz can mock against the V2-104 wire v1 types and fixtures. The bounded V2-701 HTTP/JSON executor is now on `main`; it still does not provide media import, evidence, agent, browser capture, preview, render, or recapture jobs.
+**Contract timing:** Gurbaaz can mock against the V2-104 wire v1 types and fixtures. V2-702 adds a host-only import authorization bridge and `asset_import` job without changing service-contract v1.
 
 ## Product experience
 
@@ -90,7 +90,13 @@ The merged V2-701 slice exposes a loopback-only HTTP/JSON service. `npm run serv
 
 The HTTP routes are `GET /v1/capabilities`, `POST /v1/projects/create`, `POST /v1/projects/open`, `POST /v1/jobs/apply-operations`, `GET /v1/jobs/:id`, `POST /v1/jobs/cancel`, and `GET /v1/projects/:id/events`. Event responses use the frozen `JobEventPageSchema`: clients advance from the last event sequence, fetch additional pages when `hasMore` is true, and reopen a current snapshot if `cursorExpired` is true. The public error wrapper is `ServiceErrorResponseSchema`.
 
-The live capability set advertises only project create/open, operation application, and cancellation; `apply_operations` is the only implemented job kind. Cancellation is supported while an edit is queued; a running edit reports itself as non-cancellable. There is no import/evidence/agent/capture/verify/render service path yet. Store/runtime modules are internal to the local service; the fixed loopback listener is the single-owner workspace boundary, not a general multi-process lock.
+The local capability set advertises project create/open, operation application, cancellation, and asset import. `apply_operations` and `asset_import` are implemented job kinds. Store/runtime modules are internal to the local service; the fixed loopback listener is the single-owner workspace boundary, not a general multi-process lock.
+
+## Local import jobs (V2-702)
+
+The local host authorizes the selected path through `POST /v1/local/imports/authorize` using the separately versioned `LocalImportAuthorizationRequestV1Schema`; the daemon accepts files only below roots configured at launch with repeated `--import-root <directory>` (the workspace directory is the default). This host-only transport bridge is not a `ServiceCommand` or model-facing tool. It returns an opaque token, filename, and byte count; the absolute path is not returned or persisted in job/project state. The executor holds at most 16 authorized file handles at once. The job is submitted to `POST /v1/jobs/import-asset` using that token.
+
+The one-shot command path accepts `--source-path <file>` and repeated `--import-root <directory>` for `import_asset`; authorization and import run inside the same process. Import tokens are process-bound. On restart, an already committed import is recovered from its operation record; an interrupted, uncommitted job fails with `UPLOAD_INTERRUPTED`. The host must ask the user to reselect the source before starting a new import attempt. The workspace job queue serializes mutations and imports.
 
 ## Agent progress UX
 
@@ -178,17 +184,17 @@ Use the finalized contract types now; wait for a live backend before:
 - implementing preview asset URL lifetime/caching rules;
 - promising browser capture steps or editable provenance fields.
 
-The merged V2-701 slice implements bounded loopback async transport and
-persisted project/job recovery for semantic-operation jobs. Frontend integration
-must still follow the live capability set rather than assuming unavailable media,
-agent, capture, preview, render, or recapture jobs. Broader process supervision,
-cloud targets, real upload tokens, and backend-specific motion controls remain
-deferred until their services advertise the corresponding capabilities.
+The local runtime implements bounded loopback async transport and persisted
+project/job recovery for semantic-operation and asset-import jobs. Frontend
+integration must follow the live capability set and must not assume evidence,
+agent, capture/recapture, verify, preview, or render jobs. Broader process
+supervision, cloud targets, and backend-specific motion controls remain deferred
+until their services advertise those capabilities.
 
 ### Do not assume yet
 
 - that ffmpeg-skill has been adopted rather than evaluated;
-- that any motion preset is implemented or advertised by the current runtime;
+- that `camera-push.v1` or any other motion preset is advertised by the current runtime;
 - that Remotion has been adopted;
 - that cloud rendering or authenticated cloud browser capture exists;
 - that an operation or capability in schemas or mock fixtures is implemented merely

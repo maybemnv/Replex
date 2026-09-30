@@ -66,6 +66,11 @@ export class LocalProjectStore {
 
   constructor(private readonly workspaceRoot: string) {}
 
+  async projectRoot(projectId: string): Promise<string> {
+    const root = await this.root();
+    return this.projectDirectory(root, projectId, false);
+  }
+
   async create(projectInput: ProjectV2, createFingerprint: string, displayName: string): Promise<ProjectV2> {
     const project = ProjectV2Schema.parse(projectInput);
     this.assertProjectIntegrity(project);

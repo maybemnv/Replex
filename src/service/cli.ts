@@ -2,19 +2,21 @@ import { resolve } from "node:path";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalExecutorServer } from "./http.js";
 
-function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: string[] } {
+function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: string[]; importRoots: string[] } {
   let workspaceRoot: string | undefined;
   const allowedOrigins: string[] = [];
+  const importRoots: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
-    if (argument === "--workspace" || argument === "--allow-origin") {
+    if (argument === "--workspace" || argument === "--allow-origin" || argument === "--import-root") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new LocalExecutorError("VALIDATION_FAILED", `${argument} requires a value.`);
       if (argument === "--workspace") {
         if (workspaceRoot) throw new LocalExecutorError("VALIDATION_FAILED", "--workspace may be specified only once.");
         workspaceRoot = resolve(value);
       } else {
-        allowedOrigins.push(value);
+        if (argument === "--allow-origin") allowedOrigins.push(value);
+        else importRoots.push(resolve(value));
       }
       index += 1;
       continue;
@@ -22,7 +24,7 @@ function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: str
     throw new LocalExecutorError("VALIDATION_FAILED", `Unknown service option: ${argument}.`);
   }
   if (!workspaceRoot) throw new LocalExecutorError("VALIDATION_FAILED", "--workspace is required.");
-  return { workspaceRoot, allowedOrigins };
+  return { workspaceRoot, allowedOrigins, importRoots };
 }
 
 async function main(): Promise<void> {
