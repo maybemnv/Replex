@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalExecutor } from "../src/service/executor.js";
+import { LocalProjectService } from "../src/service/local.js";
 import { LocalProjectStore } from "../src/service/project-store.js";
-import { authorizeLocalImport, importLocalAssetV2 } from "../src/import-v2.js";
+import { authorizeLocalImport, importLocalAssetV2, LocalImportError } from "../src/import-v2.js";
 import { ffmpegPath, mediaAvailable } from "./media.js";
 
 describe("local asset import jobs", () => {
@@ -44,6 +45,48 @@ describe("local asset import jobs", () => {
     expect((await executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "import-fixture", projectId: project.projectId, baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename })).id).toBe(submitted.id);
     await expect(executor.submitImportAsset({ contractVersion: "v1", idempotencyKey: "reuse-consumed-token", projectId: project.projectId, baseRevisionId: completed.result.revisionId!, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
     await executor.stop();
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("reserves an authorized source token for the first queued import", async () => {
+    const { executor, project, sourceRoot, sourcePath } = await setup();
+    vi.useFakeTimers();
+    try {
+      const source = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+      const first = await executor.submitImportAsset({
+        contractVersion: "v1", idempotencyKey: "reserve-first-import", projectId: project.projectId,
+        baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename,
+      });
+
+      await expect(executor.submitImportAsset({
+        contractVersion: "v1", idempotencyKey: "reserve-second-import", projectId: project.projectId,
+        baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename,
+      })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect((await executor.getJob(first.id)).state).toBe("queued");
+    } finally {
+      vi.useRealTimers();
+      await executor.stop();
+    }
+  }, 60_000);
+
+  it.skipIf(!mediaAvailable)("reports an import timeout as a failed job", async () => {
+    const { executor, project, sourceRoot, sourcePath } = await setup();
+    const importAsset = vi.spyOn(LocalProjectService.prototype, "importAsset")
+      .mockRejectedValue(new LocalImportError("IMPORT_TIMEOUT", "probe exceeded its deadline"));
+    try {
+      const source = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
+      const submitted = await executor.submitImportAsset({
+        contractVersion: "v1", idempotencyKey: "timeout-import", projectId: project.projectId,
+        baseRevisionId: project.revisionId, source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename,
+      });
+
+      expect(await executor.waitForJob(submitted.id, 30_000)).toMatchObject({
+        state: "failed",
+        error: { code: "EXECUTION_FAILED", retryable: true },
+      });
+    } finally {
+      importAsset.mockRestore();
+      await executor.stop();
+    }
   }, 60_000);
 
   it.skipIf(!mediaAvailable)("cancels a running import without publishing bytes or a revision", async () => {

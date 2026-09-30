@@ -90,6 +90,7 @@ export class LocalJobRuntime {
   private readonly tasks = new Set<Promise<void>>();
   private readonly emitter = new EventEmitter();
   private readonly imports = new Map<string, AuthorizedLocalImport>();
+  private readonly reservedImports = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
 
   constructor(private readonly workspaceRoot: string, private readonly projects: LocalProjectService) {}
@@ -137,6 +138,7 @@ export class LocalJobRuntime {
     for (const controller of this.abortControllers.values()) controller.abort();
     for (const source of this.imports.values()) await closeAuthorizedLocalImport(source);
     this.imports.clear();
+    this.reservedImports.clear();
     await Promise.allSettled([...this.tasks]);
   }
 
@@ -177,8 +179,11 @@ export class LocalJobRuntime {
         if (existing.fingerprint !== fingerprint) throw new LocalExecutorError("IDEMPOTENCY_CONFLICT", "The idempotency key was used for a different request.");
         return { job: existing.job, event: undefined, schedule: false };
       }
-      if (kind === "asset_import" && (!(("source" in request) && this.imports.has(request.source.ref)))) {
-        throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
+      if (kind === "asset_import") {
+        const source = "source" in request ? request.source : undefined;
+        if (!source || !this.imports.has(source.ref) || this.reservedImports.has(source.ref)) {
+          throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
+        }
       }
 
       const createdAt = now();
@@ -197,6 +202,7 @@ export class LocalJobRuntime {
       state.jobs[jobId] = { fingerprint, request, job, commitFenced: false };
       const event = this.appendJobEvent(state, job);
       await this.save(state);
+      if (kind === "asset_import" && "source" in request) this.reservedImports.add(request.source.ref);
       return { job, event, schedule: true };
     });
     if (result.event) this.publish(result.event);
@@ -402,7 +408,7 @@ export class LocalJobRuntime {
     } catch (error) {
       if (!applied) {
         try {
-          if (error instanceof Error && "code" in error && (error.code === "IMPORT_CANCELLED" || error.code === "IMPORT_TIMEOUT")) await this.finishCancelled(jobId);
+          if (error instanceof Error && "code" in error && error.code === "IMPORT_CANCELLED") await this.finishCancelled(jobId);
           else await this.finishFailure(jobId, failureForError(error));
         }
         catch { /* Keep it nonterminal; recovery can retry the durable request. */ }
@@ -413,6 +419,7 @@ export class LocalJobRuntime {
       if (importToken) {
         const source = this.imports.get(importToken);
         this.imports.delete(importToken);
+        this.reservedImports.delete(importToken);
         if (source) await closeAuthorizedLocalImport(source).catch(() => undefined);
       }
     }
@@ -629,7 +636,8 @@ function failureForError(error: unknown): ContractError {
     if (code === "UPLOAD_INTERRUPTED") return { code, message: "The local import was interrupted before its source could be read.", retryable: false };
     if (code === "SOURCE_NOT_AUTHORIZED") return { code: "UNAUTHORIZED", message: "The local import token is not authorized.", retryable: false };
     if (code === "SOURCE_CHANGED") return { code: "ASSET_CHANGED", message: "The selected media changed before import completed.", retryable: false };
-    if (code === "IMPORT_CANCELLED" || code === "IMPORT_TIMEOUT") return { code: "CANCELLATION", message: "The local import was cancelled.", retryable: false };
+    if (code === "IMPORT_CANCELLED") return { code: "CANCELLATION", message: "The local import was cancelled.", retryable: false };
+    if (code === "IMPORT_TIMEOUT") return { code: "EXECUTION_FAILED", message: "The local media import exceeded its time limit.", retryable: true };
     if (code === "MEDIA_PROBE_FAILED" || code === "MEDIA_DECODE_FAILED" || code === "UNSUPPORTED_MEDIA") return { code: "ASSET_UNSUPPORTED", message: "The selected media is unsupported or invalid.", retryable: false };
   }
   if (error instanceof LocalExecutorError) {
