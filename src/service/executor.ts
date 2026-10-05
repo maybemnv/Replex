@@ -13,6 +13,7 @@ import type {
   ProjectSnapshot,
   RenderFinalRequest,
   RenderPreviewRequest,
+  RequestAgentEditRequest,
   ServiceCommand,
 } from "../service-contract/index.js";
 import { authorizeLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
@@ -24,19 +25,21 @@ import {
   OpenProjectRequestSchema,
   RenderFinalRequestSchema,
   RenderPreviewRequestSchema,
+  RequestAgentEditRequestSchema,
 } from "../service-contract/index.js";
+import type { V2AgentModelClient } from "../agent-v2.js";
 import { LocalJobRuntime } from "./local-jobs.js";
 import { LocalProjectService, type MediaToolOptions } from "./local.js";
 
-export type LocalExecutorCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "render_preview" | "render_final" | "cancel_job">;
+export type LocalExecutorCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "request_agent_edit" | "render_preview" | "render_final" | "cancel_job">;
 
 export class LocalExecutor {
   private readonly projects: LocalProjectService;
   private readonly jobs: LocalJobRuntime;
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions }) {
-    this.projects = new LocalProjectService(options);
-    this.jobs = new LocalJobRuntime(options.workspaceRoot, this.projects);
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentModel?: V2AgentModelClient }) {
+    this.projects = new LocalProjectService({ ...options, agentEnabled: options.agentModel !== undefined });
+    this.jobs = new LocalJobRuntime(options.workspaceRoot, this.projects, options.agentModel);
   }
 
   start(): Promise<void> {
@@ -67,6 +70,10 @@ export class LocalExecutor {
 
   submitImportAsset(request: ImportAssetRequest): Promise<JobView> {
     return this.jobs.submitImportAsset(request);
+  }
+
+  submitAgentEdit(request: RequestAgentEditRequest): Promise<JobView> {
+    return this.jobs.submitAgentEdit(request);
   }
 
   submitRenderPreview(request: RenderPreviewRequest): Promise<JobView> {
@@ -107,6 +114,7 @@ export class LocalExecutor {
       case "open_project": return this.openProject(OpenProjectRequestSchema.parse(input));
       case "apply_operations": return this.submitApplyOperations(ApplyOperationsRequestSchema.parse(input));
       case "import_asset": return this.submitImportAsset(ImportAssetRequestSchema.parse(input));
+      case "request_agent_edit": return this.submitAgentEdit(RequestAgentEditRequestSchema.parse(input));
       case "render_preview": return this.submitRenderPreview(RenderPreviewRequestSchema.parse(input));
       case "render_final": return this.submitRenderFinal(RenderFinalRequestSchema.parse(input));
       case "cancel_job": return this.cancelJob(CancelJobRequestSchema.parse(input));

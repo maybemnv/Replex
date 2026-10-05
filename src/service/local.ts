@@ -56,10 +56,12 @@ export interface MediaToolOptions { ffmpegPath?: string; ffprobePath?: string }
 export class LocalProjectService {
   private readonly store: LocalProjectStore;
   private readonly media: MediaToolOptions;
+  private readonly agentEnabled: boolean;
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean }) {
     this.store = new LocalProjectStore(options.workspaceRoot);
     this.media = options.media ?? {};
+    this.agentEnabled = options.agentEnabled ?? false;
   }
 
   async createProject(requestInput: CreateProjectRequest): Promise<ProjectCreatedResponse> {
@@ -87,7 +89,7 @@ export class LocalProjectService {
   async openProject(requestInput: OpenProjectRequest): Promise<ProjectSnapshot> {
     const request = OpenProjectRequestSchema.parse(requestInput);
     const { current, selected } = await this.store.currentAndRevision(request.projectId, request.revisionId);
-    return snapshot(current, selected);
+    return snapshot(current, selected, this.capabilities());
   }
 
   async applyOperations(requestInput: ApplyOperationsRequest): Promise<ApplyOperationsOutcome> {
@@ -248,7 +250,7 @@ export class LocalProjectService {
   }
 
   capabilities(): CapabilitySet {
-    return localCapabilities();
+    return localCapabilities(this.agentEnabled);
   }
 }
 
@@ -295,7 +297,7 @@ function summary(project: ProjectV2) {
   };
 }
 
-function snapshot(current: ProjectV2, selected: ProjectV2): ProjectSnapshot {
+function snapshot(current: ProjectV2, selected: ProjectV2, capabilities: CapabilitySet): ProjectSnapshot {
   const selectedRevisionId = selected.currentRevisionId;
   const assets = Object.values(selected.assets).map(({ id, type, sha256, probe, provenance }) => ({ id, type, sha256, probe, provenance }));
   const renderArtifacts = selected.outputs
@@ -311,15 +313,15 @@ function snapshot(current: ProjectV2, selected: ProjectV2): ProjectSnapshot {
     revisions: current.revisions.map((revision) => ({ ...revision, isCurrent: revision.id === current.currentRevisionId })),
     verification: selected.verification,
     renderArtifacts,
-    capabilities: localCapabilities(),
+    capabilities,
   });
 }
 
-function localCapabilities(): CapabilitySet {
+function localCapabilities(agentEnabled: boolean): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", "render_preview", "render_final", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), "render_preview", "render_final", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
@@ -327,7 +329,7 @@ function localCapabilities(): CapabilitySet {
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
     assetTypes: ["uploaded_video", "image", "audio"],
-    jobKinds: ["asset_import", "apply_operations", "render_preview", "render_final"],
+    jobKinds: ["asset_import", "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), "render_preview", "render_final"],
     cancellationSupported: true,
     credentialActions: [],
   });
