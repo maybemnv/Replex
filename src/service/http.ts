@@ -7,18 +7,24 @@ import {
   JobEventPageSchema,
   ServiceErrorResponseSchema,
   type ContractError,
-  type ServiceCommand,
 } from "../service-contract/index.js";
 import { LocalImportAuthorizationRequestV1Schema, LocalImportAuthorizationResponseV1Schema } from "../service-contract/local-host-v1.js";
 import { IdSchema } from "../schema.js";
 import { LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
-import { LocalExecutor } from "./executor.js";
+import { LocalExecutor, type LocalExecutorCommand } from "./executor.js";
+import type { MediaToolOptions } from "./local.js";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalProjectStoreError } from "./project-store.js";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const JobLookupSchema = z.object({ jobId: IdSchema }).strict();
+const JOB_ROUTES: Partial<Record<string, LocalExecutorCommand>> = {
+  "/v1/jobs/apply-operations": "apply_operations",
+  "/v1/jobs/import-asset": "import_asset",
+  "/v1/jobs/render-preview": "render_preview",
+  "/v1/jobs/render-final": "render_final",
+};
 
 export class LocalExecutorServer {
   private readonly executor: LocalExecutor;
@@ -35,10 +41,10 @@ export class LocalExecutorServer {
   private startPromise?: Promise<{ url: string; token: string }>;
   private stopPromise?: Promise<void>;
 
-  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[] }) {
+  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions }) {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.importRoots = (options.importRoots?.length ? options.importRoots : [this.workspaceRoot]).map((root) => resolve(root));
-    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot });
+    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media });
     try { this.allowedOrigins = new Set((options.allowedOrigins ?? []).map(localOrigin)); }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "Only explicit local frontend origins are allowed."); }
   }
@@ -121,7 +127,7 @@ export class LocalExecutorServer {
     this.closing = false;
   }
 
-  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
+  dispatch(command: LocalExecutorCommand, input: unknown): Promise<unknown> {
     if (!this.ready || this.closing) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
     return this.executor.dispatch(command, input);
   }
@@ -217,14 +223,10 @@ export class LocalExecutorServer {
       sendJson(response, 200, await this.dispatch("open_project", body));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/v1/jobs/apply-operations") {
+    const jobCommand = JOB_ROUTES[url.pathname];
+    if (request.method === "POST" && jobCommand) {
       const body = await readJson(request);
-      sendJson(response, 202, await this.dispatch("apply_operations", body));
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/v1/jobs/import-asset") {
-      const body = await readJson(request);
-      sendJson(response, 202, await this.dispatch("import_asset", body));
+      sendJson(response, 202, await this.dispatch(jobCommand, body));
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/jobs/")) {
