@@ -20,6 +20,27 @@ describe("LocalExecutorServer", () => {
     extraRoots.length = 0;
   });
 
+  it("routes render preview and final job submissions", async () => {
+    workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-render-"));
+    server = new LocalExecutorServer({ workspaceRoot });
+    const session = await server.start();
+    const call = (path: string, body: unknown) => fetch(session.url + path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const created = await (await call("/projects/create", { contractVersion: "v1", idempotencyKey: "http-render-create", name: "HTTP render" })).json() as { projectId: string; revisionId: string };
+    const pin = { contractVersion: "v1", projectId: created.projectId, revisionId: created.revisionId };
+
+    const preview = await call("/jobs/render-preview", { ...pin, idempotencyKey: "http-preview" });
+    expect(preview.status).toBe(202);
+    expect(await preview.json()).toMatchObject({ kind: "render_preview", revisionId: created.revisionId, state: "queued" });
+
+    const missingVerification = await call("/jobs/render-final", { ...pin, idempotencyKey: "http-final" });
+    expect(missingVerification.status).toBe(400);
+    expect(await missingVerification.json()).toMatchObject({ error: { code: "VALIDATION_FAILED" } });
+  });
+
   it("serves typed local commands with loopback binding, bearer auth, CORS, jobs, and event replay", async () => {
     workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-"));
     server = new LocalExecutorServer({ workspaceRoot, allowedOrigins: ["http://localhost:5173"] });
