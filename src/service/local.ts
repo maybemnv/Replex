@@ -225,7 +225,7 @@ function localCapabilities(): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", "render_preview", "render_final", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
@@ -233,7 +233,7 @@ function localCapabilities(): CapabilitySet {
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
     assetTypes: ["uploaded_video", "image", "audio"],
-    jobKinds: ["asset_import", "apply_operations"],
+    jobKinds: ["asset_import", "apply_operations", "render_preview", "render_final"],
     cancellationSupported: true,
     credentialActions: [],
   });
