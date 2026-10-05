@@ -1,7 +1,8 @@
 import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ContractError, ServiceCommand } from "../service-contract/index.js";
+import type { ContractError } from "../service-contract/index.js";
+import type { LocalExecutorCommand } from "./executor.js";
 import { ImportAssetRequestSchema, ServiceErrorResponseSchema } from "../service-contract/index.js";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalProjectStoreError } from "./project-store.js";
@@ -9,7 +10,9 @@ import { LocalExecutorServer } from "./http.js";
 import { LocalImportError } from "../import-v2.js";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
-type LocalCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">;
+type LocalCommand = LocalExecutorCommand;
+const COMMANDS: readonly LocalCommand[] = ["create_project", "open_project", "import_asset", "apply_operations", "render_preview", "render_final", "cancel_job"];
+const JOB_COMMANDS: ReadonlySet<LocalCommand> = new Set(["import_asset", "apply_operations", "render_preview", "render_final"]);
 interface CliIO { stdout(text: string): void; stderr(text: string): void }
 
 function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalCommand; inputPath: string; sourcePath?: string; importRoots: string[] } {
@@ -23,7 +26,7 @@ function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalComma
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new LocalExecutorError("VALIDATION_FAILED", `${key} requires a value.`);
     if (key === "--workspace" && !workspaceRoot) workspaceRoot = resolve(value);
-    else if (key === "--command" && !command && ["create_project", "open_project", "import_asset", "apply_operations", "cancel_job"].includes(value)) command = value as LocalCommand;
+    else if (key === "--command" && !command && COMMANDS.includes(value as LocalCommand)) command = value as LocalCommand;
     else if (key === "--input" && !inputPath) inputPath = resolve(value);
     else if (key === "--source-path" && !sourcePath) sourcePath = resolve(value);
     else if (key === "--import-root") importRoots.push(resolve(value));
@@ -85,7 +88,7 @@ export async function runServiceCommandCli(argv: string[], io: CliIO = {
     }
     let result = await server.dispatch(args.command, request);
     let exitCode = 0;
-    if (args.command === "apply_operations" || args.command === "import_asset") {
+    if (JOB_COMMANDS.has(args.command)) {
       const job = result as { id: string };
       result = await server.waitForJob(job.id, 600_000);
       if ((result as { state?: string }).state !== "succeeded") exitCode = 1;
