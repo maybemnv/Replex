@@ -1,47 +1,11 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { LocalExecutor } from "../src/service/executor.js";
-import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
+import { mediaAvailable } from "./media.js";
+import { projectWithClip } from "./service-fixture.js";
 
 const sha256 = (value: Buffer): string => createHash("sha256").update(value).digest("hex");
-
-/** Shared real-media setup: a 1s fixture imported and placed on the video track. */
-export async function projectWithClip(roots: string[], prefix: string) {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), `${prefix}-workspace-`));
-  const sourceRoot = await mkdtemp(join(tmpdir(), `${prefix}-source-`));
-  roots.push(workspaceRoot, sourceRoot);
-  const sourcePath = join(sourceRoot, "walkthrough.mp4");
-  const fixture = spawnSync(ffmpegPath, [
-    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-    "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=1",
-    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", sourcePath,
-  ], { windowsHide: true, shell: false, timeout: 30_000 });
-  expect(fixture.status, fixture.stderr?.toString()).toBe(0);
-
-  const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath } });
-  await executor.start();
-  const project = await executor.createProject({ contractVersion: "v1", idempotencyKey: `${prefix}-create`, name: "Render jobs", brief: { targetDurationMs: 1000 } });
-  const source = await executor.authorizeLocalImport(sourcePath, [sourceRoot]);
-  const imported = await executor.waitForJob((await executor.submitImportAsset({
-    contractVersion: "v1", idempotencyKey: `${prefix}-import`, projectId: project.projectId, baseRevisionId: project.revisionId,
-    source: { kind: "local_token", ref: source.token }, declaredFilename: source.filename,
-  })).id, 60_000);
-  if (imported.state !== "succeeded") throw new Error("fixture import failed: " + JSON.stringify(imported));
-  const placed = await executor.waitForJob((await executor.submitApplyOperations({
-    contractVersion: "v1", idempotencyKey: `${prefix}-place`, projectId: project.projectId, baseRevisionId: imported.result.revisionId!, actor: "user",
-    operations: [{ type: "create_clip", clip: {
-      id: "clip-walkthrough", assetId: imported.result.assetId!, trackId: "track-video", timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 1000,
-      speed: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 }, opacity: 1, audioGainDb: 0, muted: false,
-    } }],
-  })).id, 30_000);
-  if (placed.state !== "succeeded") throw new Error("fixture clip failed: " + JSON.stringify(placed));
-  return { executor, workspaceRoot, projectId: project.projectId, revisionId: placed.result.revisionId!, assetId: imported.result.assetId! };
-}
 
 describe("local render jobs", () => {
   const roots: string[] = [];
