@@ -6,7 +6,7 @@ import { chmod, link, lstat, mkdir, mkdtemp, realpath, rm, stat, unlink, writeFi
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { assertIssuedMotionArtifactHandle, buildMotionExecutionJobV1, resolveMotionArtifactHandle, type MotionArtifactHandle } from "./motion-v2.js";
+import { assertIssuedMotionArtifactHandle, buildMotionExecutionJobV1, cleanupMotionArtifact, executeMotionExecutionJob, resolveMotionArtifactHandle, type MotionArtifactHandle } from "./motion-v2.js";
 import { semanticHashV2 } from "./operations-v2.js";
 import { resolveRenderFont } from "./render.js";
 import { AssetHandleSchema, ProjectV2Schema, RenderOutputSchemaV2, TransitionV2Schema, VerificationRefSchema, type AssetHandle, type MediaProbeV2, type ProjectV2 } from "./schema-v2.js";
@@ -1129,5 +1129,36 @@ async function executeFrozenMediaJob(
     return { preflight, artifact };
   } finally {
     await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Renders the project's current revision through the bounded backends: camera-push intermediates are
+ * regenerated per call (their issued handles are single-job) and always cleaned up.
+ */
+export async function renderCurrentRevisionV2(
+  projectInput: ProjectV2,
+  authorization: MediaExecutionAuthorization,
+  options: MediaExecutionOptions = {},
+): Promise<{ artifact: RenderArtifactV2; renderJobHash: string }> {
+  const project = ProjectV2Schema.parse(projectInput);
+  const handles = authorization.resolvedHandles.map(({ assetId, sha256, ref }) => ({ assetId, sha256, ref }));
+  const presets = project.composition.motionPresets ?? [];
+  if (presets.length === 0) {
+    const job = buildCompositionExecutionJob(project, handles);
+    return { artifact: (await executeMediaExecutionJob(job, authorization, options)).artifact, renderJobHash: job.jobHash };
+  }
+  const motionHandles: MotionArtifactHandle[] = [];
+  try {
+    for (const { targetId } of presets) {
+      const target = project.composition.clips.find(({ id }) => id === targetId);
+      const source = handles.find(({ assetId }) => assetId === target?.assetId);
+      if (!source) throw new Error("motion target has no authorized source handle");
+      motionHandles.push((await executeMotionExecutionJob(buildMotionExecutionJobV1(project, targetId, source), authorization, options)).handle);
+    }
+    const job = buildCompositionExecutionJobV3(project, handles, motionHandles);
+    return { artifact: (await executeCompositionExecutionJobV3(job, motionHandles, authorization, options)).artifact, renderJobHash: job.jobHash };
+  } finally {
+    for (const handle of motionHandles) await cleanupMotionArtifact(handle).catch(() => undefined);
   }
 }
