@@ -44,6 +44,28 @@ describe("local executor command CLI parity", () => {
     expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "render_final", state: "failed", error: { code: "VERIFICATION_FAILED" } });
   });
 
+  it("rejects agent edits unless a model is explicitly enabled", async () => {
+    temporaryRoot = await mkdtemp(join(tmpdir(), "replex-local-cli-agent-"));
+    const workspace = join(temporaryRoot, "workspace");
+    const inputPath = join(temporaryRoot, "request.json");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const run = async (command: string, input: unknown) => {
+      await writeFile(inputPath, JSON.stringify(input), "utf8");
+      return runServiceCommandCli(["--workspace", workspace, "--command", command, "--input", inputPath], {
+        stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text),
+      });
+    };
+    expect(await run("create_project", { contractVersion: "v1", idempotencyKey: "cli-agent-create", name: "CLI agent" })).toBe(0);
+    const created = JSON.parse(stdout.pop()!) as { projectId: string; revisionId: string };
+
+    expect(await run("request_agent_edit", {
+      contractVersion: "v1", idempotencyKey: "cli-agent", projectId: created.projectId,
+      baseRevisionId: created.revisionId, prompt: "Tighten the intro", preview: true,
+    })).toBe(1);
+    expect(JSON.parse(stderr.pop()!)).toMatchObject({ error: { code: "CAPABILITY_UNAVAILABLE" } });
+  });
+
   it("applies the same service requests through CLI and loopback transport", async () => {
     temporaryRoot = await mkdtemp(join(tmpdir(), "replex-local-cli-parity-"));
     const cliWorkspace = join(temporaryRoot, "cli");
