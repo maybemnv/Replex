@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { canonicalJson } from "../canonical-json.js";
 import { applyOperationBatch, createProjectV2, type OperationBatchResult } from "../operations-v2.js";
 import type { ProjectV2 } from "../schema-v2.js";
@@ -18,9 +19,14 @@ import {
   type ProjectCreatedResponse,
   type ProjectSnapshot,
   type RevisionView,
+  type RenderArtifactView,
+  type RenderFinalRequest,
+  type RenderPreviewRequest,
 } from "../service-contract/index.js";
 import { LocalProjectStore, LocalProjectStoreError } from "./project-store.js";
 import { importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
+import { renderCurrentRevisionV2, type MediaExecutionAuthorization } from "../render-v2.js";
+import { semanticHashV2 } from "../operations-v2.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -28,11 +34,20 @@ export type ApplyOperationsOutcome =
   | { ok: true; revisionId: string; operationIds: string[]; revision: RevisionView }
   | { ok: false; code: "STALE_REVISION" | "INVALID_OPERATION" | "UNSUPPORTED_OPERATION"; detail: string };
 
+export type RenderOutcome =
+  | { ok: true; revisionId: string; outputId: string; artifact: RenderArtifactView }
+  | { ok: false; code: "STALE_REVISION" | "VERIFICATION_REQUIRED" | "RENDER_FAILED"; detail: string };
+
+/** Host-owned media tool paths; motion presets require absolute executables. */
+export interface MediaToolOptions { ffmpegPath?: string; ffprobePath?: string }
+
 export class LocalProjectService {
   private readonly store: LocalProjectStore;
+  private readonly media: MediaToolOptions;
 
-  constructor(options: { workspaceRoot: string }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions }) {
     this.store = new LocalProjectStore(options.workspaceRoot);
+    this.media = options.media ?? {};
   }
 
   async createProject(requestInput: CreateProjectRequest): Promise<ProjectCreatedResponse> {
@@ -116,9 +131,48 @@ export class LocalProjectService {
     return { ...publicOutcome(result), assetId: imported.asset.id };
   }
 
+  /** Renders a pinned revision; renders register only on the current revision, final renders require a passed verification. */
+  async renderRevision(request: RenderPreviewRequest | RenderFinalRequest, signal: AbortSignal): Promise<RenderOutcome> {
+    const { current } = await this.store.currentAndRevision(request.projectId, request.revisionId);
+    if (current.currentRevisionId !== request.revisionId) return { ok: false, code: "STALE_REVISION", detail: "renders are registered only on the current revision" };
+    if ("verificationRefId" in request && !current.verification.refs.some(({ id, revisionId, status }) =>
+      id === request.verificationRefId && revisionId === request.revisionId && status === "passed")) {
+      return { ok: false, code: "VERIFICATION_REQUIRED", detail: "final render requires a passed verification of this revision" };
+    }
+    let rendered: Awaited<ReturnType<typeof renderCurrentRevisionV2>>;
+    try {
+      rendered = await renderCurrentRevisionV2(current, await this.mediaAuthorization(current), { ...this.media, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { ok: false, code: "RENDER_FAILED", detail: "the bounded renderer could not produce a verified output" };
+    }
+    const registered = await this.store.registerRender(request.projectId, rendered.artifact);
+    const output = registered.outputs.find(({ outputId }) => outputId === rendered.artifact.outputId)!;
+    return { ok: true, revisionId: request.revisionId, outputId: output.outputId, artifact: artifactView(output) };
+  }
+
+  /** Resolves every stored asset for one render; the revision check re-reads canonical state. */
+  async mediaAuthorization(project: ProjectV2): Promise<MediaExecutionAuthorization> {
+    const projectRoot = await this.store.projectRoot(project.projectId);
+    return {
+      projectRoot,
+      resolvedHandles: Object.values(project.assets).filter((asset) => asset.path).map((asset) => ({
+        assetId: asset.id, sha256: asset.sha256, ref: asset.path!, path: join(projectRoot, ...asset.path!.split("/")),
+      })),
+      isRevisionCurrent: async (revisionId, revisionHash) => {
+        const latest = await this.store.current(project.projectId);
+        return latest.currentRevisionId === revisionId && semanticHashV2(latest) === revisionHash;
+      },
+    };
+  }
+
   capabilities(): CapabilitySet {
     return localCapabilities();
   }
+}
+
+function artifactView({ outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId }: ProjectV2["outputs"][number]): RenderArtifactView {
+  return { outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId };
 }
 
 function publicOutcome(result: OperationBatchResult): ApplyOperationsOutcome {
@@ -152,9 +206,7 @@ function snapshot(current: ProjectV2, selected: ProjectV2): ProjectSnapshot {
   const assets = Object.values(selected.assets).map(({ id, type, sha256, probe, provenance }) => ({ id, type, sha256, probe, provenance }));
   const renderArtifacts = selected.outputs
     .filter((artifact) => artifact.sourceRevisionId === selectedRevisionId)
-    .map(({ outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId }) => ({
-      outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId,
-    }));
+    .map(artifactView);
 
   return ProjectSnapshotSchema.parse({
     summary: summary(current),
