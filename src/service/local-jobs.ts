@@ -16,7 +16,9 @@ import {
   JobViewSchema,
   RenderFinalRequestSchema,
   RenderPreviewRequestSchema,
+  RequestAgentEditRequestSchema,
   type ApplyOperationsRequest,
+  type RequestAgentEditRequest,
   type RenderArtifactView,
   type RenderFinalRequest,
   type RenderPreviewRequest,
@@ -29,7 +31,8 @@ import {
   type JobView,
   type RevisionView,
 } from "../service-contract/index.js";
-import { LocalProjectService } from "./local.js";
+import { DEFAULT_AGENT_THREAD_ID, LocalProjectService } from "./local.js";
+import type { V2AgentModelClient, V2ConversationThread } from "../agent-v2.js";
 import { LocalProjectStoreError } from "./project-store.js";
 import { closeAuthorizedLocalImport, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 import type { OperationBatchResult } from "../operations-v2.js";
@@ -40,7 +43,7 @@ const MAX_AUTHORIZED_IMPORTS = 16;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema]),
+  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema, RequestAgentEditRequestSchema]),
   job: JobViewSchema,
   commitFenced: z.boolean().default(false),
 }).strict();
@@ -49,21 +52,32 @@ const CancelKeySchema = z.object({
   projectId: IdSchema,
   jobId: IdSchema,
 }).strict();
+const ThreadSchema = z.object({
+  threadId: IdSchema,
+  projectId: IdSchema,
+  currentRevisionId: IdSchema,
+  currentRevisionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  previousResponseId: IdSchema.max(128).optional(),
+  operationIds: z.array(IdSchema).max(10_000),
+}).strict();
 const JobStateSchema = z.object({
   version: z.literal(1),
   jobs: z.record(IdSchema, JobRecordSchema),
   cancelKeys: z.record(IdSchema, CancelKeySchema),
   nextSequence: z.record(IdSchema, z.number().int().nonnegative()),
   events: z.array(JobEventSchema).max(MAX_JOB_EVENTS),
+  /** Host-owned agent conversations keyed by project and thread. */
+  threads: z.record(z.string().max(512), ThreadSchema).default({}),
 }).strict();
 type JobState = z.infer<typeof JobStateSchema>;
 type JobRecord = z.infer<typeof JobRecordSchema>;
-type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest;
+type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest | RequestAgentEditRequest;
 type RenderJobKind = "render_preview" | "render_final";
-type JobKind = "asset_import" | "apply_operations" | RenderJobKind;
+type JobKind = "asset_import" | "apply_operations" | "agent_edit" | RenderJobKind;
 const RUNNING_STAGE = {
   asset_import: "importing",
   apply_operations: "applying_revision",
+  agent_edit: "planning",
   render_preview: "rendering_preview",
   render_final: "rendering_final",
 } as const;
@@ -75,17 +89,20 @@ interface JobSuccess {
   assetId?: string;
   outputId?: string;
   artifact?: RenderArtifactView;
+  thread?: V2ConversationThread;
 }
 
+const threadKey = (projectId: string, threadId: string): string => `${projectId}:${threadId}`;
+
 export class LocalExecutorError extends Error {
-  constructor(readonly code: "VALIDATION_FAILED" | "STORAGE_FAILED" | "IDEMPOTENCY_CONFLICT" | "JOB_NOT_FOUND" | "JOB_NOT_CANCELLABLE" | "EXECUTOR_OFFLINE" | "EXECUTION_FAILED", message: string) {
+  constructor(readonly code: "VALIDATION_FAILED" | "STORAGE_FAILED" | "IDEMPOTENCY_CONFLICT" | "JOB_NOT_FOUND" | "JOB_NOT_CANCELLABLE" | "EXECUTOR_OFFLINE" | "EXECUTION_FAILED" | "CAPABILITY_UNAVAILABLE", message: string) {
     super(message);
     this.name = "LocalExecutorError";
   }
 }
 
 function emptyState(): JobState {
-  return { version: 1, jobs: {}, cancelKeys: {}, nextSequence: {}, events: [] };
+  return { version: 1, jobs: {}, cancelKeys: {}, nextSequence: {}, events: [], threads: {} };
 }
 
 function terminal(job: JobView): boolean {
@@ -115,7 +132,7 @@ export class LocalJobRuntime {
   private readonly reservedImports = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
 
-  constructor(private readonly workspaceRoot: string, private readonly projects: LocalProjectService) {}
+  constructor(private readonly workspaceRoot: string, private readonly projects: LocalProjectService, private readonly agentModel?: V2AgentModelClient) {}
 
   async start(): Promise<void> {
     if (this.started) return;
@@ -190,6 +207,14 @@ export class LocalJobRuntime {
     if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
 
     return this.submitJob(request, "apply_operations");
+  }
+
+  async submitAgentEdit(requestInput: RequestAgentEditRequest): Promise<JobView> {
+    const parsed = RequestAgentEditRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The agent-edit request is invalid.");
+    if (!this.agentModel) throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No agent model is configured for this local executor.");
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(parsed.data, "agent_edit");
   }
 
   async submitRender(kind: RenderJobKind, requestInput: RenderPreviewRequest | RenderFinalRequest): Promise<JobView> {
@@ -414,7 +439,10 @@ export class LocalJobRuntime {
         });
         const event = this.appendJobEvent(state, record.job);
         await this.save(state);
-        return { event, cancelled: false as const, request: record.request, kind: record.job.kind };
+        const thread = record.job.kind === "agent_edit" && "prompt" in record.request
+          ? state.threads[threadKey(record.job.projectId, record.request.threadId ?? DEFAULT_AGENT_THREAD_ID)]
+          : undefined;
+        return { event, cancelled: false as const, request: record.request, kind: record.job.kind, thread };
       });
       if (start.event) this.publish(start.event);
       if (start.request && "source" in start.request && start.request.source.kind === "local_token") {
@@ -428,15 +456,22 @@ export class LocalJobRuntime {
         ? await this.projects.importAsset(start.request as ImportAssetRequest, importToken ? this.imports.get(importToken) : undefined, controller.signal, (apply) => this.prepareImportCommit(jobId, apply))
         : start.kind === "apply_operations"
           ? await this.projects.applyOperations(start.request as ApplyOperationsRequest)
-          : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, controller.signal);
+          : start.kind === "agent_edit"
+            ? await this.runAgentEdit(start.request as RequestAgentEditRequest, start.thread, controller.signal)
+            : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, controller.signal);
       if (!result.ok) {
         await this.finishFailure(jobId, failureFor(result.code));
         return;
       }
       applied = true;
-      await this.finishSuccess(jobId, "artifact" in result
-        ? { revisionId: result.revisionId, outputId: result.outputId, artifact: result.artifact }
-        : { revisionId: result.revisionId, revision: result.revision, ...("assetId" in result && typeof result.assetId === "string" ? { assetId: result.assetId } : {}) });
+      await this.finishSuccess(jobId, {
+        revisionId: result.revisionId,
+        ...("revision" in result && result.revision ? { revision: result.revision } : {}),
+        ...("assetId" in result && typeof result.assetId === "string" ? { assetId: result.assetId } : {}),
+        ...("outputId" in result && result.outputId ? { outputId: result.outputId } : {}),
+        ...("artifact" in result && result.artifact ? { artifact: result.artifact } : {}),
+        ...("thread" in result && result.thread ? { thread: result.thread } : {}),
+      });
     } catch (error) {
       if (!applied) {
         try {
@@ -455,6 +490,11 @@ export class LocalJobRuntime {
         if (source) await closeAuthorizedLocalImport(source).catch(() => undefined);
       }
     }
+  }
+
+  private runAgentEdit(request: RequestAgentEditRequest, thread: V2ConversationThread | undefined, signal: AbortSignal) {
+    if (!this.agentModel) throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No agent model is configured for this local executor.");
+    return this.projects.agentEdit(request, thread, this.agentModel, signal);
   }
 
   private async prepareImportCommit(jobId: string, apply: () => Promise<OperationBatchResult>): Promise<OperationBatchResult> {
@@ -479,7 +519,7 @@ export class LocalJobRuntime {
   }
 
   private async finishSuccess(jobId: string, success: JobSuccess): Promise<void> {
-    const { revisionId, revision, assetId, outputId, artifact } = success;
+    const { revisionId, revision, assetId, outputId, artifact, thread } = success;
     const events = await this.exclusive(async (state) => {
       const record = state.jobs[jobId];
       if (!record || record.job.state !== "running") return [];
@@ -510,6 +550,7 @@ export class LocalJobRuntime {
         result: { revisionId, ...(assetId ? { assetId } : {}), ...(outputId ? { outputId } : {}) },
       });
       derived.forEach((event) => this.appendEvent(state, event));
+      if (thread) state.threads[threadKey(thread.projectId, thread.threadId)] = thread;
       const jobEvent = this.appendJobEvent(state, record.job);
       await this.save(state);
       return [...derived, jobEvent];
@@ -668,7 +709,11 @@ export class LocalJobRuntime {
 function failureFor(code: string): ContractError {
   if (code === "STALE_REVISION") return { code: "STALE_JOB_INPUT", message: "The project changed before this edit could be applied.", retryable: false };
   if (code === "VERIFICATION_REQUIRED") return { code: "VERIFICATION_FAILED", message: "A final render requires a passed verification of this revision.", retryable: false };
-  if (code === "RENDER_FAILED") return { code: "RENDER_FAILED", message: "The bounded renderer could not produce a verified output.", retryable: true };
+  if (code === "RENDER_FAILED" || code === "PREVIEW_FAILED") return { code: "RENDER_FAILED", message: "The bounded renderer could not produce a verified output.", retryable: true };
+  if (code === "BUDGET_EXCEEDED") return { code: "AGENT_BUDGET_EXCEEDED", message: "The agent exhausted its bounded budget for this request.", retryable: false };
+  if (code === "INSPECTION_FAILED") return { code: "INSUFFICIENT_EVIDENCE", message: "The agent could not inspect enough project evidence.", retryable: false };
+  if (code === "STALE_THREAD") return { code: "STALE_JOB_INPUT", message: "The conversation no longer matches the project revision.", retryable: false };
+  if (code === "MODEL_ERROR" || code === "TIMEOUT" || code === "CANCELLED") return { code: "EXECUTION_FAILED", message: "The agent request could not be completed.", retryable: true };
   if (code === "UNSUPPORTED_OPERATION") return { code: "CAPABILITY_UNAVAILABLE", message: "This operation is not available in the local executor.", retryable: false, requiredCapability: "apply_operations" };
   return { code: "OPERATION_REJECTED", message: "The canonical reducer rejected the operation batch.", retryable: false };
 }
