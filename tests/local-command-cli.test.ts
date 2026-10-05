@@ -23,6 +23,27 @@ describe("local executor command CLI parity", () => {
     temporaryRoot = undefined;
   });
 
+  it("waits for render jobs and reports a failed final render with a nonzero exit", async () => {
+    temporaryRoot = await mkdtemp(join(tmpdir(), "replex-local-cli-render-"));
+    const workspace = join(temporaryRoot, "workspace");
+    const inputPath = join(temporaryRoot, "request.json");
+    const stdout: string[] = [];
+    const run = async (command: string, input: unknown) => {
+      await writeFile(inputPath, JSON.stringify(input), "utf8");
+      return runServiceCommandCli(["--workspace", workspace, "--command", command, "--input", inputPath], {
+        stdout: (text) => stdout.push(text), stderr: () => undefined,
+      });
+    };
+    expect(await run("create_project", { contractVersion: "v1", idempotencyKey: "cli-render-create", name: "CLI render" })).toBe(0);
+    const created = JSON.parse(stdout.pop()!) as { projectId: string; revisionId: string };
+
+    expect(await run("render_final", {
+      contractVersion: "v1", idempotencyKey: "cli-final", projectId: created.projectId,
+      revisionId: created.revisionId, verificationRefId: "verification-none",
+    })).toBe(1);
+    expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "render_final", state: "failed", error: { code: "VERIFICATION_FAILED" } });
+  });
+
   it("applies the same service requests through CLI and loopback transport", async () => {
     temporaryRoot = await mkdtemp(join(tmpdir(), "replex-local-cli-parity-"));
     const cliWorkspace = join(temporaryRoot, "cli");
