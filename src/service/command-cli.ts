@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ContractError } from "../service-contract/index.js";
 import type { LocalExecutorCommand } from "./executor.js";
+import type { V2AgentModelClient } from "../agent-v2.js";
+import { createOpenAIV2ModelClientFromEnv } from "../agent-v2-openai.js";
 import { ImportAssetRequestSchema, ServiceErrorResponseSchema } from "../service-contract/index.js";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalProjectStoreError } from "./project-store.js";
@@ -11,15 +13,16 @@ import { LocalImportError } from "../import-v2.js";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 type LocalCommand = LocalExecutorCommand;
-const COMMANDS: readonly LocalCommand[] = ["create_project", "open_project", "import_asset", "apply_operations", "render_preview", "render_final", "cancel_job"];
-const JOB_COMMANDS: ReadonlySet<LocalCommand> = new Set(["import_asset", "apply_operations", "render_preview", "render_final"]);
+const COMMANDS: readonly LocalCommand[] = ["create_project", "open_project", "import_asset", "apply_operations", "request_agent_edit", "render_preview", "render_final", "cancel_job"];
+const JOB_COMMANDS: ReadonlySet<LocalCommand> = new Set(["import_asset", "apply_operations", "request_agent_edit", "render_preview", "render_final"]);
 interface CliIO { stdout(text: string): void; stderr(text: string): void }
 
-function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalCommand; inputPath: string; sourcePath?: string; importRoots: string[] } {
+function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalCommand; inputPath: string; sourcePath?: string; importRoots: string[]; agentModel?: string } {
   let workspaceRoot: string | undefined;
   let command: LocalCommand | undefined;
   let inputPath: string | undefined;
   let sourcePath: string | undefined;
+  let agentModel: string | undefined;
   const importRoots: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]!;
@@ -30,6 +33,7 @@ function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalComma
     else if (key === "--input" && !inputPath) inputPath = resolve(value);
     else if (key === "--source-path" && !sourcePath) sourcePath = resolve(value);
     else if (key === "--import-root") importRoots.push(resolve(value));
+    else if (key === "--agent-model" && !agentModel) agentModel = value;
     else throw new LocalExecutorError("VALIDATION_FAILED", `Invalid or repeated service option: ${key}.`);
     index += 1;
   }
@@ -38,7 +42,7 @@ function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalComma
   }
   if (sourcePath && command !== "import_asset") throw new LocalExecutorError("VALIDATION_FAILED", "--source-path is only valid for import_asset.");
   if (command === "import_asset" && !sourcePath) throw new LocalExecutorError("VALIDATION_FAILED", "import_asset requires --source-path because local tokens belong to one executor process.");
-  return { workspaceRoot, command, inputPath, ...(sourcePath ? { sourcePath } : {}), importRoots };
+  return { workspaceRoot, command, inputPath, ...(sourcePath ? { sourcePath } : {}), importRoots, ...(agentModel ? { agentModel } : {}) };
 }
 
 function publicError(error: unknown): ContractError {
@@ -60,6 +64,13 @@ function publicError(error: unknown): ContractError {
   return { code: "EXECUTION_FAILED", message: "The local service request failed.", retryable: true };
 }
 
+/** Explicit opt-in: the agent is enabled only for a named model with an available key. */
+export function agentOption(model: string | undefined): { agentModel?: V2AgentModelClient } {
+  if (!model) return {};
+  try { return { agentModel: createOpenAIV2ModelClientFromEnv(model) }; }
+  catch { throw new LocalExecutorError("VALIDATION_FAILED", "--agent-model requires OPENAI_API_KEY in the environment or a local .env file."); }
+}
+
 export async function runServiceCommandCli(argv: string[], io: CliIO = {
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
@@ -75,7 +86,7 @@ export async function runServiceCommandCli(argv: string[], io: CliIO = {
     try { request = JSON.parse(await readFile(args.inputPath, "utf8")) as unknown; }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "The service request file is not valid JSON."); }
 
-    server = new LocalExecutorServer({ workspaceRoot: args.workspaceRoot, importRoots: args.importRoots });
+    server = new LocalExecutorServer({ workspaceRoot: args.workspaceRoot, importRoots: args.importRoots, ...agentOption(args.agentModel) });
     await server.start();
     if (args.command === "import_asset") {
       const raw = typeof request === "object" && request !== null && !Array.isArray(request) ? request as Record<string, unknown> : {};
