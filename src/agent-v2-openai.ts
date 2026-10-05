@@ -1,4 +1,6 @@
-import type OpenAI from "openai";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import OpenAI from "openai";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { V2_AGENT_MAX_OUTPUT_TOKENS_PER_CALL, type V2AgentModelClient, type V2AgentModelRequest } from "./agent-v2.js";
 
@@ -78,4 +80,12 @@ function modelInput(request: V2AgentModelRequest): ResponseInputItem[] {
     }
     return { type: "function_call_output", call_id: result.callId, output };
   });
+}
+
+/** Host bootstrap for an explicitly named model; the key comes from OPENAI_API_KEY or a local .env file. */
+export function createOpenAIV2ModelClientFromEnv(model: string): V2AgentModelClient {
+  if (!process.env.OPENAI_API_KEY && existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is required to enable the agent model");
+  return createOpenAIV2ModelClient(new OpenAI({ apiKey }), model);
 }
