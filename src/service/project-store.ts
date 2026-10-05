@@ -13,6 +13,7 @@ import {
 } from "../operations-v2.js";
 import { IdSchema } from "../schema.js";
 import { MediaAssetSchema, ProjectV2Schema, type MediaAsset, type ProjectV2 } from "../schema-v2.js";
+import { registerRenderArtifactV2, type RenderArtifactV2 } from "../render-v2.js";
 
 export type LocalProjectStoreErrorCode =
   | "PROJECT_NOT_FOUND"
@@ -171,6 +172,59 @@ export class LocalProjectStore {
     });
   }
 
+  /**
+   * Compare-and-swap for a host-verified candidate (reducer result plus derived render registrations).
+   * The reducer replays the logged batch; only derived outputs/verification may differ from its result.
+   */
+  async commitCandidate(projectId: string, input: { baseRevisionId: string; baseRevisionHash: string; project: ProjectV2; operationLog: OperationLogRecord[] }): Promise<OperationBatchResult> {
+    return this.withProjectLock(projectId, async () => {
+      const current = await this.current(projectId);
+      if (current.currentRevisionId !== input.baseRevisionId || semanticHashV2(current) !== input.baseRevisionHash) {
+        return { ok: false, code: "STALE_REVISION", detail: "base revision is not current" };
+      }
+      const candidate = ProjectV2Schema.parse(input.project);
+      const [first] = input.operationLog;
+      if (!first || input.operationLog.some((record) => record.baseRevisionId !== input.baseRevisionId
+        || record.resultRevisionId !== candidate.currentRevisionId || record.intentId !== first.intentId || record.actor !== first.actor)) {
+        throw new LocalProjectStoreError("INVALID_OPERATION", "candidate operation log does not describe one batch on its base revision");
+      }
+      return this.applyBatchLocked(projectId, current, {
+        baseRevisionId: input.baseRevisionId,
+        actor: first.actor,
+        intentId: first.intentId,
+        evidenceRefs: first.evidenceRefs,
+        operations: input.operationLog.map(({ input: operation }) => operation),
+        createdAt: first.createdAt,
+      }, undefined, (reduced) => {
+        const added = candidate.outputs.slice(reduced.outputs.length);
+        const refs = new Set(candidate.verification.refs.filter(({ status }) => status === "passed").map(({ id }) => id));
+        if (semanticHashV2(candidate) !== semanticHashV2(reduced)
+          || canonicalJson(candidate.revisions) !== canonicalJson(reduced.revisions)
+          || canonicalJson(candidate.outputs.slice(0, reduced.outputs.length)) !== canonicalJson(reduced.outputs)
+          || added.some((output) => output.sourceRevisionId !== reduced.currentRevisionId || !refs.has(output.verificationRefId))) {
+          throw new LocalProjectStoreError("INVALID_OPERATION", "candidate differs from the reducer result beyond verified render registrations");
+        }
+        return candidate;
+      });
+    });
+  }
+
+  /** Records a verified render as derived state on the current revision; semantic state is unchanged. */
+  async registerRender(projectId: string, artifact: RenderArtifactV2): Promise<ProjectV2> {
+    return this.withProjectLock(projectId, async () => {
+      const current = await this.current(projectId);
+      if (artifact.sourceRevisionId !== current.currentRevisionId) {
+        throw new LocalProjectStoreError("REVISION_NOT_FOUND", "render source revision is no longer current");
+      }
+      const registered = registerRenderArtifactV2(current, artifact);
+      const root = await this.root();
+      const directory = await this.projectDirectory(root, projectId, false);
+      await this.writeJsonAtomic(this.revisionPath(directory, registered.currentRevisionId), registered, root);
+      await this.writeJsonAtomic(join(directory, "project.json"), registered, root);
+      return registered;
+    });
+  }
+
   async applyBatchWithLocalAsset(projectId: string, request: LocalAssetBatchRequest): Promise<OperationBatchResult & { evidenceRef?: string }> {
     return this.withProjectLock(projectId, async () => {
       const current = await this.current(projectId);
@@ -260,6 +314,7 @@ export class LocalProjectStore {
     current: ProjectV2,
     batch: OperationBatchInput,
     ensureEvidence?: (result: Extract<OperationBatchResult, { ok: true }>) => Promise<void>,
+    finalize?: (reduced: ProjectV2) => ProjectV2,
   ): Promise<OperationBatchResult> {
     const log = await this.readOperationLog(projectId);
     const committedRevisions = new Set(current.revisions.map((revision) => revision.id));
@@ -284,8 +339,9 @@ export class LocalProjectStore {
       return { ok: true, project, revisionId, operationLog: prior };
     }
 
-    const result = applyOperationBatch(current, batch);
-    if (!result.ok) return result;
+    const reduced = applyOperationBatch(current, batch);
+    if (!reduced.ok) return reduced;
+    const result = finalize ? { ...reduced, project: finalize(reduced.project) } : reduced;
     await ensureEvidence?.(result);
     const root = await this.root();
     const directory = await this.projectDirectory(root, projectId, false);
