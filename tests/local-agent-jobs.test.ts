@@ -2,42 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { V2AgentModelClient, V2AgentModelRequest } from "../src/agent-v2.js";
-import type { Operation } from "../src/operations-v2.js";
 import { LocalExecutor } from "../src/service/executor.js";
 import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
-import { projectWithClip } from "./service-fixture.js";
-
-/** Deterministic model: inspect clips and their media evidence, then propose the scripted batch citing disclosed evidence, then finish. */
-function scriptedModel(batches: Record<string, Operation[]>) {
-  const inputs: V2AgentModelRequest[] = [];
-  let counter = 0;
-  const model: V2AgentModelClient = {
-    async respond(input) {
-      inputs.push(input);
-      const responseId = `response-${++counter}`;
-      const operations = batches[input.prompt];
-      const last = input.toolResults.at(-1);
-      if (!operations) return { responseId, calls: [], text: "Nothing to change." };
-      if (!last) return { responseId, calls: [{ id: `inspect-${counter}`, name: "inspect_v2", arguments: { kind: "clips" } }] };
-      const output = last.output as { evidenceRefs?: string[]; data?: { items?: Array<{ assetId: string }> } };
-      if (last.name === "inspect_v2" && !output.evidenceRefs?.length) {
-        return { responseId, calls: [{ id: `evidence-${counter}`, name: "inspect_v2", arguments: {
-          kind: "media_evidence", assetId: output.data!.items![0]!.assetId, image: "selected_frame", frameOffset: 0,
-        } }] };
-      }
-      if (last.name === "inspect_v2") {
-        return { responseId, calls: [{ id: `propose-${counter}`, name: "propose_edit_batch", arguments: {
-          baseRevisionId: input.context.currentRevisionId, evidenceRefs: output.evidenceRefs!, operations,
-        } }] };
-      }
-      return { responseId, calls: [], text: "Applied." };
-    },
-  };
-  /** Tool outputs the model saw, for diagnosable assertion failures. */
-  const trace = () => JSON.stringify(inputs.map(({ prompt, toolResults }) => ({ prompt, results: toolResults.map(({ name, output }) => ({ name, output })) }))).slice(-4000);
-  return { model, inputs, trace };
-}
+import { projectWithClip, scriptedModel } from "./service-fixture.js";
 
 describe("local agent edit jobs", () => {
   const roots: string[] = [];

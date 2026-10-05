@@ -3,7 +3,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect } from "vitest";
-import type { V2AgentModelClient } from "../src/agent-v2.js";
+import type { V2AgentModelClient, V2AgentModelRequest } from "../src/agent-v2.js";
+import type { Operation } from "../src/operations-v2.js";
 import { LocalExecutor } from "../src/service/executor.js";
 import { ffmpegPath, ffprobePath } from "./media.js";
 
@@ -39,4 +40,35 @@ export async function projectWithClip(roots: string[], prefix: string, options: 
   })).id, 30_000);
   if (placed.state !== "succeeded") throw new Error("fixture clip failed: " + JSON.stringify(placed));
   return { executor, workspaceRoot, projectId: project.projectId, revisionId: placed.result.revisionId!, assetId: imported.result.assetId! };
+}
+
+/** Deterministic model: inspect clips and their media evidence, then propose the scripted batch citing disclosed evidence, then finish. */
+export function scriptedModel(batches: Record<string, Operation[]>) {
+  const inputs: V2AgentModelRequest[] = [];
+  let counter = 0;
+  const model: V2AgentModelClient = {
+    async respond(input) {
+      inputs.push(input);
+      const responseId = `response-${++counter}`;
+      const operations = batches[input.prompt];
+      const last = input.toolResults.at(-1);
+      if (!operations) return { responseId, calls: [], text: "Nothing to change." };
+      if (!last) return { responseId, calls: [{ id: `inspect-${counter}`, name: "inspect_v2", arguments: { kind: "clips" } }] };
+      const output = last.output as { evidenceRefs?: string[]; data?: { items?: Array<{ assetId: string }> } };
+      if (last.name === "inspect_v2" && !output.evidenceRefs?.length) {
+        return { responseId, calls: [{ id: `evidence-${counter}`, name: "inspect_v2", arguments: {
+          kind: "media_evidence", assetId: output.data!.items![0]!.assetId, image: "selected_frame", frameOffset: 0,
+        } }] };
+      }
+      if (last.name === "inspect_v2") {
+        return { responseId, calls: [{ id: `propose-${counter}`, name: "propose_edit_batch", arguments: {
+          baseRevisionId: input.context.currentRevisionId, evidenceRefs: output.evidenceRefs!, operations,
+        } }] };
+      }
+      return { responseId, calls: [], text: "Applied." };
+    },
+  };
+  /** Tool outputs the model saw, for diagnosable assertion failures. */
+  const trace = () => JSON.stringify(inputs.map(({ prompt, toolResults }) => ({ prompt, results: toolResults.map(({ name, output }) => ({ name, output })) }))).slice(-4000);
+  return { model, inputs, trace };
 }
