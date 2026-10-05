@@ -11,6 +11,8 @@ import type {
   OpenProjectRequest,
   ProjectCreatedResponse,
   ProjectSnapshot,
+  RenderFinalRequest,
+  RenderPreviewRequest,
   ServiceCommand,
 } from "../service-contract/index.js";
 import { authorizeLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
@@ -20,15 +22,19 @@ import {
   CancelJobRequestSchema,
   CreateProjectRequestSchema,
   OpenProjectRequestSchema,
+  RenderFinalRequestSchema,
+  RenderPreviewRequestSchema,
 } from "../service-contract/index.js";
 import { LocalJobRuntime } from "./local-jobs.js";
-import { LocalProjectService } from "./local.js";
+import { LocalProjectService, type MediaToolOptions } from "./local.js";
+
+export type LocalExecutorCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "render_preview" | "render_final" | "cancel_job">;
 
 export class LocalExecutor {
   private readonly projects: LocalProjectService;
   private readonly jobs: LocalJobRuntime;
 
-  constructor(options: { workspaceRoot: string }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions }) {
     this.projects = new LocalProjectService(options);
     this.jobs = new LocalJobRuntime(options.workspaceRoot, this.projects);
   }
@@ -63,6 +69,14 @@ export class LocalExecutor {
     return this.jobs.submitImportAsset(request);
   }
 
+  submitRenderPreview(request: RenderPreviewRequest): Promise<JobView> {
+    return this.jobs.submitRender("render_preview", request);
+  }
+
+  submitRenderFinal(request: RenderFinalRequest): Promise<JobView> {
+    return this.jobs.submitRender("render_final", request);
+  }
+
   getJob(jobId: string): Promise<JobView> {
     return this.jobs.getJob(jobId);
   }
@@ -87,12 +101,14 @@ export class LocalExecutor {
     return this.projects.capabilities();
   }
 
-  dispatch(command: Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "cancel_job">, input: unknown): Promise<unknown> {
+  dispatch(command: LocalExecutorCommand, input: unknown): Promise<unknown> {
     switch (command) {
       case "create_project": return this.createProject(CreateProjectRequestSchema.parse(input));
       case "open_project": return this.openProject(OpenProjectRequestSchema.parse(input));
       case "apply_operations": return this.submitApplyOperations(ApplyOperationsRequestSchema.parse(input));
       case "import_asset": return this.submitImportAsset(ImportAssetRequestSchema.parse(input));
+      case "render_preview": return this.submitRenderPreview(RenderPreviewRequestSchema.parse(input));
+      case "render_final": return this.submitRenderFinal(RenderFinalRequestSchema.parse(input));
       case "cancel_job": return this.cancelJob(CancelJobRequestSchema.parse(input));
     }
   }
