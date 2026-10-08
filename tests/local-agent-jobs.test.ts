@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LocalExecutor } from "../src/service/executor.js";
+import { LocalProjectService } from "../src/service/local.js";
 import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 import { projectWithClip, scriptedModel } from "./service-fixture.js";
 
@@ -88,5 +89,38 @@ describe("local agent edit jobs", () => {
     } finally {
       await executor.stop();
     }
+  }, 600_000);
+
+  it.skipIf(!mediaAvailable)("recovers the conversation thread when a committed edit is replayed after a restart", async () => {
+    const promptOne = "Crop toward the product.";
+    const promptTwo = "Keep that, and lower the audio.";
+    const { model, inputs, trace } = scriptedModel({
+      [promptOne]: [{ type: "set_transform", clipId: "clip-walkthrough", transform: { x: 0, y: 0, scale: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 }, crop: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 } }],
+      [promptTwo]: [{ type: "set_volume", clipId: "clip-walkthrough", audioGainDb: -6 }],
+    });
+    const fixture = await projectWithClip(roots, "replex-agent-recover");
+    await fixture.executor.stop();
+    const service = new LocalProjectService({ workspaceRoot: fixture.workspaceRoot, media: { ffmpegPath, ffprobePath }, agentEnabled: true });
+    const request = (idempotencyKey: string, baseRevisionId: string, prompt: string) =>
+      ({ contractVersion: "v1" as const, idempotencyKey, projectId: fixture.projectId, baseRevisionId, prompt, preview: true });
+    const signal = new AbortController().signal;
+
+    const first = await service.agentEdit(request("recover-1", fixture.revisionId, promptOne), undefined, model, signal);
+    if (!first.ok || !first.thread) throw new Error("first agent edit failed: " + trace());
+    const second = await service.agentEdit(request("recover-2", first.revisionId, promptTwo), first.thread, model, signal);
+    if (!second.ok || !second.thread) throw new Error("follow-up agent edit failed: " + trace());
+    const modelCalls = inputs.length;
+
+    // A restart between the commit and the saved job state replays the job with the pre-turn thread.
+    const replayed = await service.agentEdit(request("recover-2", first.revisionId, promptTwo), first.thread, model, signal);
+    expect(inputs).toHaveLength(modelCalls);
+    expect(replayed).toMatchObject({ ok: true, revisionId: second.revisionId, outputId: second.outputId });
+    if (!replayed.ok) throw new Error("replayed agent edit failed");
+    expect(replayed.thread).toEqual({ ...second.thread, previousResponseId: first.thread.previousResponseId });
+
+    const replayedFirst = await service.agentEdit(request("recover-1", fixture.revisionId, promptOne), undefined, model, signal);
+    if (!replayedFirst.ok) throw new Error("replayed first agent edit failed");
+    expect(replayedFirst.thread).toMatchObject({ threadId: first.thread.threadId, operationIds: first.thread.operationIds, currentRevisionId: second.revisionId });
+    expect(replayedFirst.thread?.previousResponseId).toBeUndefined();
   }, 600_000);
 });

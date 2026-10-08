@@ -174,15 +174,25 @@ export class LocalProjectService {
     const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
     const history = await this.store.operationLog(request.projectId);
     const prior = history.filter((record) => record.intentId === intentId);
+    const threadId = request.threadId ?? DEFAULT_AGENT_THREAD_ID;
+    const revisionHash = semanticHashV2(current);
     if (prior.length) {
-      // Restart after the agent committed: report the published revision; the next turn rebases the thread.
+      // Restart after the agent committed: report the published revision without calling the model again.
       if (prior[0]!.baseRevisionId !== request.baseRevisionId) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different agent edit");
-      return { ok: true, ...publishedRevision(current, prior[0]!.resultRevisionId) };
+      // ponytail: the turn's final response id was never durable, so the thread keeps its last completed response and gains the committed operations.
+      const known = new Set(saved?.operationIds ?? []);
+      const thread: V2ConversationThread = {
+        threadId,
+        projectId: request.projectId,
+        currentRevisionId: current.currentRevisionId,
+        currentRevisionHash: revisionHash,
+        ...(saved?.previousResponseId ? { previousResponseId: saved.previousResponseId } : {}),
+        operationIds: [...known, ...prior.map(({ id }) => id).filter((id) => !known.has(id))],
+      };
+      return { ok: true, thread, ...publishedRevision(current, prior.at(-1)!.resultRevisionId) };
     }
     if (current.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this agent edit started" };
 
-    const threadId = request.threadId ?? DEFAULT_AGENT_THREAD_ID;
-    const revisionHash = semanticHashV2(current);
     // ponytail: edits made outside this thread rebase it onto the pinned base; the agent sees them via operation_history.
     const threadState = saved && { ...saved, currentRevisionId: current.currentRevisionId, currentRevisionHash: revisionHash };
     const authorization = await this.mediaAuthorization(current);
