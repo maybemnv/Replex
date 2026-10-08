@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { canonicalJson } from "../canonical-json.js";
 import { applyOperationBatch, createProjectV2, type OperationBatchResult } from "../operations-v2.js";
 import type { ProjectV2 } from "../schema-v2.js";
@@ -18,9 +19,18 @@ import {
   type ProjectCreatedResponse,
   type ProjectSnapshot,
   type RevisionView,
+  type RenderArtifactView,
+  type RenderFinalRequest,
+  type RenderPreviewRequest,
+  type RequestAgentEditRequest,
 } from "../service-contract/index.js";
 import { LocalProjectStore, LocalProjectStoreError } from "./project-store.js";
 import { importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
+import { renderCurrentRevisionV2, type MediaExecutionAuthorization } from "../render-v2.js";
+import { runConversationalEditV2, type V2AgentModelClient, type V2ConversationThread } from "../agent-v2.js";
+import { inspectProjectV2 } from "../inspect-v2.js";
+import { generateMediaEvidence, type MediaEvidenceIndex } from "../media-evidence.js";
+import { semanticHashV2 } from "../operations-v2.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -28,11 +38,30 @@ export type ApplyOperationsOutcome =
   | { ok: true; revisionId: string; operationIds: string[]; revision: RevisionView }
   | { ok: false; code: "STALE_REVISION" | "INVALID_OPERATION" | "UNSUPPORTED_OPERATION"; detail: string };
 
+export type RenderOutcome =
+  | { ok: true; revisionId: string; outputId: string; artifact: RenderArtifactView }
+  | { ok: false; code: "STALE_REVISION" | "VERIFICATION_REQUIRED" | "RENDER_FAILED"; detail: string };
+
+export type AgentEditOutcome =
+  | { ok: true; revisionId: string; revision?: RevisionView; outputId?: string; artifact?: RenderArtifactView; thread?: V2ConversationThread }
+  | { ok: false; code: string; detail: string };
+
+/** One default conversation per project when the caller does not name a thread. */
+export const DEFAULT_AGENT_THREAD_ID = "thread-default";
+const MAX_AGENT_HISTORY = 1_000;
+
+/** Host-owned media tool paths; motion presets require absolute executables. */
+export interface MediaToolOptions { ffmpegPath?: string; ffprobePath?: string }
+
 export class LocalProjectService {
   private readonly store: LocalProjectStore;
+  private readonly media: MediaToolOptions;
+  private readonly agentEnabled: boolean;
 
-  constructor(options: { workspaceRoot: string }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean }) {
     this.store = new LocalProjectStore(options.workspaceRoot);
+    this.media = options.media ?? {};
+    this.agentEnabled = options.agentEnabled ?? false;
   }
 
   async createProject(requestInput: CreateProjectRequest): Promise<ProjectCreatedResponse> {
@@ -60,7 +89,7 @@ export class LocalProjectService {
   async openProject(requestInput: OpenProjectRequest): Promise<ProjectSnapshot> {
     const request = OpenProjectRequestSchema.parse(requestInput);
     const { current, selected } = await this.store.currentAndRevision(request.projectId, request.revisionId);
-    return snapshot(current, selected);
+    return snapshot(current, selected, this.capabilities());
   }
 
   async applyOperations(requestInput: ApplyOperationsRequest): Promise<ApplyOperationsOutcome> {
@@ -116,9 +145,140 @@ export class LocalProjectService {
     return { ...publicOutcome(result), assetId: imported.asset.id };
   }
 
-  capabilities(): CapabilitySet {
-    return localCapabilities();
+  /** Renders a pinned revision; renders register only on the current revision, final renders require a passed verification. */
+  async renderRevision(request: RenderPreviewRequest | RenderFinalRequest, signal: AbortSignal): Promise<RenderOutcome> {
+    const { current } = await this.store.currentAndRevision(request.projectId, request.revisionId);
+    if (current.currentRevisionId !== request.revisionId) return { ok: false, code: "STALE_REVISION", detail: "renders are registered only on the current revision" };
+    if ("verificationRefId" in request && !current.verification.refs.some(({ id, revisionId, status }) =>
+      id === request.verificationRefId && revisionId === request.revisionId && status === "passed")) {
+      return { ok: false, code: "VERIFICATION_REQUIRED", detail: "final render requires a passed verification of this revision" };
+    }
+    let rendered: Awaited<ReturnType<typeof renderCurrentRevisionV2>>;
+    try {
+      rendered = await renderCurrentRevisionV2(current, await this.mediaAuthorization(current), { ...this.media, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { ok: false, code: "RENDER_FAILED", detail: "the bounded renderer could not produce a verified output" };
+    }
+    const registered = await this.store.registerRender(request.projectId, rendered.artifact);
+    const output = registered.outputs.find(({ outputId }) => outputId === rendered.artifact.outputId)!;
+    return { ok: true, revisionId: request.revisionId, outputId: output.outputId, artifact: artifactView(output) };
   }
+
+  /**
+   * Runs one bounded conversational edit on the pinned base revision. The agent commits through the
+   * store's reducer CAS together with its verified preview; the saved thread is host-owned.
+   */
+  async agentEdit(request: RequestAgentEditRequest, saved: V2ConversationThread | undefined, model: V2AgentModelClient, signal: AbortSignal): Promise<AgentEditOutcome> {
+    const current = await this.store.current(request.projectId);
+    const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
+    const history = await this.store.operationLog(request.projectId);
+    const prior = history.filter((record) => record.intentId === intentId);
+    const threadId = request.threadId ?? DEFAULT_AGENT_THREAD_ID;
+    const revisionHash = semanticHashV2(current);
+    if (prior.length) {
+      // Restart after the agent committed: report the published revision without calling the model again.
+      if (prior[0]!.baseRevisionId !== request.baseRevisionId) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different agent edit");
+      // ponytail: the turn's final response id was never durable, so the thread keeps its last completed response and gains the committed operations.
+      const known = new Set(saved?.operationIds ?? []);
+      const thread: V2ConversationThread = {
+        threadId,
+        projectId: request.projectId,
+        currentRevisionId: current.currentRevisionId,
+        currentRevisionHash: revisionHash,
+        ...(saved?.previousResponseId ? { previousResponseId: saved.previousResponseId } : {}),
+        operationIds: [...known, ...prior.map(({ id }) => id).filter((id) => !known.has(id))],
+      };
+      return { ok: true, thread, ...publishedRevision(current, prior.at(-1)!.resultRevisionId) };
+    }
+    if (current.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this agent edit started" };
+
+    // ponytail: edits made outside this thread rebase it onto the pinned base; the agent sees them via operation_history.
+    const threadState = saved && { ...saved, currentRevisionId: current.currentRevisionId, currentRevisionHash: revisionHash };
+    const authorization = await this.mediaAuthorization(current);
+    const evidenceRoot = join(authorization.projectRoot, "evidence");
+    const evidenceIndexes = await this.mediaEvidence(current, authorization, evidenceRoot);
+    const selection = [
+      request.selectedAssetIds?.length ? `Selected assets: ${request.selectedAssetIds.join(", ")}.` : "",
+      request.selectedClipIds?.length ? `Selected clips: ${request.selectedClipIds.join(", ")}.` : "",
+    ].filter(Boolean).join(" ");
+
+    const result = await runConversationalEditV2({
+      project: current,
+      prompt: selection ? `${request.prompt}\n\n${selection}` : request.prompt,
+      threadId,
+      ...(threadState ? { threadState } : {}),
+      inspect: (project, inspectRequest, context) => inspectProjectV2(inspectRequest, {
+        project, evidenceIndexes, evidenceRoot, operationLog: context?.operationLog ?? [],
+      }),
+      model,
+      operationLog: history.slice(-MAX_AGENT_HISTORY),
+      assetHandles: authorization.resolvedHandles.map(({ assetId, sha256, ref }) => ({ assetId, sha256, ref })),
+      renderAuthorization: authorization,
+      renderOptions: this.media,
+      commitCanonicalRevision: async (candidate) => {
+        const committed = await this.store.commitCandidate(request.projectId, candidate);
+        return committed.ok ? { ok: true, project: committed.project } : { ok: false, code: committed.code, detail: committed.detail };
+      },
+      evidenceRoot,
+      signal,
+      intentId,
+    });
+    if (!result.ok) return { ok: false, code: result.code, detail: result.detail };
+    return { ok: true, thread: result.threadState, ...publishedRevision(result.project, result.project.currentRevisionId, request.baseRevisionId) };
+  }
+
+  /** Content-addressed per asset and generator config; regenerated per job within its bounded deadline. */
+  private async mediaEvidence(project: ProjectV2, authorization: MediaExecutionAuthorization, evidenceRoot: string): Promise<MediaEvidenceIndex[]> {
+    const indexes: MediaEvidenceIndex[] = [];
+    for (const handle of authorization.resolvedHandles) {
+      const type = project.assets[handle.assetId]?.type;
+      if (type !== "uploaded_video" && type !== "browser_capture") continue;
+      indexes.push(await generateMediaEvidence({
+        asset: { assetId: handle.assetId, sha256: handle.sha256, ref: handle.ref },
+        resolveSource: async () => handle.path,
+        evidenceRoot,
+        ...this.media,
+      }));
+    }
+    return indexes;
+  }
+
+  /** Resolves every stored asset for one render; the revision check re-reads canonical state. */
+  async mediaAuthorization(project: ProjectV2): Promise<MediaExecutionAuthorization> {
+    const projectRoot = await this.store.projectRoot(project.projectId);
+    return {
+      projectRoot,
+      resolvedHandles: Object.values(project.assets).filter((asset) => asset.path).map((asset) => ({
+        assetId: asset.id, sha256: asset.sha256, ref: asset.path!, path: join(projectRoot, ...asset.path!.split("/")),
+      })),
+      isRevisionCurrent: async (revisionId, revisionHash) => {
+        const latest = await this.store.current(project.projectId);
+        return latest.currentRevisionId === revisionId && semanticHashV2(latest) === revisionHash;
+      },
+    };
+  }
+
+  capabilities(): CapabilitySet {
+    return localCapabilities(this.agentEnabled);
+  }
+}
+
+/** Describes the revision an agent edit ended on, with its newest preview when one was registered. */
+function publishedRevision(project: ProjectV2, revisionId: string, baseRevisionId?: string): Omit<Extract<AgentEditOutcome, { ok: true }>, "ok" | "thread"> {
+  const revision = project.revisions.find(({ id }) => id === revisionId);
+  if (!revision) throw new Error("agent revision is missing from the committed project");
+  if (revisionId === baseRevisionId) return { revisionId };
+  const preview = project.outputs.filter((output) => output.sourceRevisionId === revisionId).at(-1);
+  return {
+    revisionId,
+    revision: { ...revision, isCurrent: project.currentRevisionId === revisionId },
+    ...(preview ? { outputId: preview.outputId, artifact: artifactView(preview) } : {}),
+  };
+}
+
+function artifactView({ outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId }: ProjectV2["outputs"][number]): RenderArtifactView {
+  return { outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId };
 }
 
 function publicOutcome(result: OperationBatchResult): ApplyOperationsOutcome {
@@ -147,14 +307,12 @@ function summary(project: ProjectV2) {
   };
 }
 
-function snapshot(current: ProjectV2, selected: ProjectV2): ProjectSnapshot {
+function snapshot(current: ProjectV2, selected: ProjectV2, capabilities: CapabilitySet): ProjectSnapshot {
   const selectedRevisionId = selected.currentRevisionId;
   const assets = Object.values(selected.assets).map(({ id, type, sha256, probe, provenance }) => ({ id, type, sha256, probe, provenance }));
   const renderArtifacts = selected.outputs
     .filter((artifact) => artifact.sourceRevisionId === selectedRevisionId)
-    .map(({ outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId }) => ({
-      outputId, ref, sha256, renderJobHash, probe, sourceRevisionId, revisionId, backendId, backendVersion, verificationRefId,
-    }));
+    .map(artifactView);
 
   return ProjectSnapshotSchema.parse({
     summary: summary(current),
@@ -165,15 +323,15 @@ function snapshot(current: ProjectV2, selected: ProjectV2): ProjectSnapshot {
     revisions: current.revisions.map((revision) => ({ ...revision, isCurrent: revision.id === current.currentRevisionId })),
     verification: selected.verification,
     renderArtifacts,
-    capabilities: localCapabilities(),
+    capabilities,
   });
 }
 
-function localCapabilities(): CapabilitySet {
+function localCapabilities(agentEnabled: boolean): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), "render_preview", "render_final", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
@@ -181,7 +339,7 @@ function localCapabilities(): CapabilitySet {
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
     assetTypes: ["uploaded_video", "image", "audio"],
-    jobKinds: ["asset_import", "apply_operations"],
+    jobKinds: ["asset_import", "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), "render_preview", "render_final"],
     cancellationSupported: true,
     credentialActions: [],
   });
