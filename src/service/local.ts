@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { canonicalJson } from "../canonical-json.js";
 import { applyOperationBatch, createProjectV2, type OperationBatchResult } from "../operations-v2.js";
 import type { ProjectV2 } from "../schema-v2.js";
@@ -19,6 +21,7 @@ import {
   type ProjectCreatedResponse,
   type ProjectSnapshot,
   type RevisionView,
+  type RecaptureRequest,
   type RenderArtifactView,
   type RenderFinalRequest,
   type RenderPreviewRequest,
@@ -31,6 +34,9 @@ import { runConversationalEditV2, type V2AgentModelClient, type V2ConversationTh
 import { inspectProjectV2 } from "../inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "../media-evidence.js";
 import { semanticHashV2 } from "../operations-v2.js";
+import { runCapture, type CaptureResult } from "../capture.js";
+import { recaptureBrowserSceneV2, RecaptureV2Error } from "../recapture-v2.js";
+import { EnvironmentSchema, IdSchema } from "../schema.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -41,6 +47,25 @@ export type ApplyOperationsOutcome =
 export type RenderOutcome =
   | { ok: true; revisionId: string; outputId: string; artifact: RenderArtifactView }
   | { ok: false; code: "STALE_REVISION" | "VERIFICATION_REQUIRED" | "RENDER_FAILED"; detail: string };
+
+export type RecaptureOutcome =
+  | { ok: true; revisionId: string; revision: RevisionView; assetId: string }
+  | { ok: false; code: string; detail: string };
+
+/**
+ * Host-owned browser targets keyed by approved flow ID. The flow itself comes from canonical project
+ * state; the host supplies only where and how to drive it. Never model or request supplied.
+ */
+export const BrowserTargetsSchema = z.record(IdSchema, z.object({
+  environment: EnvironmentSchema,
+  values: z.record(z.string().min(1).max(128), z.string().max(10_000)).optional(),
+  resetUrl: z.string().url().optional(),
+}).strict().superRefine((target, context) => {
+  if (target.resetUrl && !target.environment.allowedOrigins.some((origin) => new URL(origin).origin === new URL(target.resetUrl!).origin)) {
+    context.addIssue({ code: "custom", path: ["resetUrl"], message: "resetUrl must use an allowed origin" });
+  }
+}));
+export type BrowserTargets = z.infer<typeof BrowserTargetsSchema>;
 
 export type AgentEditOutcome =
   | { ok: true; revisionId: string; revision?: RevisionView; outputId?: string; artifact?: RenderArtifactView; thread?: V2ConversationThread }
@@ -57,11 +82,13 @@ export class LocalProjectService {
   private readonly store: LocalProjectStore;
   private readonly media: MediaToolOptions;
   private readonly agentEnabled: boolean;
+  private readonly browserTargets: BrowserTargets;
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean; browserTargets?: BrowserTargets }) {
     this.store = new LocalProjectStore(options.workspaceRoot);
     this.media = options.media ?? {};
     this.agentEnabled = options.agentEnabled ?? false;
+    this.browserTargets = BrowserTargetsSchema.parse(options.browserTargets ?? {});
   }
 
   async createProject(requestInput: CreateProjectRequest): Promise<ProjectCreatedResponse> {
@@ -228,6 +255,62 @@ export class LocalProjectService {
     return { ok: true, thread: result.threadState, ...publishedRevision(result.project, result.project.currentRevisionId, request.baseRevisionId) };
   }
 
+  /**
+   * Recaptures the scene behind one browser asset from its approved flow and commits one
+   * `replace_browser_capture` revision with preservation evidence. Changed actions are host asserted.
+   */
+  async recaptureScene(request: RecaptureRequest, signal: AbortSignal): Promise<RecaptureOutcome> {
+    const current = await this.store.current(request.projectId);
+    const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
+    const prior = (await this.store.operationLog(request.projectId)).find((record) => record.intentId === intentId);
+    if (prior) {
+      // Restart after the replacement committed: report it without driving the browser again.
+      if (prior.baseRevisionId !== request.baseRevisionId || prior.input.type !== "replace_browser_capture") {
+        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different recapture");
+      }
+      return { ok: true, revisionId: prior.resultRevisionId, revision: revisionView(current, prior.resultRevisionId), assetId: prior.input.replacementAsset.id };
+    }
+    if (current.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this recapture started" };
+    const asset = current.assets[request.assetId];
+    if (!asset || asset.provenance.kind !== "browser") return { ok: false, code: "FLOW_MISMATCH", detail: "the selected asset is not a browser capture" };
+    const { flowId, sceneKey } = asset.provenance;
+    const flow = current.browser?.flows[flowId];
+    const target = this.browserTargets[flowId];
+    if (!flow || !target) return { ok: false, code: "BROWSER_TARGET_UNAVAILABLE", detail: "this host has no browser target for the asset's approved flow" };
+
+    // ponytail: run artifacts (trace, logs, raw video) stay under the project as capture evidence; prune if disk use matters.
+    const captureRoot = join(await this.store.projectRoot(request.projectId), "captures");
+    await mkdir(captureRoot, { recursive: true, mode: 0o700 });
+    let capture: CaptureResult;
+    try {
+      capture = await runCapture(flow, target.environment, {
+        artifactRoot: captureRoot,
+        ...(target.values ? { values: target.values } : {}),
+        ...(target.resetUrl ? { reset: () => resetBrowserTarget(target.resetUrl!, signal) } : {}),
+        ...this.media,
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { ok: false, code: "CAPTURE_FAILED", detail: "the approved flow did not complete" };
+    }
+    try {
+      const result = await recaptureBrowserSceneV2(this.store, {
+        projectId: request.projectId,
+        baseRevisionId: request.baseRevisionId,
+        previousAssetId: request.assetId,
+        capture,
+        sceneKey,
+        changedActionIds: request.changedActionIds,
+        reason: request.reason,
+        intentId,
+      }, { ...this.media, captureRoots: [captureRoot] });
+      return { ok: true, revisionId: result.revisionId, revision: revisionView(result.project, result.revisionId), assetId: result.replacementAsset.id };
+    } catch (error) {
+      if (error instanceof RecaptureV2Error) return { ok: false, code: error.code, detail: error.message };
+      throw error;
+    }
+  }
+
   /** Content-addressed per asset and generator config; regenerated per job within its bounded deadline. */
   private async mediaEvidence(project: ProjectV2, authorization: MediaExecutionAuthorization, evidenceRoot: string): Promise<MediaEvidenceIndex[]> {
     const indexes: MediaEvidenceIndex[] = [];
@@ -260,8 +343,19 @@ export class LocalProjectService {
   }
 
   capabilities(): CapabilitySet {
-    return localCapabilities(this.agentEnabled);
+    return localCapabilities(this.agentEnabled, Object.keys(this.browserTargets).length > 0);
   }
+}
+
+async function resetBrowserTarget(url: string, signal: AbortSignal): Promise<void> {
+  const response = await fetch(url, { method: "POST", signal, redirect: "error" });
+  if (!response.ok) throw new Error(`browser target reset failed: ${response.status}`);
+}
+
+function revisionView(project: ProjectV2, revisionId: string): RevisionView {
+  const revision = project.revisions.find(({ id }) => id === revisionId);
+  if (!revision) throw new Error("recapture revision is missing from the committed project");
+  return { ...revision, isCurrent: project.currentRevisionId === revisionId };
 }
 
 /** Describes the revision an agent edit ended on, with its newest preview when one was registered. */
@@ -327,11 +421,11 @@ function snapshot(current: ProjectV2, selected: ProjectV2, capabilities: Capabil
   });
 }
 
-function localCapabilities(agentEnabled: boolean): CapabilitySet {
+function localCapabilities(agentEnabled: boolean, recaptureEnabled: boolean): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), "render_preview", "render_final", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), ...(recaptureEnabled ? ["recapture_browser_scene" as const] : []), "render_preview", "render_final", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
@@ -339,7 +433,7 @@ function localCapabilities(agentEnabled: boolean): CapabilitySet {
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
     assetTypes: ["uploaded_video", "image", "audio"],
-    jobKinds: ["asset_import", "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), "render_preview", "render_final"],
+    jobKinds: ["asset_import", "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), ...(recaptureEnabled ? ["browser_recapture" as const] : []), "render_preview", "render_final"],
     cancellationSupported: true,
     credentialActions: [],
   });
