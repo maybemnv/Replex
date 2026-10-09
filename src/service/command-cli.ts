@@ -14,8 +14,8 @@ import { LocalImportError } from "../import-v2.js";
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 type LocalCommand = LocalExecutorCommand;
-const COMMANDS: readonly LocalCommand[] = ["create_project", "open_project", "import_asset", "apply_operations", "request_agent_edit", "recapture_browser_scene", "render_preview", "render_final", "cancel_job"];
-const JOB_COMMANDS: ReadonlySet<LocalCommand> = new Set(["import_asset", "apply_operations", "request_agent_edit", "recapture_browser_scene", "render_preview", "render_final"]);
+const COMMANDS: readonly LocalCommand[] = ["create_project", "open_project", "import_asset", "apply_operations", "request_agent_edit", "start_browser_capture", "recapture_browser_scene", "verify_revision", "render_preview", "render_final", "cancel_job"];
+const JOB_COMMANDS: ReadonlySet<LocalCommand> = new Set(["import_asset", "apply_operations", "request_agent_edit", "start_browser_capture", "recapture_browser_scene", "verify_revision", "render_preview", "render_final"]);
 interface CliIO { stdout(text: string): void; stderr(text: string): void }
 
 function parseArgs(argv: string[]): { workspaceRoot: string; command: LocalCommand; inputPath: string; sourcePath?: string; importRoots: string[]; agentModel?: string; browserConfigPath?: string } {

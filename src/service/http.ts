@@ -24,7 +24,9 @@ const JOB_ROUTES: Partial<Record<string, LocalExecutorCommand>> = {
   "/v1/jobs/apply-operations": "apply_operations",
   "/v1/jobs/import-asset": "import_asset",
   "/v1/jobs/agent-edit": "request_agent_edit",
+  "/v1/jobs/start-browser-capture": "start_browser_capture",
   "/v1/jobs/recapture-browser-scene": "recapture_browser_scene",
+  "/v1/jobs/verify-revision": "verify_revision",
   "/v1/jobs/render-preview": "render_preview",
   "/v1/jobs/render-final": "render_final",
 };
