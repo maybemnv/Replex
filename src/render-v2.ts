@@ -556,6 +556,38 @@ async function checkCompositionPreflight(
   };
 }
 
+/**
+ * Plan-level verification without rendering: the current revision plans under the bounded renderer, each motion
+ * preset plans its job, and every referenced source's bytes still match. Motion only substitutes a target clip's
+ * video stream, so the composition is planned without it.
+ */
+export async function preflightRevisionV2(
+  projectInput: ProjectV2,
+  authorization: MediaExecutionAuthorization,
+): Promise<CompositionExecutionPreflight & { planHash: string }> {
+  const project = ProjectV2Schema.parse(projectInput);
+  const handles = authorization.resolvedHandles.map(({ assetId, sha256, ref }) => ({ assetId, sha256, ref }));
+  const presets = project.composition.motionPresets ?? [];
+  const motionJobHashes = presets.map(({ targetId }) => {
+    const target = project.composition.clips.find(({ id }) => id === targetId);
+    const source = handles.find(({ assetId }) => assetId === target?.assetId);
+    if (!source) throw new Error("motion target has no authorized source handle");
+    return buildMotionExecutionJobV1(project, targetId, source).jobHash;
+  });
+  let planned = project;
+  if (presets.length) {
+    planned = structuredClone(project);
+    planned.composition.motionPresets = [];
+    const manifestSha256 = semanticHashV2(planned);
+    planned.revisions = planned.revisions.map((revision) => revision.id === planned.currentRevisionId ? { ...revision, manifestSha256 } : revision);
+  }
+  const { jobHash, ...payload } = planCompositionExecutionJob(planned, handles) as CompositionExecutionJob;
+  const { result } = await checkCompositionPreflight({
+    ...compositionJobPayloadSchema.parse(payload), sourceRevisionId: project.currentRevisionId, sourceRevisionHash: semanticHashV2(project),
+  }, authorization);
+  return { ...result, planHash: digest(canonicalJson({ jobHash, motionJobHashes })) };
+}
+
 /** Checks job/revision authorization and immutable source identity before any backend work. */
 export async function verifyMediaExecutionPreflight(
   job: MediaExecutionJob,
