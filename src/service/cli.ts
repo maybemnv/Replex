@@ -1,21 +1,25 @@
 import { resolve } from "node:path";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalExecutorServer } from "./http.js";
-import { agentOption } from "./command-cli.js";
+import { agentOption, browserTargetsOption } from "./command-cli.js";
 
-function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: string[]; importRoots: string[]; agentModel?: string } {
+function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: string[]; importRoots: string[]; agentModel?: string; browserConfigPath?: string } {
   let workspaceRoot: string | undefined;
   let agentModel: string | undefined;
+  let browserConfigPath: string | undefined;
   const allowedOrigins: string[] = [];
   const importRoots: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
-    if (argument === "--workspace" || argument === "--allow-origin" || argument === "--import-root" || argument === "--agent-model") {
+    if (argument === "--workspace" || argument === "--allow-origin" || argument === "--import-root" || argument === "--agent-model" || argument === "--browser-config") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new LocalExecutorError("VALIDATION_FAILED", `${argument} requires a value.`);
       if (argument === "--agent-model") {
         if (agentModel) throw new LocalExecutorError("VALIDATION_FAILED", "--agent-model may be specified only once.");
         agentModel = value;
+      } else if (argument === "--browser-config") {
+        if (browserConfigPath) throw new LocalExecutorError("VALIDATION_FAILED", "--browser-config may be specified only once.");
+        browserConfigPath = resolve(value);
       } else if (argument === "--workspace") {
         if (workspaceRoot) throw new LocalExecutorError("VALIDATION_FAILED", "--workspace may be specified only once.");
         workspaceRoot = resolve(value);
@@ -29,14 +33,14 @@ function parseArgs(argv: string[]): { workspaceRoot: string; allowedOrigins: str
     throw new LocalExecutorError("VALIDATION_FAILED", `Unknown service option: ${argument}.`);
   }
   if (!workspaceRoot) throw new LocalExecutorError("VALIDATION_FAILED", "--workspace is required.");
-  return { workspaceRoot, allowedOrigins, importRoots, ...(agentModel ? { agentModel } : {}) };
+  return { workspaceRoot, allowedOrigins, importRoots, ...(agentModel ? { agentModel } : {}), ...(browserConfigPath ? { browserConfigPath } : {}) };
 }
 
 async function main(): Promise<void> {
   let server: LocalExecutorServer | undefined;
   try {
-    const { agentModel, ...options } = parseArgs(process.argv.slice(2));
-    server = new LocalExecutorServer({ ...options, ...agentOption(agentModel) });
+    const { agentModel, browserConfigPath, ...options } = parseArgs(process.argv.slice(2));
+    server = new LocalExecutorServer({ ...options, ...agentOption(agentModel), ...await browserTargetsOption(browserConfigPath) });
     const session = await server.start();
     process.stdout.write(JSON.stringify({ contractVersion: "v1", url: session.url, bearerToken: session.token }) + "\n");
     let stopping = false;
