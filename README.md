@@ -2,7 +2,17 @@
 
 > **V2 direction:** Media composition is the project; browser capture is one intelligent media source.
 
-**Repository status (19 September 2026):** The browser-first V1 POC is implemented and has strong technical evidence. Its formal product gate remains `REWORK` because human usefulness and correction-time evidence are incomplete. Replex V2 is architecture-approved and planned, but none of its upload, general composition, motion-backend, ffmpeg-skill, service, or cloud features is implemented. Start with the [documentation index](Docs/README.md), [V2 architecture](Docs/architecture/REPLEX_V2.md), and [V2 PRD](Docs/REPLEX_V2_PRD.md).
+**Repository status (9 October 2026):** The browser-first V1 POC is implemented and has strong technical evidence. Its formal product gate remains `REWORK` because human usefulness and correction-time evidence are incomplete.
+
+Replex V2 is partly implemented as a local POC. Gates A–C (model/contract, media, agent) have bounded technical evidence. On `main` today:
+
+- the V2 schema, reducer, and frozen service contract v1
+- immutable video/image/audio import with native FFmpeg evidence
+- 2D composition rendering and the `camera-push.v1` motion treatment
+- a core mixed-project selective-recapture proof
+- a local executor serving import, operation, agent-edit, and preview/final render jobs over loopback HTTP and a command CLI
+
+Still open: Gate D (independent human review; the existing reviews are synthetic and correction time is unmeasured) and Gate E (recapture is not yet an executor job). The agent workflow is proven with a deterministic scripted model only; no live-model quality is claimed. Cloud rendering is not started and production is not authorized. See the [V2 roadmap](Docs/v2/roadmap.md) for gate status, and start with the [documentation index](Docs/README.md), [V2 architecture](Docs/architecture/REPLEX_V2.md), and [V2 PRD](Docs/REPLEX_V2_PRD.md).
 
 ## Product evolution
 
@@ -79,6 +89,10 @@ src/
   inspect.ts      # bounded inspection views
   reconcile.ts    # selective recapture and preservation asserts
   report.ts       # static report.html
+  *-v2.ts         # V2: schema, migrate, operations, import, media evidence,
+                  #     inspect, agent (+ OpenAI client), render, motion, recapture
+  service-contract/  # V2 frozen service contract v1 (Zod schemas)
+  service/        # V2 local executor: project store, jobs, loopback HTTP, CLIs
 fixtures/
   apps/normal/    # App A — normal SaaS workflow
   apps/dynamic/   # App B — authenticated async + modal/dropdown/toast
@@ -99,7 +113,7 @@ Module boundaries: `Docs/poc/technical_poc.md:7`. Work artifacts are gitignored 
 
 - Node.js `>=22`
 - npm (lockfile committed) — `technical_poc` notes `pnpm` as gated production choice
-- FFmpeg + ffprobe on `PATH` (versions recorded in preflight)
+- FFmpeg + ffprobe on `PATH` (versions recorded in preflight). V2 render tests are validated against FFmpeg 9.0.x; older system builds (for example 6.1) fail them. Point `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` at absolute direct binaries to use a specific build. Absolute paths also enable the motion tests, which are skipped otherwise.
 - Playwright bundled Chromium (`npx playwright install chromium`)
 
 ---
@@ -117,7 +131,23 @@ Preflight validates FFmpeg/ffprobe, Chromium, disk paths, origins, and approvals
 
 ---
 
-## CLI
+## V2 local service
+
+The V2 executor runs one workspace at a time on a workspace-derived loopback port.
+
+```bash
+# Long-running loopback HTTP service; prints {"url", "bearerToken"} on stdout
+npm run service:v2 -- --workspace <dir> [--import-root <dir>]... [--allow-origin <origin>]... [--agent-model <model>]
+
+# One-shot command: runs one service command from a JSON request and waits for its job
+npm run service:v2:command -- --workspace <dir> --command <command> --input <request.json> [--source-path <file>] [--agent-model <model>]
+```
+
+Commands: `create_project`, `open_project`, `import_asset` (requires `--source-path`), `apply_operations`, `request_agent_edit`, `render_preview`, `render_final`, `cancel_job`. Agent edits are enabled only when `--agent-model` names a model and `OPENAI_API_KEY` is set in the environment or a local `.env`; otherwise capabilities omit `request_agent_edit` and requests fail with `CAPABILITY_UNAVAILABLE`. Final renders require a passed verification of the same revision. HTTP routes, events, and error shapes are documented in [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md).
+
+---
+
+## V1 CLI
 
 ```bash
 npm run cli -- capture --help
@@ -174,9 +204,10 @@ Checks before render: approved flow completed, every expected checkpoint reached
 | Doc | Purpose |
 |-----|---------|
 | [`Docs/README.md`](Docs/README.md) | Status-labelled documentation index |
-| [`Docs/architecture/REPLEX_V2.md`](Docs/architecture/REPLEX_V2.md) | Normative V2 architecture; not implemented |
+| [`Docs/architecture/REPLEX_V2.md`](Docs/architecture/REPLEX_V2.md) | Normative V2 architecture; partly implemented (see roadmap) |
 | [`Docs/REPLEX_V2_PRD.md`](Docs/REPLEX_V2_PRD.md) | V2 product definition and POC scope |
-| [`Docs/v2/implementation-plan.md`](Docs/v2/implementation-plan.md) | Dependency-ordered future implementation plan |
+| [`Docs/v2/implementation-plan.md`](Docs/v2/implementation-plan.md) | Dependency-ordered implementation plan with per-slice status and validation records |
+| [`Docs/v2/roadmap.md`](Docs/v2/roadmap.md) | V2 phases, decision gates, and current gate status |
 | [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md) | Gurbaaz frontend handoff |
 | [`Docs/PRD.md`](Docs/PRD.md) | Normative POC scope, requirements POC-01…POC-20, pass/fail gates |
 | [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md) | Minimal local architecture, data model, contracts |
