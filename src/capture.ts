@@ -37,7 +37,7 @@ export class CaptureRunError extends Error {
   runPath?: string;
 
   constructor(
-    readonly code: "ACTION_FAILED" | "AUTH_EXPIRED" | "CHECKPOINT_MISMATCH" | "ORIGIN_NOT_ALLOWED",
+    readonly code: "ACTION_FAILED" | "AUTH_EXPIRED" | "CHECKPOINT_MISMATCH" | "ORIGIN_NOT_ALLOWED" | "CANCELLED",
     readonly actionId: string,
     message: string,
   ) {
@@ -69,6 +69,8 @@ export interface CaptureOptions {
   ffprobePath?: string;
   storageStatePath?: string;
   uploadRoots?: string[];
+  /** Cooperative cancellation, checked before each approved step and before scenes are split. */
+  signal?: AbortSignal;
 }
 
 export interface CaptureResult {
@@ -454,6 +456,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     const startedScenes = new Set<string>();
     for (const step of flow.steps) {
       currentActionId = step.id;
+      if (options.signal?.aborted) throw new CaptureRunError("CANCELLED", step.id, "browser capture was cancelled");
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
         const path = join(runRoot, "screenshots", `${artifactSceneKey(step.sceneKey)}-before.png`);
         await writeImmutableArtifact(path, await activePage.screenshot());
@@ -503,6 +506,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     logsWritten = true;
     if (!video) throw new Error("Playwright video recording did not start");
     const rawVideoPath = await video.path();
+    if (options.signal?.aborted) throw new CaptureRunError("CANCELLED", currentActionId, "browser capture was cancelled");
     const captures = await splitSourceCaptures(rawVideoPath, runRoot, runId, scenePlan, actionEvents, options);
     const endedAt = new Date().toISOString();
     await writeImmutableArtifact(runPath, Buffer.from(JSON.stringify({ id: runId, attempt, startedAt, endedAt, status: "passed" }, null, 2)));
