@@ -106,6 +106,16 @@ The agent is enabled only when the host names a model: `--agent-model <model>` o
 - `POST /v1/jobs/render-preview` (`RenderPreviewRequestSchema`) renders the pinned revision, which must be current, and registers the verified artifact. `POST /v1/jobs/render-final` (`RenderFinalRequestSchema`) also requires a `verificationRefId` that passed for that revision; otherwise the job fails with `VERIFICATION_FAILED`. Both emit `render_artifact.created`.
 - The bounded renderer needs clips to cover the composition duration. A speed change without a matching trim is rejected (`PREVIEW_UNSUPPORTED` inside the agent; `RENDER_FAILED` for render jobs).
 
+## Browser recapture jobs (V2-704)
+
+Recapture is enabled only when the host supplies browser targets: `--browser-config <file>` on `service:v2` or `service:v2:command`. The file maps an approved flow ID to `{ environment, values?, resetUrl? }`, where `environment` uses the V1 `EnvironmentSchema` and `resetUrl` must sit on an allowed origin. The flow itself comes from the project's canonical `browser.flows`; the frontend never sends flows, origins, credentials, or paths. Without a config, capabilities omit `recapture_browser_scene`/`browser_recapture` and submission fails with `CAPABILITY_UNAVAILABLE` (HTTP 404).
+
+- `POST /v1/jobs/recapture-browser-scene` takes `RecaptureRequestSchema`: the browser `assetId` to replace, the `changedActionIds` the user asserts changed, and a `reason`. The job runs in the `capturing` stage. It drives the asset's approved flow in bundled Chromium, keeps only that asset's scene, stores the new bytes as an immutable content-addressed `browser_capture` asset, and commits one `replace_browser_capture` revision (actor `recapture`). Every clip that used the old asset now points at the replacement, with all timing, trim, transform, and audio fields unchanged. The old asset stays in the project. A successful job returns the new `revisionId` and the replacement `assetId`, and emits `revision.created`.
+- Each recapture writes a preservation report under the project's `evidence/recapture/`. It records hashes before and after for assets, clips, composition, browser history, and revisions. It contains no paths, origins, or credentials. Changed actions are labelled host-asserted; nothing infers them from pixels.
+- Failures: a stale base pin fails with `STALE_JOB_INPUT`; a missing or non-browser asset with `VALIDATION_FAILED`; a flow this host has no target for with `CAPABILITY_UNAVAILABLE`; a flow that does not complete with a retryable `BROWSER_CAPTURE_FAILED`; an invalid replacement scene (for example, one too short for a retained clip range) with `BROWSER_CAPTURE_FAILED` or `OPERATION_REJECTED`. No revision is published on failure.
+- A restart after the replacement committed reports the published revision without driving the browser again. Running recapture jobs are not cancellable; queued ones are.
+- The initial browser capture is not an executor job yet (`start_browser_capture` is not advertised), so a project's first browser assets must come from an existing capture path.
+
 ## Agent progress UX
 
 Show truthful stages such as `inspecting_assets`, `planning`, `validating_operations`, `applying_revision`, `verifying`, and `rendering_preview`. Do not invent percentage precision when the backend only knows a stage. Surface evidence and accepted/rejected operation summaries after completion, not hidden chain-of-thought.
@@ -195,7 +205,8 @@ Use the finalized contract types now; wait for a live backend before:
 The local runtime implements bounded loopback async transport and persisted
 project/job recovery for semantic-operation and asset-import jobs. Frontend
 integration must follow the live capability set and must not assume evidence,
-agent, capture/recapture, verify, preview, or render jobs. Broader process
+agent, capture, recapture, verify, preview, or render jobs beyond those the live
+capability set advertises. Broader process
 supervision, cloud targets, and backend-specific motion controls remain deferred
 until their services advertise those capabilities.
 

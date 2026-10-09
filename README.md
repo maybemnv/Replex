@@ -9,10 +9,10 @@ Replex V2 is partly implemented as a local POC. Gates A–C (model/contract, med
 - the V2 schema, reducer, and frozen service contract v1
 - immutable video/image/audio import with native FFmpeg evidence
 - 2D composition rendering and the `camera-push.v1` motion treatment
-- a core mixed-project selective-recapture proof
-- a local executor serving import, operation, agent-edit, and preview/final render jobs over loopback HTTP and a command CLI
+- selective browser recapture in a mixed project, with machine-readable preservation evidence
+- a local executor serving import, operation, agent-edit, browser-recapture, and preview/final render jobs over loopback HTTP and a command CLI
 
-Still open: Gate D (independent human review; the existing reviews are synthetic and correction time is unmeasured) and Gate E (recapture is not yet an executor job). The agent workflow is proven with a deterministic scripted model only; no live-model quality is claimed. Cloud rendering is not started and production is not authorized. See the [V2 roadmap](Docs/v2/roadmap.md) for gate status, and start with the [documentation index](Docs/README.md), [V2 architecture](Docs/architecture/REPLEX_V2.md), and [V2 PRD](Docs/REPLEX_V2_PRD.md).
+Gate E (differentiation) has bounded technical evidence: a recapture job runs over HTTP in a mixed project, and the recaptured revision renders a verified preview. The initial browser capture is not an executor job yet. Still open: Gate D (independent human review; the existing reviews are synthetic and correction time is unmeasured). The agent workflow is proven with a deterministic scripted model only; no live-model quality is claimed. Cloud rendering is not started and production is not authorized. See the [V2 roadmap](Docs/v2/roadmap.md) for gate status, and start with the [documentation index](Docs/README.md), [V2 architecture](Docs/architecture/REPLEX_V2.md), and [V2 PRD](Docs/REPLEX_V2_PRD.md).
 
 ## Product evolution
 
@@ -137,13 +137,13 @@ The V2 executor runs one workspace at a time on a workspace-derived loopback por
 
 ```bash
 # Long-running loopback HTTP service; prints {"url", "bearerToken"} on stdout
-npm run service:v2 -- --workspace <dir> [--import-root <dir>]... [--allow-origin <origin>]... [--agent-model <model>]
+npm run service:v2 -- --workspace <dir> [--import-root <dir>]... [--allow-origin <origin>]... [--agent-model <model>] [--browser-config <file>]
 
 # One-shot command: runs one service command from a JSON request and waits for its job
-npm run service:v2:command -- --workspace <dir> --command <command> --input <request.json> [--source-path <file>] [--agent-model <model>]
+npm run service:v2:command -- --workspace <dir> --command <command> --input <request.json> [--source-path <file>] [--agent-model <model>] [--browser-config <file>]
 ```
 
-Commands: `create_project`, `open_project`, `import_asset` (requires `--source-path`), `apply_operations`, `request_agent_edit`, `render_preview`, `render_final`, `cancel_job`. Agent edits are enabled only when `--agent-model` names a model and `OPENAI_API_KEY` is set in the environment or a local `.env`; otherwise capabilities omit `request_agent_edit` and requests fail with `CAPABILITY_UNAVAILABLE`. Final renders require a passed verification of the same revision. HTTP routes, events, and error shapes are documented in [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md).
+Commands: `create_project`, `open_project`, `import_asset` (requires `--source-path`), `apply_operations`, `request_agent_edit`, `recapture_browser_scene`, `render_preview`, `render_final`, `cancel_job`. Agent edits are enabled only when `--agent-model` names a model and `OPENAI_API_KEY` is set in the environment or a local `.env`; otherwise capabilities omit `request_agent_edit` and requests fail with `CAPABILITY_UNAVAILABLE`. Recapture is enabled only when `--browser-config` maps approved flow IDs to host-owned browser environments. Final renders require a passed verification of the same revision. HTTP routes, events, and error shapes are documented in [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md).
 
 ---
 
