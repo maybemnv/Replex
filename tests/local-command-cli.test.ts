@@ -42,6 +42,12 @@ describe("local executor command CLI parity", () => {
       revisionId: created.revisionId, verificationRefId: "verification-none",
     })).toBe(1);
     expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "render_final", state: "failed", error: { code: "VERIFICATION_FAILED" } });
+
+    // An empty project cannot plan a render, so verification fails and is recorded.
+    expect(await run("verify_revision", {
+      contractVersion: "v1", idempotencyKey: "cli-verify", projectId: created.projectId, revisionId: created.revisionId,
+    })).toBe(1);
+    expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "verify_revision", state: "failed", error: { code: "VERIFICATION_FAILED" } });
   });
 
   it("rejects agent edits unless a model is explicitly enabled", async () => {

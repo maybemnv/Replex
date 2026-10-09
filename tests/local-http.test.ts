@@ -122,7 +122,7 @@ describe("LocalExecutorServer", () => {
     const capabilities = await call("/capabilities", { headers: { origin: "http://localhost:5173" } });
     expect(capabilities.status).toBe(200);
     expect(capabilities.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
-    expect(await capabilities.json()).toMatchObject({ contractVersion: "v1", target: "local", jobKinds: ["asset_import", "apply_operations", "render_preview", "render_final"] });
+    expect(await capabilities.json()).toMatchObject({ contractVersion: "v1", target: "local", jobKinds: ["asset_import", "apply_operations", "verify_revision", "render_preview", "render_final"] });
 
     const createdResponse = await call("/projects/create", {
       method: "POST",

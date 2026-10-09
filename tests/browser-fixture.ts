@@ -52,7 +52,7 @@ export async function startReleaseFixture() {
   const origin = `http://127.0.0.1:${address.port}`;
   const flow = normalFlow(origin);
   const browserTargets: BrowserTargets = {
-    [flow.id]: { environment: normalEnvironment(origin), values: { filterValue: "release" }, resetUrl: `${origin}/__reset` },
+    [flow.id]: { flow, environment: normalEnvironment(origin), values: { filterValue: "release" }, resetUrl: `${origin}/__reset` },
   };
   return {
     origin,
