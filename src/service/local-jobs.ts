@@ -14,10 +14,12 @@ import {
   JobEventSchema,
   JobEventPageSchema,
   JobViewSchema,
+  RecaptureRequestSchema,
   RenderFinalRequestSchema,
   RenderPreviewRequestSchema,
   RequestAgentEditRequestSchema,
   type ApplyOperationsRequest,
+  type RecaptureRequest,
   type RequestAgentEditRequest,
   type RenderArtifactView,
   type RenderFinalRequest,
@@ -43,7 +45,7 @@ const MAX_AUTHORIZED_IMPORTS = 16;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema, RequestAgentEditRequestSchema]),
+  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema, RequestAgentEditRequestSchema, RecaptureRequestSchema]),
   job: JobViewSchema,
   commitFenced: z.boolean().default(false),
 }).strict();
@@ -71,13 +73,14 @@ const JobStateSchema = z.object({
 }).strict();
 type JobState = z.infer<typeof JobStateSchema>;
 type JobRecord = z.infer<typeof JobRecordSchema>;
-type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest | RequestAgentEditRequest;
+type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest | RequestAgentEditRequest | RecaptureRequest;
 type RenderJobKind = "render_preview" | "render_final";
-type JobKind = "asset_import" | "apply_operations" | "agent_edit" | RenderJobKind;
+type JobKind = "asset_import" | "apply_operations" | "agent_edit" | "browser_recapture" | RenderJobKind;
 const RUNNING_STAGE = {
   asset_import: "importing",
   apply_operations: "applying_revision",
   agent_edit: "planning",
+  browser_recapture: "capturing",
   render_preview: "rendering_preview",
   render_final: "rendering_final",
 } as const;
@@ -215,6 +218,16 @@ export class LocalJobRuntime {
     if (!this.agentModel) throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No agent model is configured for this local executor.");
     if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
     return this.submitJob(parsed.data, "agent_edit");
+  }
+
+  async submitRecapture(requestInput: RecaptureRequest): Promise<JobView> {
+    const parsed = RecaptureRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The recapture request is invalid.");
+    if (!this.projects.capabilities().availableCommands.includes("recapture_browser_scene")) {
+      throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No browser targets are configured for this local executor.");
+    }
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(parsed.data, "browser_recapture");
   }
 
   async submitRender(kind: RenderJobKind, requestInput: RenderPreviewRequest | RenderFinalRequest): Promise<JobView> {
@@ -458,7 +471,9 @@ export class LocalJobRuntime {
           ? await this.projects.applyOperations(start.request as ApplyOperationsRequest)
           : start.kind === "agent_edit"
             ? await this.runAgentEdit(start.request as RequestAgentEditRequest, start.thread, controller.signal)
-            : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, controller.signal);
+            : start.kind === "browser_recapture"
+              ? await this.projects.recaptureScene(start.request as RecaptureRequest, controller.signal)
+              : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, controller.signal);
       if (!result.ok) {
         await this.finishFailure(jobId, failureFor(result.code));
         return;
@@ -714,6 +729,11 @@ function failureFor(code: string): ContractError {
   if (code === "INSPECTION_FAILED") return { code: "INSUFFICIENT_EVIDENCE", message: "The agent could not inspect enough project evidence.", retryable: false };
   if (code === "STALE_THREAD") return { code: "STALE_JOB_INPUT", message: "The conversation no longer matches the project revision.", retryable: false };
   if (code === "MODEL_ERROR" || code === "TIMEOUT" || code === "CANCELLED") return { code: "EXECUTION_FAILED", message: "The agent request could not be completed.", retryable: true };
+  if (code === "CAPTURE_FAILED") return { code: "BROWSER_CAPTURE_FAILED", message: "The approved browser flow could not be captured.", retryable: true };
+  if (code === "SCENE_INVALID" || code === "SOURCE_NOT_AUTHORIZED" || code === "SOURCE_CHANGED") return { code: "BROWSER_CAPTURE_FAILED", message: "The browser capture did not produce a valid replacement scene.", retryable: false };
+  if (code === "FLOW_MISMATCH" || code === "INVALID_REQUEST") return { code: "VALIDATION_FAILED", message: "The selected asset cannot be recaptured from an approved flow.", retryable: false };
+  if (code === "BROWSER_TARGET_UNAVAILABLE") return { code: "CAPABILITY_UNAVAILABLE", message: "This host cannot drive the asset's approved browser flow.", retryable: false, requiredCapability: "recapture_browser_scene" };
+  if (code === "EVIDENCE_FAILED") return { code: "STORAGE_FAILED", message: "The recapture or its preservation evidence could not be stored.", retryable: true };
   if (code === "UNSUPPORTED_OPERATION") return { code: "CAPABILITY_UNAVAILABLE", message: "This operation is not available in the local executor.", retryable: false, requiredCapability: "apply_operations" };
   return { code: "OPERATION_REJECTED", message: "The canonical reducer rejected the operation batch.", retryable: false };
 }
