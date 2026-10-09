@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import { canonicalJson } from "../canonical-json.js";
 import { applyOperationBatch, createProjectV2, type OperationBatchResult } from "../operations-v2.js";
@@ -22,21 +22,25 @@ import {
   type ProjectSnapshot,
   type RevisionView,
   type RecaptureRequest,
+  type StartBrowserCaptureRequest,
   type RenderArtifactView,
   type RenderFinalRequest,
   type RenderPreviewRequest,
   type RequestAgentEditRequest,
+  type VerificationView,
+  type VerifyRevisionRequest,
 } from "../service-contract/index.js";
 import { LocalProjectStore, LocalProjectStoreError } from "./project-store.js";
-import { importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
-import { renderCurrentRevisionV2, type MediaExecutionAuthorization } from "../render-v2.js";
+import { authorizeLocalImport, closeAuthorizedLocalImport, importLocalAssetV2, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
+import { preflightRevisionV2, renderCurrentRevisionV2, type MediaExecutionAuthorization } from "../render-v2.js";
 import { runConversationalEditV2, type V2AgentModelClient, type V2ConversationThread } from "../agent-v2.js";
 import { inspectProjectV2 } from "../inspect-v2.js";
 import { generateMediaEvidence, type MediaEvidenceIndex } from "../media-evidence.js";
 import { semanticHashV2 } from "../operations-v2.js";
 import { runCapture, type CaptureResult } from "../capture.js";
 import { recaptureBrowserSceneV2, RecaptureV2Error } from "../recapture-v2.js";
-import { EnvironmentSchema, IdSchema } from "../schema.js";
+import { EnvironmentSchema, FlowSchema, IdSchema } from "../schema.js";
+import { MediaAssetSchema } from "../schema-v2.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -48,6 +52,12 @@ export type RenderOutcome =
   | { ok: true; revisionId: string; outputId: string; artifact: RenderArtifactView }
   | { ok: false; code: "STALE_REVISION" | "VERIFICATION_REQUIRED" | "RENDER_FAILED"; detail: string };
 
+export type VerifyOutcome =
+  | { ok: true; revisionId: string; verification: VerificationView }
+  | { ok: false; code: "STALE_REVISION"; detail: string }
+  | { ok: false; code: "VERIFICATION_FAILED"; detail: string; verification: VerificationView };
+
+export type CaptureOutcome = RecaptureOutcome;
 export type RecaptureOutcome =
   | { ok: true; revisionId: string; revision: RevisionView; assetId: string }
   | { ok: false; code: string; detail: string };
@@ -57,10 +67,13 @@ export type RecaptureOutcome =
  * state; the host supplies only where and how to drive it. Never model or request supplied.
  */
 export const BrowserTargetsSchema = z.record(IdSchema, z.object({
+  /** Approved flow to register with a project's first capture; a registered project flow always wins and must match. */
+  flow: FlowSchema.optional(),
   environment: EnvironmentSchema,
   values: z.record(z.string().min(1).max(128), z.string().max(10_000)).optional(),
   resetUrl: z.string().url().optional(),
 }).strict().superRefine((target, context) => {
+  if (target.flow?.steps.some((step) => !step.approved)) context.addIssue({ code: "custom", path: ["flow"], message: "browser target flows must be approved" });
   if (target.resetUrl && !target.environment.allowedOrigins.some((origin) => new URL(origin).origin === new URL(target.resetUrl!).origin)) {
     context.addIssue({ code: "custom", path: ["resetUrl"], message: "resetUrl must use an allowed origin" });
   }
@@ -77,6 +90,10 @@ const MAX_AGENT_HISTORY = 1_000;
 
 /** Host-owned media tool paths; motion presets require absolute executables. */
 export interface MediaToolOptions { ffmpegPath?: string; ffprobePath?: string }
+
+/** Called right before a job's irreversible commit; rejects when the job was cancelled first. */
+export type CommitFence = () => Promise<void>;
+const noFence: CommitFence = async () => undefined;
 
 export class LocalProjectService {
   private readonly store: LocalProjectStore;
@@ -173,7 +190,7 @@ export class LocalProjectService {
   }
 
   /** Renders a pinned revision; renders register only on the current revision, final renders require a passed verification. */
-  async renderRevision(request: RenderPreviewRequest | RenderFinalRequest, signal: AbortSignal): Promise<RenderOutcome> {
+  async renderRevision(request: RenderPreviewRequest | RenderFinalRequest, signal: AbortSignal, fence: CommitFence = noFence): Promise<RenderOutcome> {
     const { current } = await this.store.currentAndRevision(request.projectId, request.revisionId);
     if (current.currentRevisionId !== request.revisionId) return { ok: false, code: "STALE_REVISION", detail: "renders are registered only on the current revision" };
     if ("verificationRefId" in request && !current.verification.refs.some(({ id, revisionId, status }) =>
@@ -187,16 +204,46 @@ export class LocalProjectService {
       if (signal.aborted) throw error;
       return { ok: false, code: "RENDER_FAILED", detail: "the bounded renderer could not produce a verified output" };
     }
+    await fence();
     const registered = await this.store.registerRender(request.projectId, rendered.artifact);
     const output = registered.outputs.find(({ outputId }) => outputId === rendered.artifact.outputId)!;
     return { ok: true, revisionId: request.revisionId, outputId: output.outputId, artifact: artifactView(output) };
   }
 
   /**
+   * Verifies a pinned revision without rendering: it must be current, plan under the bounded renderer, and every
+   * referenced source must still match its hash. Records a passed or failed verification with its report.
+   */
+  async verifyRevision(request: VerifyRevisionRequest): Promise<VerifyOutcome> {
+    const { current } = await this.store.currentAndRevision(request.projectId, request.revisionId);
+    if (current.currentRevisionId !== request.revisionId) return { ok: false, code: "STALE_REVISION", detail: "verification is recorded only on the current revision" };
+    const sourceRevisionHash = semanticHashV2(current);
+    let preflight: Awaited<ReturnType<typeof preflightRevisionV2>> | undefined;
+    try { preflight = await preflightRevisionV2(current, await this.mediaAuthorization(current)); }
+    catch { preflight = undefined; }
+    const status = preflight ? "passed" as const : "failed" as const;
+    const report = {
+      schemaVersion: 1,
+      kind: "revision_preflight",
+      revisionId: request.revisionId,
+      sourceRevisionHash,
+      status,
+      checks: { plan: status === "passed", sourceHashes: status === "passed" },
+      ...(preflight ? { planHash: preflight.planHash, assets: preflight.assets } : {}),
+    };
+    const id = `verification-${digest(canonicalJson(report)).slice(0, 32)}`;
+    const project = await this.store.registerVerification(request.projectId, { id, revisionId: request.revisionId, status, evidenceRefs: [] }, report);
+    const verification = project.verification;
+    return status === "passed"
+      ? { ok: true, revisionId: request.revisionId, verification }
+      : { ok: false, code: "VERIFICATION_FAILED", detail: "the revision failed plan or source verification", verification };
+  }
+
+  /**
    * Runs one bounded conversational edit on the pinned base revision. The agent commits through the
    * store's reducer CAS together with its verified preview; the saved thread is host-owned.
    */
-  async agentEdit(request: RequestAgentEditRequest, saved: V2ConversationThread | undefined, model: V2AgentModelClient, signal: AbortSignal): Promise<AgentEditOutcome> {
+  async agentEdit(request: RequestAgentEditRequest, saved: V2ConversationThread | undefined, model: V2AgentModelClient, signal: AbortSignal, fence: CommitFence = noFence): Promise<AgentEditOutcome> {
     const current = await this.store.current(request.projectId);
     const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
     const history = await this.store.operationLog(request.projectId);
@@ -244,6 +291,7 @@ export class LocalProjectService {
       renderAuthorization: authorization,
       renderOptions: this.media,
       commitCanonicalRevision: async (candidate) => {
+        await fence();
         const committed = await this.store.commitCandidate(request.projectId, candidate);
         return committed.ok ? { ok: true, project: committed.project } : { ok: false, code: committed.code, detail: committed.detail };
       },
@@ -256,10 +304,103 @@ export class LocalProjectService {
   }
 
   /**
+   * Captures a host-approved browser flow and commits every scene as an immutable `browser_capture` asset in one
+   * revision, registering the flow on first use. The result names the first scene's asset.
+   */
+  async startCapture(request: StartBrowserCaptureRequest, signal: AbortSignal, fence: CommitFence = noFence): Promise<CaptureOutcome> {
+    const current = await this.store.current(request.projectId);
+    const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
+    const prior = (await this.store.operationLog(request.projectId)).filter((record) => record.intentId === intentId);
+    if (prior.length) {
+      // Restart after the capture committed: report it without driving the browser again.
+      const first = prior.find((record) => record.input.type === "import_asset");
+      if (prior[0]!.baseRevisionId !== request.baseRevisionId || first?.input.type !== "import_asset") {
+        throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different capture");
+      }
+      return { ok: true, revisionId: first.resultRevisionId, revision: revisionView(current, first.resultRevisionId), assetId: first.input.asset.id };
+    }
+    if (current.currentRevisionId !== request.baseRevisionId) return { ok: false, code: "STALE_REVISION", detail: "the project changed before this capture started" };
+    const target = this.browserTargets[request.flowId];
+    const registered = current.browser?.flows[request.flowId];
+    const flow = registered ?? target?.flow;
+    if (!target || !flow) return { ok: false, code: "BROWSER_TARGET_UNAVAILABLE", detail: "this host has no approved flow and browser target for the request" };
+    if (registered && target.flow && canonicalJson(registered) !== canonicalJson(target.flow)) {
+      return { ok: false, code: "FLOW_MISMATCH", detail: "the host flow differs from the flow registered in the project" };
+    }
+
+    const captureRoot = join(await this.store.projectRoot(request.projectId), "captures");
+    await mkdir(captureRoot, { recursive: true, mode: 0o700 });
+    let capture: CaptureResult;
+    try {
+      capture = await runCapture(flow, target.environment, {
+        artifactRoot: captureRoot,
+        signal,
+        ...(target.values ? { values: target.values } : {}),
+        ...(target.resetUrl ? { reset: () => resetBrowserTarget(target.resetUrl!, signal) } : {}),
+        ...this.media,
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { ok: false, code: "CAPTURE_FAILED", detail: "the approved flow did not complete" };
+    }
+    await fence();
+    const runRoot = dirname(capture.runPath);
+    const sources: AuthorizedLocalImport[] = [];
+    try {
+      for (const scene of capture.captures) sources.push(await authorizeLocalImport(scene.sourcePath, [runRoot]));
+      const result = await this.store.applyBatchWithLocalAssets(request.projectId, {
+        baseRevisionId: request.baseRevisionId,
+        intentId,
+        options: this.media,
+        sources: capture.captures.map((scene, index) => ({
+          source: sources[index]!,
+          buildAsset: (facts) => {
+            if (facts.sha256 !== scene.sha256 || facts.type !== "uploaded_video" || facts.probe.width !== scene.width
+              || facts.probe.height !== scene.height || facts.probe.durationMs !== scene.durationMs) {
+              throw new LocalImportError("SOURCE_CHANGED", "capture source differs from its run manifest");
+            }
+            return MediaAssetSchema.parse({
+              id: `asset-${digest(canonicalJson({ projectId: request.projectId, runId: scene.runId, sceneKey: scene.sceneKey, sha256: facts.sha256 })).slice(0, 32)}`,
+              type: "browser_capture",
+              path: facts.path,
+              sha256: facts.sha256,
+              probe: facts.probe,
+              provenance: {
+                kind: "browser", flowId: flow.id, sceneKey: scene.sceneKey, actionIds: scene.actionIds,
+                checkpointActionId: scene.checkpointActionId, runId: scene.runId, capturedAt: capture.run.endedAt,
+              },
+            });
+          },
+        })),
+        buildBatch: (assets) => ({
+          baseRevisionId: request.baseRevisionId,
+          actor: "user",
+          intentId,
+          evidenceRefs: [],
+          createdAt: capture.run.endedAt,
+          operations: [
+            ...(registered ? [] : [{ type: "register_browser_flow" as const, flow }]),
+            ...assets.map((asset) => ({ type: "import_asset" as const, asset })),
+          ],
+        }),
+      });
+      if (!result.ok) return { ok: false, code: result.code, detail: result.detail };
+      const firstAsset = result.operationLog.find(({ input }) => input.type === "import_asset")!;
+      if (firstAsset.input.type !== "import_asset") throw new Error("capture batch has no imported scene");
+      return { ok: true, revisionId: result.revisionId, revision: revisionView(result.project, result.revisionId), assetId: firstAsset.input.asset.id };
+    } catch (error) {
+      if (error instanceof LocalImportError && error.code === "SOURCE_NOT_AUTHORIZED") return { ok: false, code: "SCENE_INVALID", detail: "a captured scene is outside its run" };
+      throw error;
+    } finally {
+      for (const source of sources) await closeAuthorizedLocalImport(source).catch(() => undefined);
+    }
+  }
+
+  /**
    * Recaptures the scene behind one browser asset from its approved flow and commits one
    * `replace_browser_capture` revision with preservation evidence. Changed actions are host asserted.
    */
-  async recaptureScene(request: RecaptureRequest, signal: AbortSignal): Promise<RecaptureOutcome> {
+  async recaptureScene(request: RecaptureRequest, signal: AbortSignal, fence: CommitFence = noFence): Promise<RecaptureOutcome> {
     const current = await this.store.current(request.projectId);
     const intentId = "intent-" + digest(request.idempotencyKey).slice(0, 32);
     const prior = (await this.store.operationLog(request.projectId)).find((record) => record.intentId === intentId);
@@ -285,6 +426,7 @@ export class LocalProjectService {
     try {
       capture = await runCapture(flow, target.environment, {
         artifactRoot: captureRoot,
+        signal,
         ...(target.values ? { values: target.values } : {}),
         ...(target.resetUrl ? { reset: () => resetBrowserTarget(target.resetUrl!, signal) } : {}),
         ...this.media,
@@ -293,6 +435,7 @@ export class LocalProjectService {
       if (signal.aborted) throw error;
       return { ok: false, code: "CAPTURE_FAILED", detail: "the approved flow did not complete" };
     }
+    await fence();
     try {
       const result = await recaptureBrowserSceneV2(this.store, {
         projectId: request.projectId,
@@ -343,7 +486,8 @@ export class LocalProjectService {
   }
 
   capabilities(): CapabilitySet {
-    return localCapabilities(this.agentEnabled, Object.keys(this.browserTargets).length > 0);
+    const targets = Object.values(this.browserTargets);
+    return localCapabilities(this.agentEnabled, targets.length > 0, targets.some(({ flow }) => flow !== undefined));
   }
 }
 
@@ -421,11 +565,11 @@ function snapshot(current: ProjectV2, selected: ProjectV2, capabilities: Capabil
   });
 }
 
-function localCapabilities(agentEnabled: boolean, recaptureEnabled: boolean): CapabilitySet {
+function localCapabilities(agentEnabled: boolean, recaptureEnabled: boolean, captureEnabled: boolean): CapabilitySet {
   return CapabilitySetSchema.parse({
     contractVersion: "v1",
     target: "local",
-    availableCommands: ["create_project", "open_project", "import_asset", "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), ...(recaptureEnabled ? ["recapture_browser_scene" as const] : []), "render_preview", "render_final", "cancel_job"],
+    availableCommands: ["create_project", "open_project", "import_asset", ...(captureEnabled ? ["start_browser_capture" as const] : []), "apply_operations", ...(agentEnabled ? ["request_agent_edit" as const] : []), ...(recaptureEnabled ? ["recapture_browser_scene" as const] : []), "verify_revision", "render_preview", "render_final", "cancel_job"],
     availableOperations: [
       "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip",
       "remove_clip", "replace_asset", "set_transform", "set_opacity", "set_speed",
@@ -433,7 +577,7 @@ function localCapabilities(agentEnabled: boolean, recaptureEnabled: boolean): Ca
       "remove_layer", "set_volume", "mute_clip", "animate_property",
     ],
     assetTypes: ["uploaded_video", "image", "audio"],
-    jobKinds: ["asset_import", "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), ...(recaptureEnabled ? ["browser_recapture" as const] : []), "render_preview", "render_final"],
+    jobKinds: ["asset_import", ...(captureEnabled ? ["browser_capture" as const] : []), "apply_operations", ...(agentEnabled ? ["agent_edit" as const] : []), ...(recaptureEnabled ? ["browser_recapture" as const] : []), "verify_revision", "render_preview", "render_final"],
     cancellationSupported: true,
     credentialActions: [],
   });
