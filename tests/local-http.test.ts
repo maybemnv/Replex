@@ -45,6 +45,29 @@ describe("LocalExecutorServer", () => {
     expect(await submit(true)).toMatchObject({ status: 202, body: { kind: "agent_edit", state: "queued" } });
   });
 
+  it("routes browser recapture only when the server has browser targets", async () => {
+    workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-recapture-"));
+    const submit = async (targets: boolean) => {
+      server = new LocalExecutorServer({ workspaceRoot: workspaceRoot!, ...(targets ? { browserTargets: { "normal-approved-flow": { environment: { appOrigin: "http://127.0.0.1:4173", allowedOrigins: ["http://127.0.0.1:4173"], viewport: { width: 1920, height: 1080 }, locale: "en-US", timezone: "UTC", browserVersion: "bundled-chromium", reducedMotion: "reduce", colorScheme: "light" } } } } : {}) });
+      const session = await server.start();
+      const response = await fetch(session.url + "/jobs/recapture-browser-scene", {
+        method: "POST",
+        headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          contractVersion: "v1", idempotencyKey: `http-recapture-${targets}`, projectId: "project-absent", baseRevisionId: "revision-absent",
+          assetId: "asset-absent", changedActionIds: ["apply-filter"], reason: "Changed", executionTarget: "local",
+        }),
+      });
+      const body = await response.json();
+      await server.stop();
+      server = undefined;
+      return { status: response.status, body };
+    };
+
+    expect(await submit(false)).toMatchObject({ status: 404, body: { error: { code: "CAPABILITY_UNAVAILABLE" } } });
+    expect(await submit(true)).toMatchObject({ status: 202, body: { kind: "browser_recapture", state: "queued" } });
+  });
+
   it("routes render preview and final job submissions", async () => {
     workspaceRoot = await mkdtemp(join(tmpdir(), "replex-local-http-render-"));
     server = new LocalExecutorServer({ workspaceRoot });
