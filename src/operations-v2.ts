@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import {
+  BrowserFlowSchema,
   ClipSchema,
   CropSchema,
   KeyframeSchema,
@@ -54,6 +55,8 @@ const operationSchemas = {
   animate_property: z.object({ type: z.literal("animate_property"), layerId: IdSchema, keyframes: z.array(KeyframeSchema).min(1) }).strict(),
   apply_motion_preset: z.object({ type: z.literal("apply_motion_preset"), targetId: IdSchema, presetId: IdSchema, presetVersion: nonEmptyText, parameters: z.record(z.string(), finite).optional() }).strict(),
   recapture_browser_asset: z.object({ type: z.literal("recapture_browser_asset"), assetId: IdSchema, reason: nonEmptyText }).strict(),
+  /** Host-approved browser flow registered with its first capture; flows are immutable once registered. */
+  register_browser_flow: z.object({ type: z.literal("register_browser_flow"), flow: BrowserFlowSchema }).strict(),
   replace_browser_capture: z.object({
     type: z.literal("replace_browser_capture"),
     previousAssetId: IdSchema,
@@ -86,6 +89,7 @@ export const OperationSchema = z.discriminatedUnion("type", [
   operationSchemas.animate_property,
   operationSchemas.apply_motion_preset,
   operationSchemas.recapture_browser_asset,
+  operationSchemas.register_browser_flow,
   operationSchemas.replace_browser_capture,
 ]);
 export const OperationBatchSchema = z.array(OperationSchema).min(1);
@@ -415,6 +419,13 @@ function applyOperation(project: ProjectV2, operation: Operation): string | unde
     }
     case "recapture_browser_asset":
       return "operation is deferred";
+    case "register_browser_flow": {
+      if (operation.flow.steps.some((step) => !step.approved)) return "browser flow steps must be approved";
+      project.browser ??= { flows: {}, recaptureLineage: [] };
+      if (project.browser.flows[operation.flow.id]) return "browser flow ID already exists";
+      project.browser.flows[operation.flow.id] = structuredClone(operation.flow);
+      return;
+    }
     case "replace_browser_capture":
       return replaceBrowserCapture(project, operation.previousAssetId, operation.replacementAsset, operation.changedActionIds, operation.reason);
   }

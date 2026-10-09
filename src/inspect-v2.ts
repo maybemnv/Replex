@@ -344,6 +344,7 @@ function operationSummary(record: OperationLogRecord): Record<string, unknown> {
     case "animate_property": detail = "Animated " + input.keyframes.length + " keyframe(s) on layer " + safeId(input.layerId); break;
     case "apply_motion_preset": detail = "Applied motion preset " + safeId(input.presetId) + " to " + safeId(input.targetId); break;
     case "recapture_browser_asset": detail = "Recaptured browser asset " + safeId(input.assetId) + ": " + safeText(input.reason, 80); break;
+    case "register_browser_flow": detail = "Registered approved browser flow " + safeId(input.flow.id); break;
     case "replace_browser_capture": detail = "Replaced browser asset " + safeId(input.previousAssetId) + " after " + safeText(input.reason, 80); break;
     case "split_clip": detail = "Split clip " + safeId(input.clipId) + " at " + input.atTimelineMs + " ms"; break;
   }
