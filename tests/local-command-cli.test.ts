@@ -42,6 +42,12 @@ describe("local executor command CLI parity", () => {
       revisionId: created.revisionId, verificationRefId: "verification-none",
     })).toBe(1);
     expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "render_final", state: "failed", error: { code: "VERIFICATION_FAILED" } });
+
+    // An empty project cannot plan a render, so verification fails and is recorded.
+    expect(await run("verify_revision", {
+      contractVersion: "v1", idempotencyKey: "cli-verify", projectId: created.projectId, revisionId: created.revisionId,
+    })).toBe(1);
+    expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "verify_revision", state: "failed", error: { code: "VERIFICATION_FAILED" } });
   });
 
   it("rejects agent edits unless a model is explicitly enabled", async () => {
@@ -64,6 +70,38 @@ describe("local executor command CLI parity", () => {
       baseRevisionId: created.revisionId, prompt: "Tighten the intro", preview: true,
     })).toBe(1);
     expect(JSON.parse(stderr.pop()!)).toMatchObject({ error: { code: "CAPABILITY_UNAVAILABLE" } });
+  });
+
+  it("enables browser recapture only from a valid host browser config", async () => {
+    temporaryRoot = await mkdtemp(join(tmpdir(), "replex-local-cli-recapture-"));
+    const workspace = join(temporaryRoot, "workspace");
+    const inputPath = join(temporaryRoot, "request.json");
+    const configPath = join(temporaryRoot, "browser.json");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const run = async (command: string, input: unknown, extra: string[] = []) => {
+      await writeFile(inputPath, JSON.stringify(input), "utf8");
+      return runServiceCommandCli(["--workspace", workspace, "--command", command, "--input", inputPath, ...extra], {
+        stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text),
+      });
+    };
+    expect(await run("create_project", { contractVersion: "v1", idempotencyKey: "cli-recapture-create", name: "CLI recapture" })).toBe(0);
+    const created = JSON.parse(stdout.pop()!) as { projectId: string; revisionId: string };
+    const recapture = (idempotencyKey: string) => ({
+      contractVersion: "v1", idempotencyKey, projectId: created.projectId, baseRevisionId: created.revisionId,
+      assetId: "asset-absent", changedActionIds: ["apply-filter"], reason: "Changed", executionTarget: "local",
+    });
+
+    expect(await run("recapture_browser_scene", recapture("cli-recapture-off"))).toBe(1);
+    expect(JSON.parse(stderr.pop()!)).toMatchObject({ error: { code: "CAPABILITY_UNAVAILABLE" } });
+
+    await writeFile(configPath, JSON.stringify({ "normal-approved-flow": { environment: { appOrigin: "not-an-origin" } } }), "utf8");
+    expect(await run("recapture_browser_scene", recapture("cli-recapture-invalid"), ["--browser-config", configPath])).toBe(1);
+    expect(JSON.parse(stderr.pop()!)).toMatchObject({ error: { code: "VALIDATION_FAILED" } });
+
+    await writeFile(configPath, JSON.stringify({ "normal-approved-flow": { environment: { "appOrigin": "http://127.0.0.1:4173", "allowedOrigins": ["http://127.0.0.1:4173"], "viewport": { "width": 1920, "height": 1080 }, "locale": "en-US", "timezone": "UTC", "browserVersion": "bundled-chromium", "reducedMotion": "reduce", "colorScheme": "light" } } }), "utf8");
+    expect(await run("recapture_browser_scene", recapture("cli-recapture-on"), ["--browser-config", configPath])).toBe(1);
+    expect(JSON.parse(stdout.pop()!)).toMatchObject({ kind: "browser_recapture", state: "failed", error: { code: "VALIDATION_FAILED" } });
   });
 
   it("applies the same service requests through CLI and loopback transport", async () => {

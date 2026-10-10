@@ -11,10 +11,13 @@ import type {
   OpenProjectRequest,
   ProjectCreatedResponse,
   ProjectSnapshot,
+  RecaptureRequest,
   RenderFinalRequest,
   RenderPreviewRequest,
   RequestAgentEditRequest,
   ServiceCommand,
+  StartBrowserCaptureRequest,
+  VerifyRevisionRequest,
 } from "../service-contract/index.js";
 import { authorizeLocalImport, type AuthorizedLocalImport } from "../import-v2.js";
 import {
@@ -23,21 +26,24 @@ import {
   CancelJobRequestSchema,
   CreateProjectRequestSchema,
   OpenProjectRequestSchema,
+  RecaptureRequestSchema,
   RenderFinalRequestSchema,
   RenderPreviewRequestSchema,
   RequestAgentEditRequestSchema,
+  StartBrowserCaptureRequestSchema,
+  VerifyRevisionRequestSchema,
 } from "../service-contract/index.js";
 import type { V2AgentModelClient } from "../agent-v2.js";
 import { LocalJobRuntime } from "./local-jobs.js";
-import { LocalProjectService, type MediaToolOptions } from "./local.js";
+import { LocalProjectService, type BrowserTargets, type MediaToolOptions } from "./local.js";
 
-export type LocalExecutorCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "request_agent_edit" | "render_preview" | "render_final" | "cancel_job">;
+export type LocalExecutorCommand = Extract<ServiceCommand, "create_project" | "open_project" | "import_asset" | "apply_operations" | "request_agent_edit" | "start_browser_capture" | "recapture_browser_scene" | "verify_revision" | "render_preview" | "render_final" | "cancel_job">;
 
 export class LocalExecutor {
   private readonly projects: LocalProjectService;
   private readonly jobs: LocalJobRuntime;
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentModel?: V2AgentModelClient }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets }) {
     this.projects = new LocalProjectService({ ...options, agentEnabled: options.agentModel !== undefined });
     this.jobs = new LocalJobRuntime(options.workspaceRoot, this.projects, options.agentModel);
   }
@@ -74,6 +80,18 @@ export class LocalExecutor {
 
   submitAgentEdit(request: RequestAgentEditRequest): Promise<JobView> {
     return this.jobs.submitAgentEdit(request);
+  }
+
+  submitCapture(request: StartBrowserCaptureRequest): Promise<JobView> {
+    return this.jobs.submitCapture(request);
+  }
+
+  submitRecapture(request: RecaptureRequest): Promise<JobView> {
+    return this.jobs.submitRecapture(request);
+  }
+
+  submitVerify(request: VerifyRevisionRequest): Promise<JobView> {
+    return this.jobs.submitVerify(request);
   }
 
   submitRenderPreview(request: RenderPreviewRequest): Promise<JobView> {
@@ -115,6 +133,9 @@ export class LocalExecutor {
       case "apply_operations": return this.submitApplyOperations(ApplyOperationsRequestSchema.parse(input));
       case "import_asset": return this.submitImportAsset(ImportAssetRequestSchema.parse(input));
       case "request_agent_edit": return this.submitAgentEdit(RequestAgentEditRequestSchema.parse(input));
+      case "start_browser_capture": return this.submitCapture(StartBrowserCaptureRequestSchema.parse(input));
+      case "recapture_browser_scene": return this.submitRecapture(RecaptureRequestSchema.parse(input));
+      case "verify_revision": return this.submitVerify(VerifyRevisionRequestSchema.parse(input));
       case "render_preview": return this.submitRenderPreview(RenderPreviewRequestSchema.parse(input));
       case "render_final": return this.submitRenderFinal(RenderFinalRequestSchema.parse(input));
       case "cancel_job": return this.cancelJob(CancelJobRequestSchema.parse(input));

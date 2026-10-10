@@ -101,7 +101,7 @@ describe("V2 operation boundary", () => {
     const vocabulary = [
       "import_asset", "remove_asset", "create_clip", "split_clip", "trim_clip", "move_clip", "remove_clip", "replace_asset",
       "set_transform", "set_opacity", "set_speed", "set_transition", "add_text_layer", "update_text_layer", "add_image_layer",
-      "remove_layer", "set_volume", "mute_clip", "animate_property", "apply_motion_preset", "recapture_browser_asset", "replace_browser_capture",
+      "remove_layer", "set_volume", "mute_clip", "animate_property", "apply_motion_preset", "recapture_browser_asset", "register_browser_flow", "replace_browser_capture",
     ];
     expect(SCHEMA_RECOGNIZED_OPERATION_TYPES).toEqual(vocabulary);
     expect(Object.keys(OperationSchemas)).toEqual(vocabulary);

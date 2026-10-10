@@ -12,7 +12,7 @@ import { LocalImportAuthorizationRequestV1Schema, LocalImportAuthorizationRespon
 import { IdSchema } from "../schema.js";
 import { LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
 import { LocalExecutor, type LocalExecutorCommand } from "./executor.js";
-import type { MediaToolOptions } from "./local.js";
+import type { BrowserTargets, MediaToolOptions } from "./local.js";
 import type { V2AgentModelClient } from "../agent-v2.js";
 import { LocalExecutorError } from "./local-jobs.js";
 import { LocalProjectStoreError } from "./project-store.js";
@@ -24,6 +24,9 @@ const JOB_ROUTES: Partial<Record<string, LocalExecutorCommand>> = {
   "/v1/jobs/apply-operations": "apply_operations",
   "/v1/jobs/import-asset": "import_asset",
   "/v1/jobs/agent-edit": "request_agent_edit",
+  "/v1/jobs/start-browser-capture": "start_browser_capture",
+  "/v1/jobs/recapture-browser-scene": "recapture_browser_scene",
+  "/v1/jobs/verify-revision": "verify_revision",
   "/v1/jobs/render-preview": "render_preview",
   "/v1/jobs/render-final": "render_final",
 };
@@ -43,10 +46,10 @@ export class LocalExecutorServer {
   private startPromise?: Promise<{ url: string; token: string }>;
   private stopPromise?: Promise<void>;
 
-  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient }) {
+  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets }) {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.importRoots = (options.importRoots?.length ? options.importRoots : [this.workspaceRoot]).map((root) => resolve(root));
-    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel });
+    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel, browserTargets: options.browserTargets });
     try { this.allowedOrigins = new Set((options.allowedOrigins ?? []).map(localOrigin)); }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "Only explicit local frontend origins are allowed."); }
   }

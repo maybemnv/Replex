@@ -291,6 +291,7 @@ The initial V2 vocabulary is intentionally small:
 | `animate_property` | Add validated keyframes to an allowlisted property |
 | `apply_motion_preset` | Expand a versioned preset into canonical keyframes/parameters through the reducer |
 | `recapture_browser_asset` | Request capture; it does not mutate until evidence exists |
+| `register_browser_flow` | Register a host-approved browser flow with its first capture; immutable once registered |
 | `replace_browser_capture` | Add a new immutable browser asset, lineage, and clip replacement |
 
 Deferred until their phases: `add_audio` and `replace_audio` are expressed initially by `import_asset` plus `create_clip` or `replace_asset`; `reorder_clip` is unnecessary because timeline position and stable tie-breaking define order; separate `set_crop` is folded into `set_transform` to avoid overlapping mutation semantics. Complex masks, arbitrary effect graphs, nested compositions, scripting, and renderer-specific filters are out of scope.
@@ -407,7 +408,9 @@ dispatcher with a one-shot command CLI and permits one supported runtime owner
 per workspace. This candidate does not yet expose media import, evidence,
 conversational agent, browser capture/recapture, preview, verification, or render
 jobs; its scope and limitations are recorded in
-[`ADR-011`](ADR-011-local-executor-transport.md). SSE/WebSocket delivery,
+[`ADR-011`](ADR-011-local-executor-transport.md). Later slices (V2-702 to V2-704) add import, agent-edit, browser
+capture/recapture, verification, and render jobs; the
+[implementation plan](../v2/implementation-plan.md) records each slice. SSE/WebSocket delivery,
 general process supervision, and cloud execution remain later work:
 
 ```text

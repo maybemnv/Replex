@@ -369,7 +369,7 @@ export async function recaptureBrowserSceneV2(
 ): Promise<RecaptureBrowserSceneResult> {
   if (!IdSchema.safeParse(request.projectId).success || !IdSchema.safeParse(request.baseRevisionId).success
     || !IdSchema.safeParse(request.previousAssetId).success || !IdSchema.safeParse(request.sceneKey).success
-    || !IdSchema.safeParse(request.intentId).success || !z.string().trim().min(1).max(500).safeParse(request.reason).success
+    || !IdSchema.safeParse(request.intentId).success || !z.string().trim().min(1).max(1000).safeParse(request.reason).success
     || !Array.isArray(request.changedActionIds) || !request.capture) reject("INVALID_REQUEST", "recapture request is invalid");
 
   let current: ProjectV2;

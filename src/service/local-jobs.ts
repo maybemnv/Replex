@@ -14,11 +14,16 @@ import {
   JobEventSchema,
   JobEventPageSchema,
   JobViewSchema,
+  RecaptureRequestSchema,
   RenderFinalRequestSchema,
+  StartBrowserCaptureRequestSchema,
   RenderPreviewRequestSchema,
   RequestAgentEditRequestSchema,
+  VerifyRevisionRequestSchema,
   type ApplyOperationsRequest,
+  type RecaptureRequest,
   type RequestAgentEditRequest,
+  type StartBrowserCaptureRequest,
   type RenderArtifactView,
   type RenderFinalRequest,
   type RenderPreviewRequest,
@@ -30,12 +35,13 @@ import {
   type JobEventPage,
   type JobView,
   type RevisionView,
+  type VerificationView,
+  type VerifyRevisionRequest,
 } from "../service-contract/index.js";
 import { DEFAULT_AGENT_THREAD_ID, LocalProjectService } from "./local.js";
 import type { V2AgentModelClient, V2ConversationThread } from "../agent-v2.js";
 import { LocalProjectStoreError } from "./project-store.js";
 import { closeAuthorizedLocalImport, LocalImportError, type AuthorizedLocalImport } from "../import-v2.js";
-import type { OperationBatchResult } from "../operations-v2.js";
 
 const MAX_JOB_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JOB_EVENTS = 20_000;
@@ -43,7 +49,7 @@ const MAX_AUTHORIZED_IMPORTS = 16;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema, RequestAgentEditRequestSchema]),
+  request: z.union([ApplyOperationsRequestSchema, ImportAssetRequestSchema, RenderFinalRequestSchema, RenderPreviewRequestSchema, RequestAgentEditRequestSchema, RecaptureRequestSchema, VerifyRevisionRequestSchema, StartBrowserCaptureRequestSchema]),
   job: JobViewSchema,
   commitFenced: z.boolean().default(false),
 }).strict();
@@ -71,16 +77,21 @@ const JobStateSchema = z.object({
 }).strict();
 type JobState = z.infer<typeof JobStateSchema>;
 type JobRecord = z.infer<typeof JobRecordSchema>;
-type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest | RequestAgentEditRequest;
+type JobRequest = ApplyOperationsRequest | ImportAssetRequest | RenderPreviewRequest | RenderFinalRequest | RequestAgentEditRequest | RecaptureRequest | VerifyRevisionRequest | StartBrowserCaptureRequest;
 type RenderJobKind = "render_preview" | "render_final";
-type JobKind = "asset_import" | "apply_operations" | "agent_edit" | RenderJobKind;
+type JobKind = "asset_import" | "apply_operations" | "agent_edit" | "browser_capture" | "browser_recapture" | "verify_revision" | RenderJobKind;
 const RUNNING_STAGE = {
   asset_import: "importing",
   apply_operations: "applying_revision",
   agent_edit: "planning",
+  browser_capture: "capturing",
+  browser_recapture: "capturing",
+  verify_revision: "verifying",
   render_preview: "rendering_preview",
   render_final: "rendering_final",
 } as const;
+/** Long-running kinds stay cancellable while running, until their commit fence. */
+const CANCELLABLE_WHILE_RUNNING: ReadonlySet<string> = new Set(["asset_import", "agent_edit", "browser_capture", "browser_recapture", "render_preview", "render_final"]);
 
 interface JobSuccess {
   revisionId: string;
@@ -90,6 +101,7 @@ interface JobSuccess {
   outputId?: string;
   artifact?: RenderArtifactView;
   thread?: V2ConversationThread;
+  verification?: VerificationView;
 }
 
 const threadKey = (projectId: string, threadId: string): string => `${projectId}:${threadId}`;
@@ -146,13 +158,12 @@ export class LocalJobRuntime {
           });
           changed.push(this.appendJobEvent(state, record.job));
         } else if (record.job.state === "running") {
-          const importFinalizing = record.job.kind === "asset_import" && record.commitFenced;
           record.job = JobViewSchema.parse({
             ...record.job,
             state: "queued",
             stage: "queued",
             progress: undefined,
-            cancellable: importFinalizing ? false : true,
+            cancellable: !record.commitFenced,
             cancellationRequested: false,
             updatedAt: now(),
           });
@@ -217,6 +228,33 @@ export class LocalJobRuntime {
     return this.submitJob(parsed.data, "agent_edit");
   }
 
+  async submitCapture(requestInput: StartBrowserCaptureRequest): Promise<JobView> {
+    const parsed = StartBrowserCaptureRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The browser-capture request is invalid.");
+    if (!this.projects.capabilities().availableCommands.includes("start_browser_capture")) {
+      throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No approved browser flows are configured for this local executor.");
+    }
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(parsed.data, "browser_capture");
+  }
+
+  async submitRecapture(requestInput: RecaptureRequest): Promise<JobView> {
+    const parsed = RecaptureRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The recapture request is invalid.");
+    if (!this.projects.capabilities().availableCommands.includes("recapture_browser_scene")) {
+      throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No browser targets are configured for this local executor.");
+    }
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(parsed.data, "browser_recapture");
+  }
+
+  async submitVerify(requestInput: VerifyRevisionRequest): Promise<JobView> {
+    const parsed = VerifyRevisionRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The verify-revision request is invalid.");
+    if (!this.started) throw new LocalExecutorError("EXECUTOR_OFFLINE", "The local executor is not running.");
+    return this.submitJob(parsed.data, "verify_revision");
+  }
+
   async submitRender(kind: RenderJobKind, requestInput: RenderPreviewRequest | RenderFinalRequest): Promise<JobView> {
     const parsed = (kind === "render_final" ? RenderFinalRequestSchema : RenderPreviewRequestSchema).safeParse(requestInput);
     if (!parsed.success) throw new LocalExecutorError("VALIDATION_FAILED", "The render request is invalid.");
@@ -231,13 +269,24 @@ export class LocalJobRuntime {
       const existing = state.jobs[jobId];
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new LocalExecutorError("IDEMPOTENCY_CONFLICT", "The idempotency key was used for a different request.");
-        return { job: existing.job, event: undefined, schedule: false };
+        if (!this.retryable(existing)) return { job: existing.job, event: undefined, schedule: false };
+        // Clients retry a retryable failure with the same key; requeue the same job instead of replaying the failure.
+        const { error: _error, progress: _progress, ...prior } = existing.job as JobView & { error?: unknown };
+        existing.job = JobViewSchema.parse({
+          ...prior,
+          state: "queued",
+          stage: "queued",
+          cancellable: !existing.commitFenced,
+          cancellationRequested: false,
+          updatedAt: now(),
+        });
+        const event = this.appendJobEvent(state, existing.job);
+        await this.save(state);
+        if (kind === "asset_import" && "source" in request) this.reservedImports.add(request.source.ref);
+        return { job: existing.job, event, schedule: true };
       }
-      if (kind === "asset_import") {
-        const source = "source" in request ? request.source : undefined;
-        if (!source || !this.imports.has(source.ref) || this.reservedImports.has(source.ref)) {
-          throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
-        }
+      if (kind === "asset_import" && !this.importAuthorized(request)) {
+        throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
       }
 
       const createdAt = now();
@@ -262,6 +311,17 @@ export class LocalJobRuntime {
     if (result.event) this.publish(result.event);
     if (result.schedule) this.schedule(result.job.id);
     return result.job;
+  }
+
+  private importAuthorized(request: JobRequest): boolean {
+    const source = "source" in request ? request.source : undefined;
+    return !!source && this.imports.has(source.ref) && !this.reservedImports.has(source.ref);
+  }
+
+  /** A failed job reruns on resubmission only when its error is retryable and an import still holds its token. */
+  private retryable(record: JobRecord): boolean {
+    if (record.job.state !== "failed" || !record.job.error?.retryable) return false;
+    return record.job.kind !== "asset_import" || this.importAuthorized(record.request);
   }
 
   async getJob(jobId: string): Promise<JobView> {
@@ -427,13 +487,13 @@ export class LocalJobRuntime {
           return { event, cancelled: true as const, request: record.request, kind: record.job.kind };
         }
         if (record.job.state !== "queued") return { event: undefined, cancelled: false as const };
-        const importFinalizing = record.job.kind === "asset_import" && record.commitFenced;
+        const fenced = record.commitFenced;
         record.job = JobViewSchema.parse({
           ...record.job,
           state: "running",
-          stage: importFinalizing ? "finalizing" : RUNNING_STAGE[record.job.kind as JobKind],
-          progress: importFinalizing ? record.job.progress : { completed: 0, total: 1, percent: 0, unit: "batch" },
-          cancellable: importFinalizing ? false : record.job.kind === "asset_import",
+          stage: fenced ? "finalizing" : RUNNING_STAGE[record.job.kind as JobKind],
+          progress: fenced && record.job.progress ? record.job.progress : { completed: 0, total: 1, percent: 0, unit: "batch" },
+          cancellable: !fenced && CANCELLABLE_WHILE_RUNNING.has(record.job.kind),
           cancellationRequested: false,
           updatedAt: now(),
         });
@@ -452,15 +512,27 @@ export class LocalJobRuntime {
 
       const controller = new AbortController();
       this.abortControllers.set(jobId, controller);
+      const fence = () => this.fenceCommit(jobId);
+      const signal = controller.signal;
       const result = start.kind === "asset_import"
-        ? await this.projects.importAsset(start.request as ImportAssetRequest, importToken ? this.imports.get(importToken) : undefined, controller.signal, (apply) => this.prepareImportCommit(jobId, apply))
+        ? await this.projects.importAsset(start.request as ImportAssetRequest, importToken ? this.imports.get(importToken) : undefined, signal, async (apply) => { await fence(); return apply(); })
         : start.kind === "apply_operations"
           ? await this.projects.applyOperations(start.request as ApplyOperationsRequest)
           : start.kind === "agent_edit"
-            ? await this.runAgentEdit(start.request as RequestAgentEditRequest, start.thread, controller.signal)
-            : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, controller.signal);
+            ? await this.runAgentEdit(start.request as RequestAgentEditRequest, start.thread, signal, fence)
+            : start.kind === "browser_capture"
+              ? await this.projects.startCapture(start.request as StartBrowserCaptureRequest, signal, fence)
+              : start.kind === "browser_recapture"
+                ? await this.projects.recaptureScene(start.request as RecaptureRequest, signal, fence)
+                : start.kind === "verify_revision"
+                  ? await this.projects.verifyRevision(start.request as VerifyRevisionRequest)
+                  : await this.projects.renderRevision(start.request as RenderPreviewRequest | RenderFinalRequest, signal, fence);
       if (!result.ok) {
-        await this.finishFailure(jobId, failureFor(result.code));
+        if (await this.cancelRequested(jobId)) {
+          await this.finishCancelled(jobId);
+          return;
+        }
+        await this.finishFailure(jobId, failureFor(result.code), "verification" in result ? result.verification as VerificationView : undefined);
         return;
       }
       applied = true;
@@ -471,11 +543,14 @@ export class LocalJobRuntime {
         ...("outputId" in result && result.outputId ? { outputId: result.outputId } : {}),
         ...("artifact" in result && result.artifact ? { artifact: result.artifact } : {}),
         ...("thread" in result && result.thread ? { thread: result.thread } : {}),
+        ...("verification" in result && result.verification ? { verification: result.verification } : {}),
       });
     } catch (error) {
       if (!applied) {
         try {
-          if (error instanceof Error && "code" in error && error.code === "IMPORT_CANCELLED") await this.finishCancelled(jobId);
+          if (await this.cancelRequested(jobId)) await this.finishCancelled(jobId);
+          // A stopping executor aborts running work; leave it nonterminal so restart recovery requeues it.
+          else if (!this.started) return;
           else await this.finishFailure(jobId, failureForError(error));
         }
         catch { /* Keep it nonterminal; recovery can retry the durable request. */ }
@@ -492,15 +567,21 @@ export class LocalJobRuntime {
     }
   }
 
-  private runAgentEdit(request: RequestAgentEditRequest, thread: V2ConversationThread | undefined, signal: AbortSignal) {
+  private runAgentEdit(request: RequestAgentEditRequest, thread: V2ConversationThread | undefined, signal: AbortSignal, fence: () => Promise<void>) {
     if (!this.agentModel) throw new LocalExecutorError("CAPABILITY_UNAVAILABLE", "No agent model is configured for this local executor.");
-    return this.projects.agentEdit(request, thread, this.agentModel, signal);
+    return this.projects.agentEdit(request, thread, this.agentModel, signal, fence);
   }
 
-  private async prepareImportCommit(jobId: string, apply: () => Promise<OperationBatchResult>): Promise<OperationBatchResult> {
+  private async cancelRequested(jobId: string): Promise<boolean> {
+    return this.exclusive((state) => state.jobs[jobId]?.job.state === "cancelling");
+  }
+
+  /** Marks the job past its last cancellation point; rejects when cancellation was requested first. */
+  private async fenceCommit(jobId: string): Promise<void> {
     const event = await this.exclusive(async (state) => {
       const record = state.jobs[jobId];
-      if (!record || record.job.state !== "running") throw new LocalImportError("IMPORT_CANCELLED", "local import was cancelled");
+      if (!record || record.job.state !== "running") throw new LocalImportError("IMPORT_CANCELLED", "the job was cancelled before it could commit");
+      if (record.commitFenced && !record.job.cancellable) return undefined;
       const fencedAt = now();
       record.commitFenced = true;
       record.job = JobViewSchema.parse({
@@ -514,12 +595,17 @@ export class LocalJobRuntime {
       await this.save(state);
       return event;
     });
-    this.publish(event);
-    return apply();
+    if (event) this.publish(event);
   }
 
   private async finishSuccess(jobId: string, success: JobSuccess): Promise<void> {
-    const { revisionId, revision, assetId, outputId, artifact, thread } = success;
+    const { revisionId, revision, assetId, outputId, artifact, thread, verification } = success;
+    const cancelled = await this.exclusive(async (state) => state.jobs[jobId]?.job.state === "cancelling" && !state.jobs[jobId]!.commitFenced);
+    // A job that finished without reaching its fence committed nothing, so a pending cancellation wins.
+    if (cancelled) {
+      await this.finishCancelled(jobId);
+      return;
+    }
     const events = await this.exclusive(async (state) => {
       const record = state.jobs[jobId];
       if (!record || record.job.state !== "running") return [];
@@ -532,6 +618,7 @@ export class LocalJobRuntime {
         type: "revision.created",
         revision,
       }));
+      if (verification) derived.push(this.verificationEvent(state, record.job.projectId, verification, completedAt));
       if (artifact) derived.push(JobEventSchema.parse({
         projectId: record.job.projectId,
         sequence: eventSequence(state, record.job.projectId),
@@ -558,10 +645,18 @@ export class LocalJobRuntime {
     events.forEach((event) => this.publish(event));
   }
 
-  private async finishFailure(jobId: string, errorInput: ContractError): Promise<void> {
-    const event = await this.exclusive(async (state) => {
+  private verificationEvent(state: JobState, projectId: string, verification: VerificationView, occurredAt: string): JobEvent {
+    return JobEventSchema.parse({
+      projectId, sequence: eventSequence(state, projectId), occurredAt, type: "verification.updated", revisionId: verification.revisionId, verification,
+    });
+  }
+
+  private async finishFailure(jobId: string, errorInput: ContractError, verification?: VerificationView): Promise<void> {
+    const events = await this.exclusive(async (state) => {
       const record = state.jobs[jobId];
-      if (!record || terminal(record.job)) return undefined;
+      if (!record || terminal(record.job)) return [];
+      const derived = verification ? [this.verificationEvent(state, record.job.projectId, verification, now())] : [];
+      derived.forEach((event) => this.appendEvent(state, event));
       record.job = JobViewSchema.parse({
         ...record.job,
         state: "failed",
@@ -574,9 +669,9 @@ export class LocalJobRuntime {
       });
       const update = this.appendJobEvent(state, record.job);
       await this.save(state);
-      return update;
+      return [...derived, update];
     });
-    if (event) this.publish(event);
+    events.forEach((event) => this.publish(event));
   }
 
   private async finishCancelled(jobId: string): Promise<void> {
@@ -708,12 +803,18 @@ export class LocalJobRuntime {
 
 function failureFor(code: string): ContractError {
   if (code === "STALE_REVISION") return { code: "STALE_JOB_INPUT", message: "The project changed before this edit could be applied.", retryable: false };
+  if (code === "VERIFICATION_FAILED") return { code: "VERIFICATION_FAILED", message: "The revision failed plan or source-media verification.", retryable: false };
   if (code === "VERIFICATION_REQUIRED") return { code: "VERIFICATION_FAILED", message: "A final render requires a passed verification of this revision.", retryable: false };
   if (code === "RENDER_FAILED" || code === "PREVIEW_FAILED") return { code: "RENDER_FAILED", message: "The bounded renderer could not produce a verified output.", retryable: true };
   if (code === "BUDGET_EXCEEDED") return { code: "AGENT_BUDGET_EXCEEDED", message: "The agent exhausted its bounded budget for this request.", retryable: false };
   if (code === "INSPECTION_FAILED") return { code: "INSUFFICIENT_EVIDENCE", message: "The agent could not inspect enough project evidence.", retryable: false };
   if (code === "STALE_THREAD") return { code: "STALE_JOB_INPUT", message: "The conversation no longer matches the project revision.", retryable: false };
   if (code === "MODEL_ERROR" || code === "TIMEOUT" || code === "CANCELLED") return { code: "EXECUTION_FAILED", message: "The agent request could not be completed.", retryable: true };
+  if (code === "CAPTURE_FAILED") return { code: "BROWSER_CAPTURE_FAILED", message: "The approved browser flow could not be captured.", retryable: true };
+  if (code === "SCENE_INVALID" || code === "SOURCE_NOT_AUTHORIZED" || code === "SOURCE_CHANGED") return { code: "BROWSER_CAPTURE_FAILED", message: "The browser capture did not produce a valid replacement scene.", retryable: false };
+  if (code === "FLOW_MISMATCH" || code === "INVALID_REQUEST") return { code: "VALIDATION_FAILED", message: "The selected asset cannot be recaptured from an approved flow.", retryable: false };
+  if (code === "BROWSER_TARGET_UNAVAILABLE") return { code: "CAPABILITY_UNAVAILABLE", message: "This host cannot drive the asset's approved browser flow.", retryable: false, requiredCapability: "recapture_browser_scene" };
+  if (code === "EVIDENCE_FAILED") return { code: "STORAGE_FAILED", message: "The recapture or its preservation evidence could not be stored.", retryable: true };
   if (code === "UNSUPPORTED_OPERATION") return { code: "CAPABILITY_UNAVAILABLE", message: "This operation is not available in the local executor.", retryable: false, requiredCapability: "apply_operations" };
   return { code: "OPERATION_REJECTED", message: "The canonical reducer rejected the operation batch.", retryable: false };
 }

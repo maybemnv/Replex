@@ -12,7 +12,7 @@ import {
   type OperationLogRecord,
 } from "../operations-v2.js";
 import { IdSchema } from "../schema.js";
-import { MediaAssetSchema, ProjectV2Schema, type MediaAsset, type ProjectV2 } from "../schema-v2.js";
+import { MediaAssetSchema, ProjectV2Schema, VerificationRefSchema, type MediaAsset, type ProjectV2, type VerificationRef } from "../schema-v2.js";
 import { registerRenderArtifactV2, type RenderArtifactV2 } from "../render-v2.js";
 
 export type LocalProjectStoreErrorCode =
@@ -41,6 +41,15 @@ export interface LocalAssetBatchRequest {
   buildAsset: (facts: LocalAssetFacts, project: ProjectV2) => MediaAsset;
   buildBatch: (asset: MediaAsset, project: ProjectV2) => OperationBatchInput;
   buildEvidence?: (result: Extract<OperationBatchResult, { ok: true }>) => { id: string; value: unknown };
+  options?: LocalImportOptions;
+}
+
+/** Several authorized local sources published together and committed in one reducer batch. */
+export interface LocalAssetsBatchRequest {
+  baseRevisionId: string;
+  intentId: string;
+  sources: Array<{ source: AuthorizedLocalImport; buildAsset: (facts: LocalAssetFacts) => MediaAsset }>;
+  buildBatch: (assets: MediaAsset[], project: ProjectV2) => OperationBatchInput;
   options?: LocalImportOptions;
 }
 
@@ -225,6 +234,36 @@ export class LocalProjectStore {
     });
   }
 
+  /**
+   * Records a revision verification as derived state on the current revision with its report; semantic state is
+   * unchanged. A failed verification is recorded too, so the revision's latest status is explicit.
+   */
+  async registerVerification(projectId: string, ref: VerificationRef, report: unknown): Promise<ProjectV2> {
+    return this.withProjectLock(projectId, async () => {
+      const current = await this.current(projectId);
+      if (ref.revisionId !== current.currentRevisionId) {
+        throw new LocalProjectStoreError("REVISION_NOT_FOUND", "verified revision is no longer current");
+      }
+      const root = await this.root();
+      const directory = await this.projectDirectory(root, projectId, false);
+      const evidence = await this.writeEvidenceLocked(directory, root, ref.id, report, "verification");
+      const recorded = VerificationRefSchema.parse({ ...ref, evidenceRefs: [evidence.reference] });
+      const existing = current.verification.refs.find(({ id }) => id === recorded.id);
+      if (existing && canonicalJson(existing) !== canonicalJson(recorded)) throw new LocalProjectStoreError("IDEMPOTENCY_CONFLICT", "verification ID already refers to different data");
+      const registered = ProjectV2Schema.parse({
+        ...current,
+        verification: {
+          revisionId: current.currentRevisionId,
+          status: recorded.status,
+          refs: existing ? current.verification.refs : [...current.verification.refs, recorded],
+        },
+      });
+      await this.writeJsonAtomic(this.revisionPath(directory, registered.currentRevisionId), registered, root);
+      await this.writeJsonAtomic(join(directory, "project.json"), registered, root);
+      return registered;
+    });
+  }
+
   async applyBatchWithLocalAsset(projectId: string, request: LocalAssetBatchRequest): Promise<OperationBatchResult & { evidenceRef?: string }> {
     return this.withProjectLock(projectId, async () => {
       const current = await this.current(projectId);
@@ -266,6 +305,48 @@ export class LocalProjectStore {
     });
   }
 
+  async applyBatchWithLocalAssets(projectId: string, request: LocalAssetsBatchRequest): Promise<OperationBatchResult> {
+    return this.withProjectLock(projectId, async () => {
+      const current = await this.current(projectId);
+      if (request.baseRevisionId !== current.currentRevisionId) return { ok: false, code: "STALE_REVISION", detail: "base revision is not current" };
+      if (request.sources.length === 0) throw new LocalProjectStoreError("INVALID_OPERATION", "local asset batch has no sources");
+      const root = await this.root();
+      const directory = await this.projectDirectory(root, projectId, false);
+      const published: MediaAsset[] = [];
+      // Each source is staged, hashed, probed, and promoted in turn; a rejected batch unwinds every promotion.
+      // ponytail: nested sources share the first source's 60s import deadline, which fits a 3-5 scene capture.
+      const publish = async (index: number): Promise<OperationBatchResult> => {
+        if (index === request.sources.length) {
+          const batch = request.buildBatch(published, current);
+          if (batch.baseRevisionId !== request.baseRevisionId || batch.intentId !== request.intentId) {
+            throw new LocalProjectStoreError("INVALID_OPERATION", "local asset batch does not match its pinned revision and intent");
+          }
+          const result = await this.applyBatchLocked(projectId, current, batch);
+          if (!result.ok) throw new LocalAssetBatchRejected(result);
+          return result;
+        }
+        const { source, buildAsset } = request.sources[index]!;
+        let facts: LocalAssetFacts | undefined;
+        return withLocalAssetV2(directory, source, (candidate) => {
+          facts = candidate;
+          return buildAsset(candidate);
+        }, async (asset) => {
+          const typeMatches = facts && (asset.type === facts.type || (facts.type === "uploaded_video" && asset.type === "browser_capture"));
+          if (!facts || asset.path !== facts.path || asset.sha256 !== facts.sha256 || !typeMatches
+            || canonicalJson(asset.probe) !== canonicalJson(facts.probe)) throw invalidStorage();
+          published.push(asset);
+          return publish(index + 1);
+        }, request.options);
+      };
+      try {
+        return await publish(0);
+      } catch (error) {
+        if (error instanceof LocalAssetBatchRejected) return error.result;
+        throw error;
+      }
+    });
+  }
+
   async writeEvidence(projectId: string, evidenceId: string, value: unknown): Promise<string> {
     if (!IdSchema.safeParse(evidenceId).success) throw new LocalProjectStoreError("INVALID_OPERATION", "evidence ID is invalid");
     return this.withProjectLock(projectId, async () => {
@@ -275,7 +356,7 @@ export class LocalProjectStore {
     });
   }
 
-  private async writeEvidenceLocked(directory: string, root: string, evidenceId: string, value: unknown): Promise<EvidenceWrite> {
+  private async writeEvidenceLocked(directory: string, root: string, evidenceId: string, value: unknown, namespace: "recapture" | "verification" = "recapture"): Promise<EvidenceWrite> {
     if (!IdSchema.safeParse(evidenceId).success) throw new LocalProjectStoreError("INVALID_OPERATION", "evidence ID is invalid");
     let text: string;
     try { text = canonicalJson(value); }
@@ -283,10 +364,10 @@ export class LocalProjectStore {
     if (Buffer.byteLength(text, "utf8") > MAX_EVIDENCE_BYTES) throw invalidStorage();
 
     const evidenceRoot = await this.ensureDirectory(directory, "evidence", root);
-    const recaptureRoot = await this.ensureDirectory(evidenceRoot, "recapture", root);
+    const namespaceRoot = await this.ensureDirectory(evidenceRoot, namespace, root);
     const fileName = `${sha256(evidenceId)}.json`;
-    const filePath = join(recaptureRoot, fileName);
-    const reference = `evidence/recapture/${fileName}`;
+    const filePath = join(namespaceRoot, fileName);
+    const reference = `evidence/${namespace}/${fileName}`;
     const existing = await this.readJsonIfExists<unknown>(filePath, root);
     if (existing !== undefined) {
       if (canonicalJson(existing) === text) return { reference };
