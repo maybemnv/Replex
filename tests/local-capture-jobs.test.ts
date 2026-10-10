@@ -99,6 +99,40 @@ describe("local browser capture jobs", () => {
     expect(await readdir(join(projectRoot, "captures"))).toEqual(runsBefore);
   }, 300_000);
 
+  it.skipIf(!mediaAvailable)("reruns a retryable capture failure when it is resubmitted with the same key", async () => {
+    const fixture = await startReleaseFixture();
+    closers.push(fixture.close);
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-capture-retry-"));
+    roots.push(workspaceRoot);
+    const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath }, browserTargets: fixture.browserTargets });
+    await executor.start();
+    try {
+      const project = await executor.createProject({ contractVersion: "v1", idempotencyKey: "retry-create", name: "Retry capture" });
+      const request = {
+        contractVersion: "v1" as const, idempotencyKey: "retry-capture", projectId: project.projectId, baseRevisionId: project.revisionId,
+        flowId: fixture.flow.id, approved: true as const, executionTarget: "local" as const,
+      };
+      fixture.failResets(1);
+      const failed = await executor.waitForJob((await executor.submitCapture(request)).id, 60_000);
+      expect(failed).toMatchObject({ state: "failed", error: { code: "BROWSER_CAPTURE_FAILED", retryable: true } });
+
+      const resubmitted = await executor.submitCapture(request);
+      expect(resubmitted).toMatchObject({ id: failed.id, state: "queued", cancellable: true });
+      expect(resubmitted).not.toHaveProperty("error");
+      const retried = await executor.waitForJob(resubmitted.id, 120_000);
+      expect(retried, JSON.stringify(retried)).toMatchObject({ id: failed.id, state: "succeeded", result: { assetId: expect.any(String) } });
+      // A succeeded job stays terminal on another resubmission.
+      expect(await executor.submitCapture(request)).toEqual(retried);
+
+      // A non-retryable failure is not rerun.
+      const stale = await executor.waitForJob((await executor.submitCapture({ ...request, idempotencyKey: "retry-stale" })).id, 60_000);
+      expect(stale).toMatchObject({ state: "failed", error: { code: "STALE_JOB_INPUT", retryable: false } });
+      expect(await executor.submitCapture({ ...request, idempotencyKey: "retry-stale" })).toEqual(stale);
+    } finally {
+      await executor.stop();
+    }
+  }, 300_000);
+
   it.skipIf(!mediaAvailable)("cancels a running capture before it commits", async () => {
     const fixture = await startReleaseFixture();
     closers.push(fixture.close);

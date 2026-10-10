@@ -269,13 +269,24 @@ export class LocalJobRuntime {
       const existing = state.jobs[jobId];
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new LocalExecutorError("IDEMPOTENCY_CONFLICT", "The idempotency key was used for a different request.");
-        return { job: existing.job, event: undefined, schedule: false };
+        if (!this.retryable(existing)) return { job: existing.job, event: undefined, schedule: false };
+        // Clients retry a retryable failure with the same key; requeue the same job instead of replaying the failure.
+        const { error: _error, progress: _progress, ...prior } = existing.job as JobView & { error?: unknown };
+        existing.job = JobViewSchema.parse({
+          ...prior,
+          state: "queued",
+          stage: "queued",
+          cancellable: !existing.commitFenced,
+          cancellationRequested: false,
+          updatedAt: now(),
+        });
+        const event = this.appendJobEvent(state, existing.job);
+        await this.save(state);
+        if (kind === "asset_import" && "source" in request) this.reservedImports.add(request.source.ref);
+        return { job: existing.job, event, schedule: true };
       }
-      if (kind === "asset_import") {
-        const source = "source" in request ? request.source : undefined;
-        if (!source || !this.imports.has(source.ref) || this.reservedImports.has(source.ref)) {
-          throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
-        }
+      if (kind === "asset_import" && !this.importAuthorized(request)) {
+        throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
       }
 
       const createdAt = now();
@@ -300,6 +311,17 @@ export class LocalJobRuntime {
     if (result.event) this.publish(result.event);
     if (result.schedule) this.schedule(result.job.id);
     return result.job;
+  }
+
+  private importAuthorized(request: JobRequest): boolean {
+    const source = "source" in request ? request.source : undefined;
+    return !!source && this.imports.has(source.ref) && !this.reservedImports.has(source.ref);
+  }
+
+  /** A failed job reruns on resubmission only when its error is retryable and an import still holds its token. */
+  private retryable(record: JobRecord): boolean {
+    if (record.job.state !== "failed" || !record.job.error?.retryable) return false;
+    return record.job.kind !== "asset_import" || this.importAuthorized(record.request);
   }
 
   async getJob(jobId: string): Promise<JobView> {

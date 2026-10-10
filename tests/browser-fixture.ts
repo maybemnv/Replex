@@ -18,6 +18,7 @@ export const TARGET_CLIP_MS = 500;
 /** Normal-flow release page whose post-apply release note is the controlled product change. */
 export async function startReleaseFixture() {
   let note = "Release note: filters v1";
+  let failingResets = 0;
   const page = () => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Release Replay Demo</title></head>
 <body><main data-testid="release-page">
@@ -41,7 +42,8 @@ export async function startReleaseFixture() {
 </script></body></html>`;
   const server = createServer((request, response) => {
     if (request.url === "/__reset" && request.method === "POST") {
-      response.writeHead(204).end();
+      response.writeHead(failingResets > 0 ? 503 : 204).end();
+      failingResets = Math.max(0, failingResets - 1);
       return;
     }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(page());
@@ -59,6 +61,8 @@ export async function startReleaseFixture() {
     flow,
     browserTargets,
     setNote(value: string) { note = value; },
+    /** Makes the next `count` target resets fail, as a transiently unavailable app would. */
+    failResets(count: number) { failingResets = count; },
     close: () => new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose())),
   };
 }
