@@ -175,6 +175,12 @@ export class LocalExecutorServer {
   }
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    // Node may discard duplicate Authorization/Host values in headers while retaining them in rawHeaders.
+    const headerCount = (name: string) => request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === name).length;
+    if (headerCount("host") !== 1 || headerCount("authorization") > 1 || headerCount("origin") > 1) {
+      sendJson(response, 403, serviceError("UNAUTHORIZED", "Ambiguous local authorization headers are not allowed.", false));
+      return;
+    }
     const origin = request.headers.origin;
     if (origin) {
       if (!this.allowedOrigins.has(origin)) {
@@ -203,6 +209,7 @@ export class LocalExecutorServer {
       return;
     }
     if (!authorized(request.headers.authorization, this.token!)) {
+      response.setHeader("www-authenticate", 'Bearer realm="replex-local"');
       sendJson(response, 401, serviceError("UNAUTHORIZED", "A valid local executor token is required.", false));
       return;
     }
@@ -283,8 +290,9 @@ function validHost(value: string | undefined, port: number): boolean {
   try {
     const host = new URL(`http://${value}`);
     return new Set(["127.0.0.1", "localhost"]).has(host.hostname.toLowerCase())
-      && (!host.port || Number(host.port) === port)
-      && !host.username && !host.password;
+      && Number(host.port || "80") === port
+      && host.host === value.toLowerCase()
+      && !host.username && !host.password && host.pathname === "/" && !host.search && !host.hash;
   } catch {
     return false;
   }
