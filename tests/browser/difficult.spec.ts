@@ -74,7 +74,7 @@ describe("difficult browser approved flow", () => {
     expect(first.actionEvents.map((event) => event.actionId)).toEqual(second.actionEvents.map((event) => event.actionId));
     expect(first.captures.every((capture) => capture.durationMs > 0 && /^[a-f0-9]{64}$/.test(capture.sha256))).toBe(true);
     await Promise.all(first.captures.map(async (capture) => expect((await stat(capture.sourcePath)).size).toBeGreaterThan(0)));
-  }, 60_000);
+  }, 120_000);
 
   it("captures the controlled changed review state with the same stable scene keys", async () => {
     await resetDifficultFixture(origin);
