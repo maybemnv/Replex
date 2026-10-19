@@ -1,4 +1,5 @@
 import type { FixtureNetworkGrant } from "../capture-network-policy.js";
+import { cleanupAbandonedStaging } from "./cleanup.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -100,6 +101,8 @@ export class LocalExecutorServer {
     this.server = server;
     this.token = token;
     try {
+      // The bound workspace port is the lease; no workers resume until abandoned staging is inspected.
+      await cleanupAbandonedStaging(this.workspaceRoot);
       await this.executor.start();
       this.closing = false;
       this.ready = true;
@@ -165,6 +168,7 @@ export class LocalExecutorServer {
       await this.route(request, response);
     } catch (error) {
       const result = safeError(error);
+      if (error instanceof HttpInputError && error.status === 413) response.setHeader("connection", "close");
       sendJson(response, result.status, result.body);
     } finally {
       this.activeRequests -= 1;
@@ -307,7 +311,7 @@ function authorized(header: string | undefined, token: string): boolean {
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
-  if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+  if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
     throw new HttpInputError(415, "A JSON request body is required.");
   }
   const declared = Number(request.headers["content-length"] ?? 0);
@@ -316,7 +320,8 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
+  // Do not destroy the socket before the bounded 413 response can be flushed.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += data.length;
     if (size > MAX_REQUEST_BYTES) throw new HttpInputError(413, "The request body exceeds the local service limit.");
