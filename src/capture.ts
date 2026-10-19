@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, expect as playwrightExpect, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { EnvironmentSchema, FlowSchema, IdSchema, normalizeOrigin, type BrowserStep, type Environment, type Flow } from "./schema.js";
+import { CAPTURE_BROWSER_ARGS, type CaptureNetworkGuard } from "./capture-network.js";
 
 const MAX_CONSOLE_EVENTS = 1000;
 
@@ -62,6 +63,8 @@ export interface ScenePlan {
 
 export interface CaptureOptions {
   artifactRoot: string;
+  /** V2 host-owned egress guard; historical V1 callers retain their approved-origin policy. */
+  networkGuard?: CaptureNetworkGuard;
   attempt?: number;
   values?: Record<string, string>;
   reset?: () => Promise<void>;
@@ -409,7 +412,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   let runtimeOriginError: CaptureRunError | undefined;
 
   try {
-    browser = await chromium.launch();
+    browser = await chromium.launch(options.networkGuard ? { proxy: options.networkGuard.proxy, args: [...CAPTURE_BROWSER_ARGS] } : {});
     const activeContext = await browser.newContext({
       ...browserContextOptions(environment),
       recordVideo: { dir: rawVideoRoot, size: environment.viewport },
@@ -435,7 +438,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${parsed.origin}`);
       await route.abort("blockedbyclient");
     });
-    await activeContext.routeWebSocket(/wss?:\/\//, (route) => {
+    // V2 WebSockets must use Chromium's proxy path; Playwright's server-side WS bridge is not an egress boundary.
+    if (!options.networkGuard) await activeContext.routeWebSocket(/wss?:\/\//, (route) => {
       const url = new URL(route.url());
       const origin = `${url.protocol === "wss:" ? "https:" : "http:"}//${url.host}`;
       if (isAllowedOrigin(environment.allowedOrigins, origin)) return route.connectToServer();
@@ -465,6 +469,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       }
       try {
         await executeStep(activePage, step, options.values ?? {}, options.uploadRoots ?? []);
+        options.networkGuard?.assertSafe();
         if (runtimeOriginError) throw runtimeOriginError;
         assertRuntimeOrigin(activePage, environment, step.id);
         await checkCheckpoint(activePage, step);
@@ -498,9 +503,11 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       }
     }
     if (runtimeOriginError) throw runtimeOriginError;
+    options.networkGuard?.assertSafe();
     if (retainTrace) await activeContext.tracing.stop({ path: tracePath });
     await activeContext.close();
     contextClosed = true;
+    options.networkGuard?.assertSafe();
     await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
     await writeImmutableArtifact(consoleLogPath, jsonLines(consoleEvents.map((event) => ({ ...event, message: redactEvidenceText(event.message) }))));
     logsWritten = true;

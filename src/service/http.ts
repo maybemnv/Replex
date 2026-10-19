@@ -1,3 +1,4 @@
+import type { FixtureNetworkGrant } from "../capture-network-policy.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -46,10 +47,10 @@ export class LocalExecutorServer {
   private startPromise?: Promise<{ url: string; token: string }>;
   private stopPromise?: Promise<void>;
 
-  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets }) {
+  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets; fixtureGrants?: readonly FixtureNetworkGrant[] }) {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.importRoots = (options.importRoots?.length ? options.importRoots : [this.workspaceRoot]).map((root) => resolve(root));
-    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel, browserTargets: options.browserTargets });
+    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel, browserTargets: options.browserTargets, fixtureGrants: options.fixtureGrants });
     try { this.allowedOrigins = new Set((options.allowedOrigins ?? []).map(localOrigin)); }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "Only explicit local frontend origins are allowed."); }
   }

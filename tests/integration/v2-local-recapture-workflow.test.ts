@@ -44,7 +44,7 @@ describe("V2 local capture and selective recapture over the loopback service", (
     ], { windowsHide: true, shell: false, timeout: 30_000 });
     expect(upload.status, upload.stderr?.toString()).toBe(0);
 
-    const server = new LocalExecutorServer({ workspaceRoot, importRoots: [sourceRoot], media: { ffmpegPath, ffprobePath }, browserTargets: fixture.browserTargets });
+    const server = new LocalExecutorServer({ workspaceRoot, importRoots: [sourceRoot], media: { ffmpegPath, ffprobePath }, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     closers.unshift(() => server.stop());
     const session = await server.start();
     const request = async (path: string, body?: unknown) => {
