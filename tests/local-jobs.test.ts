@@ -209,4 +209,39 @@ describe("LocalExecutor apply-operation jobs", () => {
     const executor = await startExecutor();
     await expect(executor.getJob("../../jobs.json")).rejects.toBeInstanceOf(LocalExecutorError);
   });
+
+  it("resumes an interrupted uncommitted edit after restart exactly once", async () => {
+    const executor = await startExecutor();
+    const created = await createProject(executor);
+    const request = titleRequest(created.projectId, created.revisionId, "interrupted");
+    const submitted = await executor.submitApplyOperations(request);
+    await executor.stop();
+    const path = join(workspaceRoot!, ".replex-service", "jobs.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    state.jobs[submitted.id].job = { ...state.jobs[submitted.id].job, state: "running", stage: "applying_revision", cancellable: false };
+    await writeFile(path, JSON.stringify(state));
+    const restarted = new LocalExecutor({ workspaceRoot: workspaceRoot! });
+    await restarted.start();
+    try {
+      const completed = await restarted.waitForJob(submitted.id, 10_000);
+      expect(completed.state).toBe("succeeded");
+      expect(await restarted.submitApplyOperations(request)).toEqual(completed);
+      if (completed.state !== "succeeded") throw new Error("recovery failed");
+      const snapshot = await restarted.openProject({ contractVersion: "v1", idempotencyKey: "reopen", projectId: created.projectId, revisionId: completed.result.revisionId! });
+      expect(snapshot.revisions).toHaveLength(2);
+      expect(snapshot.composition.layers.map(({ id }) => id)).toEqual(["job-title"]);
+    } finally { await restarted.stop(); }
+  });
+
+  it("refuses corrupted durable job state instead of silently starting with empty history", async () => {
+    const executor = await startExecutor();
+    const created = await createProject(executor);
+    await executor.waitForJob((await executor.submitApplyOperations(titleRequest(created.projectId, created.revisionId))).id);
+    await executor.stop();
+    const path = join(workspaceRoot!, ".replex-service", "jobs.json");
+    await writeFile(path, "partial write");
+    const restarted = new LocalExecutor({ workspaceRoot: workspaceRoot! });
+    await expect(restarted.start()).rejects.toMatchObject({ code: "STORAGE_FAILED" });
+    expect(await readFile(path, "utf8")).toBe("partial write");
+  });
 });

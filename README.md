@@ -149,6 +149,8 @@ Live mode also requires `REPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION` and `REPLEX_A
 
 The host-only `.replex-agent-budget.json` in the selected workspace persists spending reservations, rate timestamps, and aggregate token usage across restarts. It contains no prompts, images, response IDs, or credentials. Keep it with the workspace; deleting it resets accounting. Corrupt/full ledgers fail closed. No provider call is needed to run the scripted test suite. Gate D remains deferred, not waived.
 
+List existing projects with `npm run service:v2:projects -- --workspace <dir>`. This host-only command rebuilds a catalog from validated project files and prints project IDs, names, and current revision IDs. `unavailableCount` reports corrupt/incomplete entries without repairing them. Use those IDs with `open_project`; service-contract v1 gains no project-list API. Reuse the same workspace on restart to retain projects, revisions, jobs, events, and conversations. Uncommitted file imports need file reselection after restart because their authorization tokens belong to the previous process.
+
 ---
 
 ## V1 CLI

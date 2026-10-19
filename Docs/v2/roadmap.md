@@ -22,6 +22,10 @@ No deployment, paid service activation, public exposure, or committed provider k
 
 **PR 2 — implemented on `demo/02-local-auth`:** Retains per-start random bearer-token access and loopback binding. Rejects duplicate authorization/Host/origin headers and noncanonical or wrong-port Host values; unauthorized requests receive a Bearer challenge. Tests cover all 15 route categories before payload parsing/side effects, token rotation and nonpersistence, malformed headers, origin rejection, and normal CLI/HTTP behavior. Validation: 30 focused tests pass; TypeScript/diff checks pass. No account system, remote binding, or public contract change.
 
+**PR 3 — implemented on `demo/03-project-discovery`:** Adds `service:v2:projects -- --workspace <dir>` as read-only host discovery over validated project manifests and metadata, with IDs/names/revision IDs and an unavailable-entry count. No parallel database/index or service endpoint. Existing file-backed jobs/projects survive restarts; tests cover committed and uncommitted interrupted edits, idempotent recovery, corrupt job state, malformed/incomplete projects, identity mismatch, and symlink confinement. Validation: 48 focused tests, TypeScript, and diff checks pass.
+
+**PR 4 decision pending:** The existing origin allowlist does not pin Chromium connections to validated public IP addresses. A new capture network guard and a narrow launcher-owned loopback fixture exception would change the execution boundary. See the [concrete proposal](demo-capture-network-proposal.md); obtain owner approval before implementing that boundary. No URL protection or fixture exception from this proposal is claimed as implemented. PRs 4–5 remain pending.
+
 The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve the evidence; do not fund later phases to hide an earlier failure.
 
 | Order | Phase | Evidence sought | Exit gate | Budget stance |
