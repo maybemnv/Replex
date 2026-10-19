@@ -2,9 +2,9 @@
 
 > **V2 direction:** Media composition is the project; browser capture is one intelligent media source.
 
-**Repository status (9 October 2026):** The browser-first V1 POC is implemented and has strong technical evidence. Its formal product gate remains `REWORK` because human usefulness and correction-time evidence are incomplete.
+**Repository status (20 October 2026):** The V2 local POC is technically complete through Gate E. Gate D (independent human review and correction-time evidence) is deferred, not waived. The historical V1 formal product gate remains `REWORK` for that evidence gap.
 
-Replex V2 is partly implemented as a local POC. Gates A–C (model/contract, media, agent) have bounded technical evidence. On `main` today:
+Replex V2 is implemented as a bounded local POC. Gates A–C (model/contract, media, agent) and Gate E (differentiation) have technical evidence. The core includes:
 
 - the V2 schema, reducer, and frozen service contract v1
 - immutable video/image/audio import with native FFmpeg evidence
@@ -150,6 +150,29 @@ Live mode also requires `REPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION` and `REPLEX_A
 The host-only `.replex-agent-budget.json` in the selected workspace persists spending reservations, rate timestamps, and aggregate token usage across restarts. It contains no prompts, images, response IDs, or credentials. Keep it with the workspace; deleting it resets accounting. Corrupt/full ledgers fail closed. No provider call is needed to run the scripted test suite. Gate D remains deferred, not waived.
 
 List existing projects with `npm run service:v2:projects -- --workspace <dir>`. This host-only command rebuilds a catalog from validated project files and prints project IDs, names, and current revision IDs. `unavailableCount` reports corrupt/incomplete entries without repairing them. Use those IDs with `open_project`; service-contract v1 gains no project-list API. Reuse the same workspace on restart to retain projects, revisions, jobs, events, and conversations. Uncommitted file imports need file reselection after restart because their authorization tokens belong to the previous process.
+
+---
+
+## Local invite-only demo
+
+After installing the prerequisites above (Node 22+, compatible FFmpeg/ffprobe 9 or development build, bundled Chromium, and a TrueType font), run:
+
+```bash
+npm run demo
+```
+
+This starts a fake product fixture and the token-protected executor on loopback, captures an approved flow, imports generated sample footage, composes a six-second video, applies a scripted agent edit with a verified preview, changes the fake product, selectively recaptures its scene, verifies preservation, and exports a final MP4. It prints the preview/final file paths and a per-session API URL/bearer token. Open the MP4 locally; the demo runs the backend workflow. Press Ctrl+C to stop the executor and fixture. Each run creates a new project; prior projects remain under `work/invite-demo` and can be reopened through the project-list command.
+
+```bash
+npm run demo -- --check                      # tools only; no provider calls or services
+npm run demo -- --once                       # export, close services, and exit
+npm run demo -- --workspace work/my-demo     # choose a persistent workspace
+npm run service:v2:projects -- --workspace work/invite-demo
+```
+
+The default is deterministic and makes no paid provider calls, even when a key is present. Optional live mode requires `npm run demo -- --live --agent-model <model>` plus the key and conservative pricing settings in [`.env.example`](.env.example). Live mode sends bounded selected evidence to that provider and may incur usage charges under the per-job cap. No provider key is printed or stored in project files. Check prerequisites with `--check`; use absolute `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` for specific trusted binaries and `REPLEX_FONT_FILE` for a font.
+
+V2 capture/recapture blocks ordinary private/internal destinations using the approved per-capture network guard. Only the launcher’s exact running loopback fixture receives an in-memory exception; browser config and API requests cannot grant private access. Startup cleanup removes recognized abandoned staging older than 24 hours before jobs resume, preserving canonical files and capture evidence. Limits include 256 MiB per import, 4 MiB JSON requests, 16 pending imports, 16 active/pending jobs, and 10,000 retained job records. Hosting remains undecided. Gate D is deferred, not waived; this scripted demo does not establish live-model quality or independent human usefulness.
 
 ---
 

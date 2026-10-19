@@ -426,6 +426,8 @@ The early POC keeps browser capture and uploaded-media editing local. Cloud rend
 
 ## 10. Security and failure model
 
+The V2 local executor applies the owner-approved per-capture network guard in [ADR-012](ADR-012-local-demo-capture-network.md). Ordinary capture targets require approved origins and public addresses; only trusted bundled fixture servers receive an exact-origin, in-memory loopback grant. The historical V1 CLI is outside this demo boundary.
+
 - Paths/object references are validated and scoped to the project or authorized storage namespace.
 - Source assets are immutable; derived artifacts are separately addressed.
 - Backends receive structured jobs, never model-authored commands.
