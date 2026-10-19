@@ -25,12 +25,16 @@ section{padding:32px;margin-top:36px;border-radius:16px;background:#1f3338}input
 <button aria-label="Open filters" id="open-filter">Open filters</button>
 <section data-testid="filter-panel" hidden><h2>Filter releases</h2>
 <label for="filter-value">Filter value</label><input id="filter-value"/><button aria-label="Apply" id="apply">Apply</button>
-<p data-testid="result" hidden>Showing 3 matching releases</p>
-<p id="note" hidden>${changed ? "New: saved release filters are ready." : "Release filters, ready for your team."}</p></section>
+<p data-testid="result" hidden></p>
+<p id="note" hidden>${changed ? "New: saved release filters are ready." : "Release filters, ready for your team."}</p>
+<small data-testid="demo-ready" hidden>Ready to share</small></section>
 <div class="cards"><article><small>RELEASES</small><strong>03</strong><p>Ready to share</p></article><article><small>WORKFLOW</small><strong>One view</strong><p>Everything in context</p></article><article><small>STATUS</small><strong>Shipped</strong><p>Built for the next change</p></article></div>
 </main><script>
 document.querySelector('#open-filter').onclick=()=>{document.querySelector('[data-testid="filter-panel"]').hidden=false};
-document.querySelector('#apply').onclick=()=>{setTimeout(()=>{document.querySelector('[data-testid="result"]').hidden=false;document.querySelector('#note').hidden=false},3200)};
+document.querySelector('#apply').onclick=()=>{
+setTimeout(()=>{const result=document.querySelector('[data-testid="result"]');result.textContent='Showing 3 matching releases';result.hidden=false;document.querySelector('#note').hidden=false},200);
+setTimeout(()=>{document.querySelector('[data-testid="demo-ready"]').hidden=false},3500);
+};
 </script></body></html>`);
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -38,6 +42,10 @@ document.querySelector('#apply').onclick=()=>{setTimeout(()=>{document.querySele
   if (!address || typeof address === "string") throw new Error("The bundled demo fixture could not start.");
   const origin = `http://127.0.0.1:${address.port}`;
   const flow = normalFlow(origin);
+  flow.steps.push({
+    id: "demo-hold-result", order: flow.steps.length, action: "waitFor", consequential: false, approved: true,
+    checkpoint: { kind: "visible", target: { kind: "testId", value: "demo-ready" }, expected: "Ready to share" }, sceneKey: "apply-filter",
+  });
   const browserTargets: BrowserTargets = {
     [flow.id]: { flow, environment: normalEnvironment(origin), values: { filterValue: "release" }, resetUrl: origin + "/__reset" },
   };
