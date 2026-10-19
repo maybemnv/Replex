@@ -372,6 +372,32 @@ describe("V2 local asset import", () => {
     expect(await entries(join(projectRoot, "media", "assets"))).toEqual([]);
   }, 30_000);
 
+  it("drains concurrent cancelled copies without publishing bytes or leaving stream errors", async () => {
+    const { sourceRoot, projectRoot } = await workspace();
+    const sourcePath = join(sourceRoot, "concurrent-cancel.ppm");
+    await writeSparsePpm(sourcePath);
+    const controllers = Array.from({ length: 8 }, () => new AbortController());
+    const sources = await Promise.all(controllers.map(() => authorizeLocalImport(sourcePath, [sourceRoot])));
+    const outcomes = controllers.map((controller, index) => importLocalAssetV2(emptyProject(), projectRoot, sources[index]!, { signal: controller.signal })
+      .then(() => undefined, (error: unknown) => error));
+    const deadline = Date.now() + 10_000;
+    let copying = false;
+    while (!copying && Date.now() < deadline) {
+      for (const directory of await entries(join(projectRoot, ".replex-staging"))) {
+        const staged = await stat(join(projectRoot, ".replex-staging", directory, "source")).catch(() => undefined);
+        if (staged && staged.size > 0) { copying = true; break; }
+      }
+      if (!copying) await new Promise((done) => setTimeout(done, 1));
+    }
+    controllers.forEach((controller) => controller.abort());
+    const results = await Promise.all(outcomes);
+    await new Promise<void>((done) => setImmediate(done));
+    expect(copying).toBe(true);
+    for (const result of results) expect(result).toMatchObject({ code: "IMPORT_CANCELLED" });
+    expect(await entries(join(projectRoot, ".replex-staging"))).toEqual([]);
+    expect(await entries(join(projectRoot, "media", "assets"))).toEqual([]);
+  }, 30_000);
+
   it.skipIf(!mediaAvailable)("rejects corrupt and unsupported media without publishing assets", async () => {
     const { sourceRoot, projectRoot } = await workspace();
     const original = emptyProject();

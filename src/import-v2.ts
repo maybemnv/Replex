@@ -331,13 +331,13 @@ async function copyAndHash(entry: SourceEntry, stagePath: string, signal: AbortS
     output = await open(stagePath, "wx", 0o600);
     const hash = createHash("sha256");
     let bytes = 0;
-    for await (const value of entry.file.createReadStream({ autoClose: false, start: 0, signal })) {
+    for await (const chunk of readImportChunks(entry.file, checkActive)) {
       checkActive();
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
       if (bytes + chunk.length > MAX_IMPORT_BYTES) fail("SOURCE_TOO_LARGE", "source exceeds the 256 MiB local import limit");
       hash.update(chunk);
       let offset = 0;
       while (offset < chunk.length) {
+        checkActive();
         const result = await output.write(chunk, offset, chunk.length - offset, bytes + offset);
         if (result.bytesWritten === 0) fail("STORAGE_FAILED", "source could not be staged safely");
         offset += result.bytesWritten;
@@ -355,6 +355,20 @@ async function copyAndHash(entry: SourceEntry, stagePath: string, signal: AbortS
     return fail("STORAGE_FAILED", "source could not be staged safely");
   } finally {
     await output?.close().catch(() => undefined);
+  }
+}
+
+/** Cooperatively drain each bounded read before closing its shared authorized handle. */
+async function* readImportChunks(file: FileHandle, checkActive: () => void): AsyncGenerator<Buffer> {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  while (true) {
+    checkActive();
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+    checkActive();
+    if (bytesRead === 0) return;
+    position += bytesRead;
+    yield buffer.subarray(0, bytesRead);
   }
 }
 
@@ -556,7 +570,7 @@ async function promoteImmutable(stagePath: string, finalPath: string, sha256: st
   fail("STORAGE_FAILED", "content-addressed media publication did not settle");
 }
 
-async function hashExistingFile(path: string, signal: AbortSignal, checkActive: () => void): Promise<string> {
+async function hashExistingFile(path: string, _signal: AbortSignal, checkActive: () => void): Promise<string> {
   let file: FileHandle | undefined;
   try {
     checkActive();
@@ -566,9 +580,9 @@ async function hashExistingFile(path: string, signal: AbortSignal, checkActive: 
     const opened = await file.stat({ bigint: true });
     if (!sameFile(before, opened)) fail("STORAGE_FAILED", "existing media changed during validation");
     const hash = createHash("sha256");
-    for await (const chunk of file.createReadStream({ autoClose: false, start: 0, signal })) {
+    for await (const chunk of readImportChunks(file, checkActive)) {
       checkActive();
-      hash.update(chunk as Buffer);
+      hash.update(chunk);
     }
     const after = await file.stat({ bigint: true });
     checkActive();
