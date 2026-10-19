@@ -31,6 +31,8 @@ export class CaptureNetworkGuard {
   private readonly password = randomBytes(32).toString("hex");
   private readonly authorization = Buffer.from(`Basic ${Buffer.from(`${this.username}:${this.password}`).toString("base64")}`);
   private readonly sockets = new Set<Socket>();
+  private readonly tasks = new Set<Promise<void>>();
+  private readonly shutdown = new AbortController();
   private readonly server: Server;
   private requests = 0;
   private bytes = 0;
@@ -41,8 +43,8 @@ export class CaptureNetworkGuard {
   private readonly stopOnAbort = () => { this.denied = true; void this.stop(); };
 
   private constructor(private readonly policy: CaptureDestinationPolicy, signal: AbortSignal) {
-    this.lifetime = AbortSignal.any([signal, AbortSignal.timeout(CAPTURE_TIMEOUT_MS)]);
-    this.server = createServer((request, response) => { void this.forward(request, response); });
+    this.lifetime = AbortSignal.any([signal, this.shutdown.signal, AbortSignal.timeout(CAPTURE_TIMEOUT_MS)]);
+    this.server = createServer((request, response) => { this.trackTask(this.forward(request, response)); });
     this.server.requestTimeout = SOCKET_TIMEOUT_MS;
     this.server.headersTimeout = 10_000;
     this.server.keepAliveTimeout = 1_000;
@@ -50,8 +52,8 @@ export class CaptureNetworkGuard {
       if (this.closed || this.sockets.size >= MAX_CONNECTIONS) { socket.destroy(); return; }
       this.track(socket);
     });
-    this.server.on("connect", (request, socket, head) => { void this.tunnel(request, socket as Socket, head); });
-    this.server.on("upgrade", (request, socket, head) => { void this.upgrade(request, socket as Socket, head); });
+    this.server.on("connect", (request, socket, head) => { this.trackTask(this.tunnel(request, socket as Socket, head)); });
+    this.server.on("upgrade", (request, socket, head) => { this.trackTask(this.upgrade(request, socket as Socket, head)); });
     this.server.on("clientError", (_error, socket) => { socket.destroy(); });
   }
 
@@ -103,10 +105,17 @@ export class CaptureNetworkGuard {
     this.stopPromise ??= (async () => {
       this.closed = true;
       this.lifetime.removeEventListener("abort", this.stopOnAbort);
+      this.shutdown.abort();
       for (const socket of this.sockets) socket.destroy();
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
+      await Promise.allSettled([...this.tasks]);
     })();
     return this.stopPromise;
+  }
+
+  private trackTask(task: Promise<void>): void {
+    const settled = task.catch(() => { this.denied = true; }).finally(() => this.tasks.delete(settled));
+    this.tasks.add(settled);
   }
 
   private track(socket: Socket): void {

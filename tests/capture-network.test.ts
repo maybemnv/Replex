@@ -74,6 +74,23 @@ describe("capture network guard", () => {
     expect(redirected).toBe(0);
   });
 
+  it("aborts and drains destination work when the capture proxy is closed", async () => {
+    const policy = new CaptureDestinationPolicy(["http://product.example"]);
+    let started!: () => void;
+    const resolving = new Promise<void>((resolve) => { started = resolve; });
+    let cancelled = false;
+    vi.spyOn(policy, "destination").mockImplementation((_url, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => { cancelled = true; reject(new Error("cancelled lookup")); }, { once: true });
+      started();
+    }));
+    const proxy = await guard(policy);
+    const pending = through(proxy, "http://product.example", auth(proxy)).then(() => "response", () => "closed");
+    await resolving;
+    await proxy.stop();
+    expect(cancelled).toBe(true);
+    expect(await pending).toBe("closed");
+  });
+
   it("authenticates CONNECT and pins the selected socket rather than resolving the original hostname again", async () => {
     const sockets = new Set<Socket>();
     const target = createTcpServer((socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.pipe(socket); });
