@@ -1,6 +1,8 @@
 import type OpenAI from "openai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBudgetLedger } from "../src/agent-v2-budget.js";
@@ -175,4 +177,17 @@ describe("OpenAI V2 model adapter", () => {
       .respond({ ...request, signal: controller.signal })).rejects.toThrow();
     expect(create).not.toHaveBeenCalled();
   });
+
+  it("loads local pricing alongside a host-provided key without overriding that key", async () => {
+    await writeFile(join(root, ".env"), "OPENAI_API_KEY=file-placeholder\nREPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION=1000000\nREPLEX_AGENT_OUTPUT_MICRO_USD_PER_MILLION=1000000\n");
+    const adapter = new URL("../src/agent-v2-openai.ts", import.meta.url).href;
+    const loader = new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
+    const env: NodeJS.ProcessEnv = { ...process.env, OPENAI_API_KEY: "host-placeholder", REPLEX_AGENT_REQUESTS_PER_MINUTE: "12", REPLEX_AGENT_MAX_JOB_MICRO_USD: "100000" };
+    delete env.REPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION;
+    delete env.REPLEX_AGENT_OUTPUT_MICRO_USD_PER_MILLION;
+    const result = await promisify(execFile)(process.execPath, ["--import", loader, "--input-type=module", "-e",
+      `const {createOpenAIV2ModelClientFromEnv}=await import(${JSON.stringify(adapter)}); const model=createOpenAIV2ModelClientFromEnv('poc-test-model',process.cwd()); console.log(JSON.stringify({enabled:typeof model.respond==='function',hostKeyPreserved:process.env.OPENAI_API_KEY==='host-placeholder'}));`,
+    ], { cwd: root, env, timeout: 15_000 });
+    expect(JSON.parse(result.stdout)).toEqual({ enabled: true, hostKeyPreserved: true });
+  }, 30_000);
 });

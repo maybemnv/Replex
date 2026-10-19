@@ -104,7 +104,8 @@ function modelInput(request: V2AgentModelRequest): ResponseInputItem[] {
 
 /** Host bootstrap for an explicitly named model; the key comes from OPENAI_API_KEY or a local .env file. */
 export function createOpenAIV2ModelClientFromEnv(model: string, workspaceRoot: string): V2AgentModelClient {
-  if (!process.env.OPENAI_API_KEY && existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
+  // Host environment values win, but a host-provided key must not suppress pricing/budget values in .env.
+  if (existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is required to enable the agent model");
   const positiveInteger = (name: string, fallback?: number): number => {
