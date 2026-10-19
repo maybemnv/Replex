@@ -1,6 +1,6 @@
 # Proposed local demo capture network policy
 
-Status: **owner approval required before implementation**. This proposal changes the browser network execution boundary; it does not change the frozen service contract. It is not an implemented protection or an approved ADR.
+Status: **approved by owner on 20 October 2026** for the V2 local executor and invite-only demo. This changes the browser network execution boundary without changing the frozen service contract. Implementation and validation are tracked in the roadmap; this approval does not establish a completed protection.
 
 ## Existing behavior and gap
 
@@ -17,11 +17,11 @@ Add a short-lived, host-owned network guard for each capture/recapture:
 - Route reset POSTs through the same destination policy; retain redirect rejection. Never put proxy credentials in canonical state, model evidence, or logs.
 - Preserve cancellation, fresh browser contexts, approved actions, immutable captures, selective-recapture checks, and existing job/error envelopes. Do not allow a failed or blocked capture to publish a revision.
 
-## Narrow fixture exception requiring approval
+## Approved narrow fixture exception
 
 Ordinary user capture targets remain subject to the public-address rule, even when their origins appear in a host browser config. Permit only the local demo launcher to register the exact origin of a bundled fixture it started, scoped to that capture and port. The exception permits loopback only; it does not permit private LAN, metadata, link-local, wildcard origins, redirects to other loopback ports, or a general "allow private networks" flag. It is not a service request field, persisted project field, or model tool.
 
-This preserves the local capture demonstration while keeping ordinary targets blocked from internal addresses. The owner must approve both the new network guard and this exception before implementation.
+This preserves the local capture demonstration while keeping ordinary targets blocked from internal addresses. The owner approved both the network guard and this exception before implementation.
 
 ## Acceptance tests
 
