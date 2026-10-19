@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startLocalDemo } from "../../src/demo/workflow.js";
@@ -9,7 +9,29 @@ import { LocalExecutorServer } from "../../src/service/http.js";
 import { mediaAvailable, ffmpegPath, ffprobePath } from "../media.js";
 import type { V2AgentModelRequest } from "../../src/agent-v2.js";
 
-const { modelTrace } = vi.hoisted(() => ({ modelTrace: [] as Array<{ names: string[]; output: unknown }> }));
+const { modelTrace, evidenceErrors, failedTools, captureErrors } = vi.hoisted(() => ({ modelTrace: [] as Array<{ names: string[]; output: unknown }>, evidenceErrors: [] as string[], failedTools: [] as string[], captureErrors: [] as string[] }));
+vi.mock("../../src/capture.js", async (original) => {
+  const actual = await original<typeof import("../../src/capture.js")>();
+  return { ...actual, runCapture: async (...args: Parameters<typeof actual.runCapture>) => {
+    try { return await actual.runCapture(...args); }
+    catch (error) { captureErrors.push(String(error)); throw error; }
+  } };
+});
+vi.mock("node:child_process", async (original) => {
+  const actual = await original<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: (...args: unknown[]) => {
+    const result = Reflect.apply(actual.spawnSync, actual, args) as { status: number | null; stderr?: string | Buffer };
+    if (result.status !== 0) failedTools.push(String(result.stderr ?? "").slice(-2000));
+    return result;
+  } };
+});
+vi.mock("../../src/media-evidence.js", async (original) => {
+  const actual = await original<typeof import("../../src/media-evidence.js")>();
+  return { ...actual, generateMediaEvidence: async (...args: Parameters<typeof actual.generateMediaEvidence>) => {
+    try { return await actual.generateMediaEvidence(...args); }
+    catch (error) { evidenceErrors.push(error instanceof actual.MediaEvidenceError ? error.code : "UNKNOWN"); throw error; }
+  } };
+});
 vi.mock("../../src/demo/scripted-model.js", async (original) => {
   const actual = await original<typeof import("../../src/demo/scripted-model.js")>();
   return { createDemoScriptedModel: () => {
@@ -27,7 +49,12 @@ describe("one-command demo workflow", () => {
   let restarted: LocalExecutorServer | undefined;
   afterEach(async () => {
     await demo?.close(); demo = undefined; await restarted?.stop(); restarted = undefined;
-    if (root) await rm(root, { recursive: true, force: true }); root = undefined; vi.unstubAllEnvs(); modelTrace.splice(0);
+    if (root && process.env.REPLEX_TEST_ARTIFACT_ROOT) {
+      const artifacts = process.env.REPLEX_TEST_ARTIFACT_ROOT;
+      await mkdir(artifacts, { recursive: true });
+      await cp(root, join(artifacts, basename(root)), { recursive: true });
+    }
+    if (root) await rm(root, { recursive: true, force: true }); root = undefined; vi.unstubAllEnvs(); modelTrace.splice(0); evidenceErrors.splice(0); failedTools.splice(0); captureErrors.splice(0);
   });
 
   it.skipIf(!mediaAvailable || !process.env.REPLEX_FFMPEG_PATH || !process.env.REPLEX_FFPROBE_PATH)("runs the real guarded HTTP workflow, exports verified media, and reopens the project after shutdown", async () => {
@@ -35,14 +62,15 @@ describe("one-command demo workflow", () => {
     vi.stubEnv("OPENAI_API_KEY", "unused-test-placeholder");
     const progress: string[] = [];
     try { demo = await startLocalDemo({ workspaceRoot: root, progress: (stage) => progress.push(stage) }); }
-    catch (error) { throw new Error(`${String(error)}\n${JSON.stringify(modelTrace).slice(-5000)}`); }
+    catch (error) { throw new Error(`${String(error)}\n${JSON.stringify({ captureErrors, evidenceErrors, failedTools, modelTrace }).slice(-5000)}`); }
     expect(demo).toMatchObject({ mode: "scripted", preservationPassed: true });
     expect(progress).toEqual(expect.arrayContaining(["capturing", "scripted_agent_edit", "recapturing_changed_scene", "verifying", "rendering_final"]));
     expect((await stat(demo.finalPath)).size).toBeGreaterThan(0);
     expect((await stat(demo.previewPath)).size).toBeGreaterThan(0);
-    const probe = spawnSync(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "json", demo.finalPath], { encoding: "utf8", shell: false });
+    const probe = spawnSync(ffprobePath, ["-v", "error", "-show_entries", "format=duration:stream=width,height", "-of", "json", demo.finalPath], { encoding: "utf8", shell: false });
     expect(probe.status).toBe(0);
     expect(Number(JSON.parse(probe.stdout).format.duration)).toBeCloseTo(6, 0);
+    expect(JSON.parse(probe.stdout).streams).toEqual(expect.arrayContaining([expect.objectContaining({ width: 1920, height: 1080 })]));
     const decode = spawnSync(ffmpegPath, ["-v", "error", "-i", demo.finalPath, "-f", "null", "-"], { encoding: "utf8", shell: false, timeout: 30_000 });
     expect(decode.status, decode.stderr).toBe(0);
     expect((await fetch(demo.url + "/capabilities")).status).toBe(401);

@@ -9,6 +9,8 @@ import { EnvironmentSchema, FlowSchema, IdSchema, normalizeOrigin, type BrowserS
 import { CAPTURE_BROWSER_ARGS, type CaptureNetworkGuard } from "./capture-network.js";
 
 const MAX_CONSOLE_EVENTS = 1000;
+// Evidence encoding has a separate bound from approved-action and checkpoint deadlines.
+const ARTIFACT_SCREENSHOT_TIMEOUT_MS = 15_000;
 
 function assertSceneKey(sceneKey: string, actionId: string): void {
   if (!IdSchema.safeParse(sceneKey).success) {
@@ -425,6 +427,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     const activePage = await activeContext.newPage();
     page = activePage;
     activePage.setDefaultTimeout(5_000);
+    // A new headless page can exist before Chromium has a drawable surface for the first before-shot.
+    await activePage.waitForFunction(() => new Promise<boolean>((resolveReady) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolveReady(true)));
+    }), undefined, { timeout: 5_000 });
     const video = activePage.video();
     const startedAtMs = performance.now();
     activePage.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
@@ -463,7 +469,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       if (options.signal?.aborted) throw new CaptureRunError("CANCELLED", step.id, "browser capture was cancelled");
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
         const path = join(runRoot, "screenshots", `${artifactSceneKey(step.sceneKey)}-before.png`);
-        await writeImmutableArtifact(path, await activePage.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
         artifacts.push({ sceneKey: step.sceneKey, boundary: "before", path });
         startedScenes.add(step.sceneKey);
       }
@@ -498,7 +504,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       const scene = scenePlan.find((candidate) => candidate.checkpointActionId === step.id);
       if (scene) {
         const path = join(runRoot, "screenshots", `${artifactSceneKey(scene.sceneKey)}-after.png`);
-        await writeImmutableArtifact(path, await activePage.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
         artifacts.push({ sceneKey: scene.sceneKey, boundary: "after", path });
       }
     }
@@ -537,7 +543,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       const evidencePath = join(failureRoot, "evidence.json");
       let screenshotError: string | undefined;
       try {
-        await writeImmutableArtifact(screenshotPath, await page.screenshot());
+        await writeImmutableArtifact(screenshotPath, await page.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
       } catch (screenshotFailure) {
         screenshotError = screenshotFailure instanceof Error ? screenshotFailure.message : String(screenshotFailure);
       }
