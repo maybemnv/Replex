@@ -244,4 +244,20 @@ describe("LocalExecutor apply-operation jobs", () => {
     await expect(restarted.start()).rejects.toMatchObject({ code: "STORAGE_FAILED" });
     expect(await readFile(path, "utf8")).toBe("partial write");
   });
+
+  it("bounds pending jobs while preserving idempotent replay when the queue is full", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const executor = await startExecutor();
+    try {
+      const created = await createProject(executor);
+      const firstRequest = titleRequest(created.projectId, created.revisionId, "bounded-0");
+      const first = await executor.submitApplyOperations(firstRequest);
+      for (let index = 1; index < 16; index++) {
+        await executor.submitApplyOperations(titleRequest(created.projectId, created.revisionId, `bounded-${index}`, `title-${index}`));
+      }
+      expect(await executor.submitApplyOperations(firstRequest)).toEqual(first);
+      await expect(executor.submitApplyOperations(titleRequest(created.projectId, created.revisionId, "overflow")))
+        .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    } finally { await executor.stop(); vi.useRealTimers(); }
+  });
 });
