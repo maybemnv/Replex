@@ -13,10 +13,12 @@ describe("capture network guard", () => {
 
   async function fixture(handler: RequestListener = (_request, response) => response.end("fixture")) {
     const server = createServer(handler);
+    const sockets = new Set<Socket>();
+    server.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("fixture failed");
-    closers.push(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
+    closers.push(() => new Promise<void>((resolve) => { for (const socket of sockets) socket.destroy(); server.close(() => resolve()); }));
     return { server, origin: `http://127.0.0.1:${address.port}`, grant: issueFixtureNetworkGrant(server) };
   }
   async function guard(policy: CaptureDestinationPolicy, signal = new AbortController().signal) {
@@ -105,6 +107,41 @@ describe("capture network guard", () => {
       request.on("error", reject); request.on("connect", (response, socket) => { socket.destroy(); resolve(response.statusCode!); }); request.end();
     });
     expect(status).toBe(403);
+    const wsProxy = await guard(new CaptureDestinationPolicy(["http://127.0.0.1"]));
+    const websocketStatus = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest(wsProxy.proxy.server, { path: "ws://127.0.0.1/socket", headers: {
+        "proxy-authorization": auth(wsProxy), connection: "Upgrade", upgrade: "websocket",
+      } }, (response) => { response.resume(); response.on("end", () => resolve(response.statusCode!)); });
+      request.on("error", reject); request.end();
+    });
+    expect(websocketStatus).toBe(403);
+  });
+
+  it("forwards an authenticated HTTP WebSocket upgrade without proxy credentials reaching the fixture", async () => {
+    let authenticatedAtTarget = false;
+    const target = await fixture();
+    target.server.on("upgrade", (request, socket) => {
+      authenticatedAtTarget = "proxy-authorization" in request.headers;
+      socket.on("error", () => undefined);
+      socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nupgraded");
+    });
+    const proxy = await guard(new CaptureDestinationPolicy([target.origin], [target.grant]));
+    const received = await new Promise<string>((resolve, reject) => {
+      const request = httpRequest(proxy.proxy.server, { path: target.origin.replace("http:", "ws:") + "/socket", headers: {
+        "proxy-authorization": auth(proxy), connection: "Upgrade", upgrade: "websocket",
+      } });
+      request.on("error", reject);
+      request.on("upgrade", (response, socket, head) => {
+        expect(response.statusCode).toBe(101);
+        socket.on("error", reject);
+        if (head.length) { socket.destroy(); resolve(head.toString()); }
+        else socket.once("data", (chunk) => { socket.destroy(); resolve(chunk.toString()); });
+      });
+      request.end();
+    });
+    expect(received).toBe("upgraded");
+    expect(authenticatedAtTarget).toBe(false);
+    proxy.assertSafe();
   });
 
   it("routes bundled Chromium HTTP and WebSockets through the authenticated proxy with loopback bypass disabled", async () => {
