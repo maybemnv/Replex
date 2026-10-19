@@ -4,6 +4,22 @@
 
 **Funding constraint:** approximately ₹100,000 maximum for the POC, not a spending target
 
+## Invite-only local demo preparation (20 October 2026)
+
+The V2 local POC is technically complete through Gate E. Gate D is **deferred, not waived**: independent human review and correction-time evidence remain required. Demo preparation does not authorize production or establish live-model quality.
+
+Work proceeds in small PRs, each with tests and a status note here:
+
+1. **Live-agent controls:** extend the existing OpenAI adapter behind the existing agent-edit job envelope; enforce durable per-job cost reservations and a workspace request rate limit. Tests retain scripted models and mocked providers.
+2. **Local API access:** harden existing bearer-token protection, loopback binding, Host/origin checks, and token lifecycle.
+3. **Project discovery/recovery:** add host-side project listing and strengthen existing file-backed project/job restart behavior. No project-list service endpoint or database.
+4. **Resource/capture safeguards:** enforce import limits, bound abandoned-job staging cleanup, and block private/internal capture destinations. Resolve the host-owned local-fixture exception before changing approved capture policy.
+5. **Local demo command:** add prerequisite checks, deterministic fixtures, persistent workspace, orderly shutdown, and short README instructions. Scripted mode is the default; live mode requires explicit configuration.
+
+No deployment, paid service activation, public exposure, or committed provider keys. Hosting is decided later. The production documents inform recovery, privacy, and cost controls; their dormant production backlog is not activated. Any architecture or frozen service-contract change requires owner approval before implementation.
+
+**PR 1 — implemented on `demo/01-agent-budgets`:** Live requests count complete provider input (including images/tools/linked history), reserve input plus maximum output cost before generation, and persist reservations across retry/restart. SDK retries are disabled. Failed or ambiguous attempts retain their reservation. Host-supplied uncached input/output rates are required; no model price is hard-coded. A workspace sliding-window limit counts both input-count and generation requests. Internal budget failures use the existing `AGENT_BUDGET_EXCEEDED` job error; public schemas are unchanged. Validation: TypeScript and diff checks pass; 53 focused tests pass (including adapter/ledger, core agent, contract, CLI, and job-envelope checks). Two existing preview-render tests fail identically on unchanged `main` with system FFmpeg 6.1; they require the documented FFmpeg 9 toolchain. No live provider calls have been made.
+
 The roadmap optimizes evidence per rupee. Stop at any failed gate and preserve the evidence; do not fund later phases to hide an earlier failure.
 
 | Order | Phase | Evidence sought | Exit gate | Budget stance |

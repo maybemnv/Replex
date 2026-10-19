@@ -9,6 +9,7 @@ import { OperationLogRecordSchema, OperationSchema, applyOperationBatch, semanti
 import { buildCompositionExecutionJob, buildCompositionExecutionJobV3, executeCompositionExecutionJobV3, executeMediaExecutionJob, registerRenderArtifactV2, type CompositionExecutionJob, type CompositionExecutionJobV3, type MediaExecutionAuthorization, type MediaExecutionOptions, type RenderArtifactV2 } from "./render-v2.js";
 import { AssetHandleSchema, ProjectV2Schema, type AssetHandle, type ProjectV2 } from "./schema-v2.js";
 import { IdSchema } from "./schema.js";
+import { AgentBudgetError } from "./agent-v2-budget.js";
 
 export { V2InspectRequestSchema };
 export type { V2InspectRequest };
@@ -1001,7 +1002,7 @@ export async function runConversationalEditV2(request: V2ConversationRequest): P
     return complete(finalAssistantText || (acceptedBatches.length ? "The edit preview is ready." : "I inspected the project and made no changes."));
   } catch (error) {
     if (acceptedBatches.length > 0) return complete("The edit preview is ready; an optional follow-up response could not be completed.");
-    const code = error instanceof AgentCallError ? error.code : error instanceof Error && error.message.includes("current project revision") ? "INVALID_PROJECT" : "MODEL_ERROR";
+    const code = error instanceof AgentBudgetError ? "BUDGET_EXCEEDED" : error instanceof AgentCallError ? error.code : error instanceof Error && error.message.includes("current project revision") ? "INVALID_PROJECT" : "MODEL_ERROR";
     const status: FailureStatus = code === "INVALID_PROJECT" ? "rejected" : "failed";
     return fail(status, code, error instanceof AgentCallError ? errorDetail(error) : "model or agent operation failed");
   }

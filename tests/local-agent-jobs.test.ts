@@ -6,6 +6,7 @@ import { LocalExecutor } from "../src/service/executor.js";
 import { LocalProjectService } from "../src/service/local.js";
 import { ffmpegPath, ffprobePath, mediaAvailable } from "./media.js";
 import { projectWithClip, scriptedModel } from "./service-fixture.js";
+import { AgentBudgetError } from "../src/agent-v2-budget.js";
 
 describe("local agent edit jobs", () => {
   const roots: string[] = [];
@@ -27,6 +28,27 @@ describe("local agent edit jobs", () => {
     } finally {
       await executor.stop();
     }
+  });
+
+  it("reports a model budget failure through the existing job envelope without publishing a revision", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-agent-cap-"));
+    roots.push(workspaceRoot);
+    const executor = new LocalExecutor({ workspaceRoot, agentModel: {
+      respond: async () => { throw new AgentBudgetError("host-only accounting detail"); },
+    } });
+    await executor.start();
+    try {
+      const created = await executor.createProject({ contractVersion: "v1", idempotencyKey: "budget-create", name: "Budget" });
+      const job = await executor.waitForJob((await executor.submitAgentEdit({
+        contractVersion: "v1", idempotencyKey: "budget-edit", projectId: created.projectId,
+        baseRevisionId: created.revisionId, prompt: "Edit", preview: true,
+      })).id);
+      expect(job).toMatchObject({ state: "failed", error: { code: "AGENT_BUDGET_EXCEEDED", retryable: false } });
+      expect(JSON.stringify(job)).not.toContain("host-only");
+      const snapshot = await executor.openProject({ contractVersion: "v1", idempotencyKey: "budget-open", projectId: created.projectId, revisionId: created.revisionId });
+      expect(snapshot.revisionId).toBe(created.revisionId);
+      expect(snapshot.revisions).toHaveLength(1);
+    } finally { await executor.stop(); }
   });
 
   it.skipIf(!mediaAvailable)("runs same-thread follow-up edits with verified previews across a restart", async () => {
