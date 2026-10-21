@@ -2,7 +2,7 @@
 
 > **V2 direction:** Media composition is the project; browser capture is one intelligent media source.
 
-**Repository status (20 October 2026):** The V2 local POC is technically complete through Gate E. Gate D (independent human review and correction-time evidence) is deferred, not waived. The historical V1 formal product gate remains `REWORK` for that evidence gap.
+**Repository status (21 October 2026):** The V2 local POC is technically complete through Gate E. The final demo branch passed its build and all 455 tests; the demo exported a six-second 1920×1080 H.264 MP4 and remained discoverable after shutdown. PR #23's inherited path-fixture failure and parallel-suite timeouts are repaired; its build and default test command now pass all 375 tests. The PR stack remains unmerged. See the [validation record](Docs/v2/local-demo-validation.md) for commit IDs, tool versions, and evidence. Gate D (independent human review and correction-time evidence) is deferred, not waived. The historical V1 formal product gate remains `REWORK` for that evidence gap.
 
 Replex V2 is implemented as a bounded local POC. Gates A–C (model/contract, media, agent) and Gate E (differentiation) have technical evidence. The core includes:
 
@@ -113,7 +113,7 @@ Module boundaries: `Docs/poc/technical_poc.md:7`. Work artifacts are gitignored 
 
 - Node.js `>=22`
 - npm (lockfile committed) — `technical_poc` notes `pnpm` as gated production choice
-- FFmpeg + ffprobe on `PATH` (versions recorded in preflight). V2 render tests are validated against FFmpeg 9.0.x; older system builds (for example 6.1) fail them. Point `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` at absolute direct binaries to use a specific build. Absolute paths also enable the motion tests, which are skipped otherwise.
+- FFmpeg + ffprobe on `PATH` (versions recorded in preflight). The demo requires version 9+ or a compatible development build. The 21 October full-suite pass used `N-127790-g56dbd4cd37-20261020`; older system builds such as 6.1 are unsupported for the demo. Point `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` at absolute direct binaries to use a specific build. Absolute paths also enable the motion tests, which are skipped otherwise.
 - Playwright bundled Chromium (`npx playwright install chromium`)
 
 ---
@@ -237,6 +237,7 @@ Checks before render: approved flow completed, every expected checkpoint reached
 | [`Docs/REPLEX_V2_PRD.md`](Docs/REPLEX_V2_PRD.md) | V2 product definition and POC scope |
 | [`Docs/v2/implementation-plan.md`](Docs/v2/implementation-plan.md) | Dependency-ordered implementation plan with per-slice status and validation records |
 | [`Docs/v2/roadmap.md`](Docs/v2/roadmap.md) | V2 phases, decision gates, and current gate status |
+| [`Docs/v2/local-demo-validation.md`](Docs/v2/local-demo-validation.md) | PR #23–#28 validation results, exact commits, toolchain, and merge blocker |
 | [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md) | Gurbaaz frontend handoff |
 | [`Docs/PRD.md`](Docs/PRD.md) | Normative POC scope, requirements POC-01…POC-20, pass/fail gates |
 | [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md) | Minimal local architecture, data model, contracts |
