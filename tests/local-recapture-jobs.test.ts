@@ -24,7 +24,7 @@ describe("local browser recapture jobs", () => {
     roots.push(workspaceRoot);
     const seeded = await seedBrowserProject(roots, workspaceRoot, fixture, "project-recapture-jobs");
     const media = { ffmpegPath, ffprobePath };
-    const executor = new LocalExecutor({ workspaceRoot, media, browserTargets: fixture.browserTargets });
+    const executor = new LocalExecutor({ workspaceRoot, media, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     await executor.start();
     const projectId = seeded.project.projectId;
     const request = {
@@ -82,7 +82,7 @@ describe("local browser recapture jobs", () => {
 
     // A restart between the commit and the saved job state replays the request: it reports the published revision without driving the browser.
     const runsBefore = await readdir(join(seeded.projectRoot, "captures"));
-    const service = new LocalProjectService({ workspaceRoot, media, browserTargets: fixture.browserTargets });
+    const service = new LocalProjectService({ workspaceRoot, media, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     const replayed = await service.recaptureScene(request, new AbortController().signal);
     expect(replayed).toMatchObject({ ok: true, revisionId, assetId: replacementId, revision: { id: revisionId, isCurrent: true } });
     expect(await readdir(join(seeded.projectRoot, "captures"))).toEqual(runsBefore);

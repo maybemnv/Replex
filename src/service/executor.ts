@@ -1,3 +1,4 @@
+import type { FixtureNetworkGrant } from "../capture-network-policy.js";
 import type {
   ApplyOperationsRequest,
   ImportAssetRequest,
@@ -43,7 +44,7 @@ export class LocalExecutor {
   private readonly projects: LocalProjectService;
   private readonly jobs: LocalJobRuntime;
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets; fixtureGrants?: readonly FixtureNetworkGrant[] }) {
     this.projects = new LocalProjectService({ ...options, agentEnabled: options.agentModel !== undefined });
     this.jobs = new LocalJobRuntime(options.workspaceRoot, this.projects, options.agentModel);
   }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, lstat, realpath, rename, unlink } from "node:fs/promises";
+import { mkdir, open, opendir, readFile, lstat, realpath, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { z } from "zod";
 import { canonicalJson } from "../canonical-json.js";
 import { withLocalAssetV2, type AuthorizedLocalImport, type LocalAssetFacts, type LocalImportOptions } from "../import-v2.js";
 import {
@@ -33,6 +34,15 @@ const sha256 = (value: string): string => createHash("sha256").update(value).dig
 const MAX_PROJECT_BYTES = 128 * 1024 * 1024;
 const MAX_EVIDENCE_BYTES = 1_000_000;
 const OPERATION_LOG_RELATIVE_PATH = "operations/operations.jsonl";
+const ProjectMetadataSchema = z.object({
+  projectId: IdSchema, createFingerprint: z.string().regex(/^[a-f0-9]{64}$/), displayName: z.string().min(1).max(200),
+}).strict();
+
+/** Host discovery only, deliberately outside service-contract v1. Paths never leave the host. */
+export interface LocalProjectCatalog {
+  projects: Array<{ projectId: string; name: string; currentRevisionId: string }>;
+  unavailableCount: number;
+}
 
 export interface LocalAssetBatchRequest {
   baseRevisionId: string;
@@ -75,6 +85,37 @@ export class LocalProjectStore {
   private static readonly projectTails = new Map<string, Promise<void>>();
 
   constructor(private readonly workspaceRoot: string) {}
+
+  /** Rebuild discovery from canonical project directories; no database or second authoritative index. */
+  async listProjects(): Promise<LocalProjectCatalog> {
+    const root = await this.root();
+    const projectsRoot = join(root, "projects");
+    try { await lstat(projectsRoot); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { projects: [], unavailableCount: 0 };
+      throw invalidStorage();
+    }
+    await this.ensureDirectory(root, "projects", root, false);
+    const catalog: LocalProjectCatalog = { projects: [], unavailableCount: 0 };
+    const directory = await opendir(projectsRoot);
+    let count = 0;
+    for await (const entry of directory) {
+      if (++count > 10_000) throw invalidStorage();
+      try {
+        if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) throw invalidStorage();
+        const path = join(projectsRoot, entry.name);
+        const metadata = ProjectMetadataSchema.parse(await this.readJsonIfExists(join(path, "metadata.json"), root));
+        if (sha256(metadata.projectId) !== entry.name) throw invalidStorage();
+        const project = await this.current(metadata.projectId);
+        catalog.projects.push({ projectId: project.projectId, name: metadata.displayName, currentRevisionId: project.currentRevisionId });
+      } catch {
+        // Report inaccessible/corrupt entries, without following links or silently repairing state.
+        catalog.unavailableCount += 1;
+      }
+    }
+    catalog.projects.sort((left, right) => left.projectId < right.projectId ? -1 : left.projectId > right.projectId ? 1 : 0);
+    return catalog;
+  }
 
   async projectRoot(projectId: string): Promise<string> {
     const root = await this.root();

@@ -1,3 +1,5 @@
+import type { FixtureNetworkGrant } from "../capture-network-policy.js";
+import { cleanupAbandonedStaging } from "./cleanup.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -46,10 +48,10 @@ export class LocalExecutorServer {
   private startPromise?: Promise<{ url: string; token: string }>;
   private stopPromise?: Promise<void>;
 
-  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets }) {
+  constructor(options: { workspaceRoot: string; allowedOrigins?: string[]; importRoots?: string[]; media?: MediaToolOptions; agentModel?: V2AgentModelClient; browserTargets?: BrowserTargets; fixtureGrants?: readonly FixtureNetworkGrant[] }) {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.importRoots = (options.importRoots?.length ? options.importRoots : [this.workspaceRoot]).map((root) => resolve(root));
-    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel, browserTargets: options.browserTargets });
+    this.executor = new LocalExecutor({ workspaceRoot: this.workspaceRoot, media: options.media, agentModel: options.agentModel, browserTargets: options.browserTargets, fixtureGrants: options.fixtureGrants });
     try { this.allowedOrigins = new Set((options.allowedOrigins ?? []).map(localOrigin)); }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "Only explicit local frontend origins are allowed."); }
   }
@@ -99,6 +101,8 @@ export class LocalExecutorServer {
     this.server = server;
     this.token = token;
     try {
+      // The bound workspace port is the lease; no workers resume until abandoned staging is inspected.
+      await cleanupAbandonedStaging(this.workspaceRoot);
       await this.executor.start();
       this.closing = false;
       this.ready = true;
@@ -164,6 +168,7 @@ export class LocalExecutorServer {
       await this.route(request, response);
     } catch (error) {
       const result = safeError(error);
+      if (error instanceof HttpInputError && error.status === 413) response.setHeader("connection", "close");
       sendJson(response, result.status, result.body);
     } finally {
       this.activeRequests -= 1;
@@ -175,6 +180,12 @@ export class LocalExecutorServer {
   }
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    // Node may discard duplicate Authorization/Host values in headers while retaining them in rawHeaders.
+    const headerCount = (name: string) => request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === name).length;
+    if (headerCount("host") !== 1 || headerCount("authorization") > 1 || headerCount("origin") > 1) {
+      sendJson(response, 403, serviceError("UNAUTHORIZED", "Ambiguous local authorization headers are not allowed.", false));
+      return;
+    }
     const origin = request.headers.origin;
     if (origin) {
       if (!this.allowedOrigins.has(origin)) {
@@ -203,6 +214,7 @@ export class LocalExecutorServer {
       return;
     }
     if (!authorized(request.headers.authorization, this.token!)) {
+      response.setHeader("www-authenticate", 'Bearer realm="replex-local"');
       sendJson(response, 401, serviceError("UNAUTHORIZED", "A valid local executor token is required.", false));
       return;
     }
@@ -283,8 +295,9 @@ function validHost(value: string | undefined, port: number): boolean {
   try {
     const host = new URL(`http://${value}`);
     return new Set(["127.0.0.1", "localhost"]).has(host.hostname.toLowerCase())
-      && (!host.port || Number(host.port) === port)
-      && !host.username && !host.password;
+      && Number(host.port || "80") === port
+      && host.host === value.toLowerCase()
+      && !host.username && !host.password && host.pathname === "/" && !host.search && !host.hash;
   } catch {
     return false;
   }
@@ -298,7 +311,7 @@ function authorized(header: string | undefined, token: string): boolean {
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
-  if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+  if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
     throw new HttpInputError(415, "A JSON request body is required.");
   }
   const declared = Number(request.headers["content-length"] ?? 0);
@@ -307,7 +320,8 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
+  // Do not destroy the socket before the bounded 413 response can be flushed.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += data.length;
     if (size > MAX_REQUEST_BYTES) throw new HttpInputError(413, "The request body exceeds the local service limit.");

@@ -41,6 +41,8 @@ import { runCapture, type CaptureResult } from "../capture.js";
 import { recaptureBrowserSceneV2, RecaptureV2Error } from "../recapture-v2.js";
 import { EnvironmentSchema, FlowSchema, IdSchema } from "../schema.js";
 import { MediaAssetSchema } from "../schema-v2.js";
+import { CaptureDestinationPolicy, type FixtureNetworkGrant } from "../capture-network-policy.js";
+import { CaptureNetworkGuard } from "../capture-network.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -100,12 +102,14 @@ export class LocalProjectService {
   private readonly media: MediaToolOptions;
   private readonly agentEnabled: boolean;
   private readonly browserTargets: BrowserTargets;
+  private readonly fixtureGrants: readonly FixtureNetworkGrant[];
 
-  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean; browserTargets?: BrowserTargets }) {
+  constructor(options: { workspaceRoot: string; media?: MediaToolOptions; agentEnabled?: boolean; browserTargets?: BrowserTargets; fixtureGrants?: readonly FixtureNetworkGrant[] }) {
     this.store = new LocalProjectStore(options.workspaceRoot);
     this.media = options.media ?? {};
     this.agentEnabled = options.agentEnabled ?? false;
     this.browserTargets = BrowserTargetsSchema.parse(options.browserTargets ?? {});
+    this.fixtureGrants = options.fixtureGrants ?? [];
   }
 
   async createProject(requestInput: CreateProjectRequest): Promise<ProjectCreatedResponse> {
@@ -332,13 +336,7 @@ export class LocalProjectService {
     await mkdir(captureRoot, { recursive: true, mode: 0o700 });
     let capture: CaptureResult;
     try {
-      capture = await runCapture(flow, target.environment, {
-        artifactRoot: captureRoot,
-        signal,
-        ...(target.values ? { values: target.values } : {}),
-        ...(target.resetUrl ? { reset: () => resetBrowserTarget(target.resetUrl!, signal) } : {}),
-        ...this.media,
-      });
+      capture = await this.captureApprovedFlow(flow, target, captureRoot, signal);
     } catch (error) {
       if (signal.aborted) throw error;
       return { ok: false, code: "CAPTURE_FAILED", detail: "the approved flow did not complete" };
@@ -424,13 +422,7 @@ export class LocalProjectService {
     await mkdir(captureRoot, { recursive: true, mode: 0o700 });
     let capture: CaptureResult;
     try {
-      capture = await runCapture(flow, target.environment, {
-        artifactRoot: captureRoot,
-        signal,
-        ...(target.values ? { values: target.values } : {}),
-        ...(target.resetUrl ? { reset: () => resetBrowserTarget(target.resetUrl!, signal) } : {}),
-        ...this.media,
-      });
+      capture = await this.captureApprovedFlow(flow, target, captureRoot, signal);
     } catch (error) {
       if (signal.aborted) throw error;
       return { ok: false, code: "CAPTURE_FAILED", detail: "the approved flow did not complete" };
@@ -452,6 +444,20 @@ export class LocalProjectService {
       if (error instanceof RecaptureV2Error) return { ok: false, code: error.code, detail: error.message };
       throw error;
     }
+  }
+
+  private async captureApprovedFlow(flow: z.infer<typeof FlowSchema>, target: BrowserTargets[string], captureRoot: string, signal: AbortSignal): Promise<CaptureResult> {
+    const policy = new CaptureDestinationPolicy(target.environment.allowedOrigins, this.fixtureGrants);
+    await policy.destination(target.environment.appOrigin, signal);
+    const guard = await CaptureNetworkGuard.start(policy, signal);
+    try {
+      return await runCapture(flow, target.environment, {
+        artifactRoot: captureRoot, signal, networkGuard: guard,
+        ...(target.values ? { values: target.values } : {}),
+        ...(target.resetUrl ? { reset: () => guard.reset(target.resetUrl!) } : {}),
+        ...this.media,
+      });
+    } finally { await guard.stop(); }
   }
 
   /** Content-addressed per asset and generator config; regenerated per job within its bounded deadline. */
@@ -489,11 +495,6 @@ export class LocalProjectService {
     const targets = Object.values(this.browserTargets);
     return localCapabilities(this.agentEnabled, targets.length > 0, targets.some(({ flow }) => flow !== undefined));
   }
-}
-
-async function resetBrowserTarget(url: string, signal: AbortSignal): Promise<void> {
-  const response = await fetch(url, { method: "POST", signal, redirect: "error" });
-  if (!response.ok) throw new Error(`browser target reset failed: ${response.status}`);
 }
 
 function revisionView(project: ProjectV2, revisionId: string): RevisionView {

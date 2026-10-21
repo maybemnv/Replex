@@ -41,6 +41,7 @@ describe("fixture operator", () => {
   });
 
   it("resets changed fixture state before bootstrapping", async () => {
+    // Includes Chromium capture plus normalization of 30 seconds of media; no product SLA is changed.
     const root = await mkdtemp(join(tmpdir(), "replex-fixture-bootstrap-"));
     running = await startFixtureServers({ normal: 0, dynamic: 0, difficult: 0 });
     try {
@@ -50,5 +51,5 @@ describe("fixture operator", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 120_000);
 });

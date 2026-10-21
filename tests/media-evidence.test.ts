@@ -124,6 +124,25 @@ describe("media evidence source binding", () => {
     }
   }, 120_000);
 
+  whenMediaAvailable("samples short VP9 captures before their final display interval", async () => {
+    const root = await mkdtemp(join(tmpdir(), "replex-evidence-short-"));
+    try {
+      for (const frames of [1, 8, 10]) {
+        const sourcePath = join(root, `short-${frames}.webm`);
+        const encoded = spawnSync(ffmpegPath, ["-v", "error", "-f", "lavfi", "-i", "color=c=green:s=320x180:r=30",
+          "-frames:v", String(frames), "-c:v", "libvpx-vp9", "-threads", "1", "-y", sourcePath], { encoding: "utf8", shell: false, timeout: 15_000 });
+        expect(encoded.status, encoded.stderr).toBe(0);
+        const index = await generateMediaEvidence({ asset: await authorizedAsset(sourcePath, `asset-short-${frames}`),
+          evidenceRoot: join(root, "evidence"), resolveSource: async () => sourcePath });
+        const selected = index.artifacts.filter((artifact) => artifact.kind === "selected_frame");
+        expect(selected.length).toBeGreaterThan(0);
+        expect(selected.length).toBeLessThanOrEqual(4);
+        expect(selected.every((artifact) => artifact.timestampMs! <= Math.floor((frames - 1) * 1000 / 30))).toBe(true);
+        expect(index.artifacts.some((artifact) => artifact.kind === "contact_sheet")).toBe(true);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 60_000);
+
   whenMediaAvailable("records silence and bounded loudness/peak evidence for silent audio", async () => {
     const root = await mkdtemp(join(tmpdir(), "replex-evidence-silence-"));
     const sourcePath = join(root, "silent-audio.mp4");

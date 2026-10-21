@@ -68,10 +68,10 @@ function publicError(error: unknown): ContractError {
 }
 
 /** Explicit opt-in: the agent is enabled only for a named model with an available key. */
-export function agentOption(model: string | undefined): { agentModel?: V2AgentModelClient } {
+export function agentOption(model: string | undefined, workspaceRoot: string): { agentModel?: V2AgentModelClient } {
   if (!model) return {};
-  try { return { agentModel: createOpenAIV2ModelClientFromEnv(model) }; }
-  catch { throw new LocalExecutorError("VALIDATION_FAILED", "--agent-model requires OPENAI_API_KEY in the environment or a local .env file."); }
+  try { return { agentModel: createOpenAIV2ModelClientFromEnv(model, workspaceRoot) }; }
+  catch { throw new LocalExecutorError("VALIDATION_FAILED", "--agent-model requires OPENAI_API_KEY and valid REPLEX_AGENT pricing/budget settings in the environment or a local .env file."); }
 }
 
 /** Host-owned browser targets for recapture, read from a JSON file the host controls. */
@@ -101,7 +101,7 @@ export async function runServiceCommandCli(argv: string[], io: CliIO = {
     try { request = JSON.parse(await readFile(args.inputPath, "utf8")) as unknown; }
     catch { throw new LocalExecutorError("VALIDATION_FAILED", "The service request file is not valid JSON."); }
 
-    server = new LocalExecutorServer({ workspaceRoot: args.workspaceRoot, importRoots: args.importRoots, ...agentOption(args.agentModel), ...await browserTargetsOption(args.browserConfigPath) });
+    server = new LocalExecutorServer({ workspaceRoot: args.workspaceRoot, importRoots: args.importRoots, ...agentOption(args.agentModel, args.workspaceRoot), ...await browserTargetsOption(args.browserConfigPath) });
     await server.start();
     if (args.command === "import_asset") {
       const raw = typeof request === "object" && request !== null && !Array.isArray(request) ? request as Record<string, unknown> : {};

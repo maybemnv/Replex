@@ -29,13 +29,34 @@ describe("local browser capture jobs", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  it("blocks an approved private target without a host fixture grant and publishes no revision", async () => {
+    const fixture = await startReleaseFixture();
+    closers.push(fixture.close);
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-capture-private-"));
+    roots.push(workspaceRoot);
+    const executor = new LocalExecutor({ workspaceRoot, browserTargets: fixture.browserTargets });
+    await executor.start();
+    try {
+      const created = await executor.createProject({ contractVersion: "v1", idempotencyKey: "private-create", name: "Private target" });
+      const result = await executor.waitForJob((await executor.submitCapture({
+        contractVersion: "v1", idempotencyKey: "private-capture", projectId: created.projectId,
+        baseRevisionId: created.revisionId, flowId: fixture.flow.id, approved: true, executionTarget: "local",
+      })).id);
+      expect(result).toMatchObject({ state: "failed", error: { code: "BROWSER_CAPTURE_FAILED" } });
+      const project = await new LocalProjectStore(workspaceRoot).current(created.projectId);
+      expect(project.currentRevisionId).toBe(created.revisionId);
+      expect(project.revisions).toHaveLength(1);
+      expect(Object.keys(project.assets)).toHaveLength(0);
+    } finally { await executor.stop(); }
+  });
+
   it.skipIf(!mediaAvailable)("captures an approved flow into immutable scene assets, registers it once, and replays without capturing", async () => {
     const fixture = await startReleaseFixture();
     closers.push(fixture.close);
     const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-capture-jobs-"));
     roots.push(workspaceRoot);
     const media = { ffmpegPath, ffprobePath };
-    const executor = new LocalExecutor({ workspaceRoot, media, browserTargets: fixture.browserTargets });
+    const executor = new LocalExecutor({ workspaceRoot, media, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     await executor.start();
     const project = await executor.createProject({ contractVersion: "v1", idempotencyKey: "capture-create", name: "Capture" });
     const projectId = project.projectId;
@@ -93,7 +114,7 @@ describe("local browser capture jobs", () => {
 
     // A restart between the commit and the saved job state replays the request without driving the browser.
     const runsBefore = await readdir(join(projectRoot, "captures"));
-    const service = new LocalProjectService({ workspaceRoot, media, browserTargets: fixture.browserTargets });
+    const service = new LocalProjectService({ workspaceRoot, media, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     const replayed = await service.startCapture(request, new AbortController().signal);
     expect(replayed).toMatchObject({ ok: true, revisionId: firstRevisionId, assetId: firstAssetId });
     expect(await readdir(join(projectRoot, "captures"))).toEqual(runsBefore);
@@ -104,7 +125,7 @@ describe("local browser capture jobs", () => {
     closers.push(fixture.close);
     const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-capture-retry-"));
     roots.push(workspaceRoot);
-    const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath }, browserTargets: fixture.browserTargets });
+    const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath }, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     await executor.start();
     try {
       const project = await executor.createProject({ contractVersion: "v1", idempotencyKey: "retry-create", name: "Retry capture" });
@@ -138,7 +159,7 @@ describe("local browser capture jobs", () => {
     closers.push(fixture.close);
     const workspaceRoot = await mkdtemp(join(tmpdir(), "replex-capture-cancel-"));
     roots.push(workspaceRoot);
-    const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath }, browserTargets: fixture.browserTargets });
+    const executor = new LocalExecutor({ workspaceRoot, media: { ffmpegPath, ffprobePath }, fixtureGrants: fixture.fixtureGrants, browserTargets: fixture.browserTargets });
     await executor.start();
     try {
       const project = await executor.createProject({ contractVersion: "v1", idempotencyKey: "cancel-create", name: "Cancel capture" });

@@ -6,8 +6,11 @@ import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, expect as playwrightExpect, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { EnvironmentSchema, FlowSchema, IdSchema, normalizeOrigin, type BrowserStep, type Environment, type Flow } from "./schema.js";
+import { CAPTURE_BROWSER_ARGS, type CaptureNetworkGuard } from "./capture-network.js";
 
 const MAX_CONSOLE_EVENTS = 1000;
+// Evidence encoding has a separate bound from approved-action and checkpoint deadlines.
+const ARTIFACT_SCREENSHOT_TIMEOUT_MS = 15_000;
 
 function assertSceneKey(sceneKey: string, actionId: string): void {
   if (!IdSchema.safeParse(sceneKey).success) {
@@ -62,6 +65,8 @@ export interface ScenePlan {
 
 export interface CaptureOptions {
   artifactRoot: string;
+  /** V2 host-owned egress guard; historical V1 callers retain their approved-origin policy. */
+  networkGuard?: CaptureNetworkGuard;
   attempt?: number;
   values?: Record<string, string>;
   reset?: () => Promise<void>;
@@ -409,7 +414,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
   let runtimeOriginError: CaptureRunError | undefined;
 
   try {
-    browser = await chromium.launch();
+    browser = await chromium.launch(options.networkGuard ? { proxy: options.networkGuard.proxy, args: [...CAPTURE_BROWSER_ARGS] } : {});
     const activeContext = await browser.newContext({
       ...browserContextOptions(environment),
       recordVideo: { dir: rawVideoRoot, size: environment.viewport },
@@ -422,6 +427,10 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
     const activePage = await activeContext.newPage();
     page = activePage;
     activePage.setDefaultTimeout(5_000);
+    // A new headless page can exist before Chromium has a drawable surface for the first before-shot.
+    await activePage.waitForFunction(() => new Promise<boolean>((resolveReady) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolveReady(true)));
+    }), undefined, { timeout: 5_000 });
     const video = activePage.video();
     const startedAtMs = performance.now();
     activePage.on("console", (message) => trackConsoleEvent(consoleEvents, { attempt, atMs: performance.now() - startedAtMs, type: message.type(), message: message.text() }));
@@ -435,7 +444,8 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       runtimeOriginError = new CaptureRunError("ORIGIN_NOT_ALLOWED", currentActionId, `origin is not allowed: ${parsed.origin}`);
       await route.abort("blockedbyclient");
     });
-    await activeContext.routeWebSocket(/wss?:\/\//, (route) => {
+    // V2 WebSockets must use Chromium's proxy path; Playwright's server-side WS bridge is not an egress boundary.
+    if (!options.networkGuard) await activeContext.routeWebSocket(/wss?:\/\//, (route) => {
       const url = new URL(route.url());
       const origin = `${url.protocol === "wss:" ? "https:" : "http:"}//${url.host}`;
       if (isAllowedOrigin(environment.allowedOrigins, origin)) return route.connectToServer();
@@ -459,12 +469,13 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       if (options.signal?.aborted) throw new CaptureRunError("CANCELLED", step.id, "browser capture was cancelled");
       if (step.sceneKey && !startedScenes.has(step.sceneKey)) {
         const path = join(runRoot, "screenshots", `${artifactSceneKey(step.sceneKey)}-before.png`);
-        await writeImmutableArtifact(path, await activePage.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
         artifacts.push({ sceneKey: step.sceneKey, boundary: "before", path });
         startedScenes.add(step.sceneKey);
       }
       try {
         await executeStep(activePage, step, options.values ?? {}, options.uploadRoots ?? []);
+        options.networkGuard?.assertSafe();
         if (runtimeOriginError) throw runtimeOriginError;
         assertRuntimeOrigin(activePage, environment, step.id);
         await checkCheckpoint(activePage, step);
@@ -493,14 +504,16 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       const scene = scenePlan.find((candidate) => candidate.checkpointActionId === step.id);
       if (scene) {
         const path = join(runRoot, "screenshots", `${artifactSceneKey(scene.sceneKey)}-after.png`);
-        await writeImmutableArtifact(path, await activePage.screenshot());
+        await writeImmutableArtifact(path, await activePage.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
         artifacts.push({ sceneKey: scene.sceneKey, boundary: "after", path });
       }
     }
     if (runtimeOriginError) throw runtimeOriginError;
+    options.networkGuard?.assertSafe();
     if (retainTrace) await activeContext.tracing.stop({ path: tracePath });
     await activeContext.close();
     contextClosed = true;
+    options.networkGuard?.assertSafe();
     await writeImmutableArtifact(actionLogPath, jsonLines(actionEvents.map((event) => JSON.parse(redactEvidenceText(JSON.stringify(event))))));
     await writeImmutableArtifact(consoleLogPath, jsonLines(consoleEvents.map((event) => ({ ...event, message: redactEvidenceText(event.message) }))));
     logsWritten = true;
@@ -530,7 +543,7 @@ export async function runCapture(flow: Flow, environment: Environment, options: 
       const evidencePath = join(failureRoot, "evidence.json");
       let screenshotError: string | undefined;
       try {
-        await writeImmutableArtifact(screenshotPath, await page.screenshot());
+        await writeImmutableArtifact(screenshotPath, await page.screenshot({ timeout: ARTIFACT_SCREENSHOT_TIMEOUT_MS }));
       } catch (screenshotFailure) {
         screenshotError = screenshotFailure instanceof Error ? screenshotFailure.message : String(screenshotFailure);
       }

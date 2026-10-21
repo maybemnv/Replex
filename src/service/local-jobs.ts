@@ -46,6 +46,8 @@ import { closeAuthorizedLocalImport, LocalImportError, type AuthorizedLocalImpor
 const MAX_JOB_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JOB_EVENTS = 20_000;
 const MAX_AUTHORIZED_IMPORTS = 16;
+const MAX_ACTIVE_JOBS = 16;
+const MAX_RETAINED_JOBS = 10_000;
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const JobRecordSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -270,6 +272,7 @@ export class LocalJobRuntime {
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new LocalExecutorError("IDEMPOTENCY_CONFLICT", "The idempotency key was used for a different request.");
         if (!this.retryable(existing)) return { job: existing.job, event: undefined, schedule: false };
+        this.assertJobCapacity(state, false);
         // Clients retry a retryable failure with the same key; requeue the same job instead of replaying the failure.
         const { error: _error, progress: _progress, ...prior } = existing.job as JobView & { error?: unknown };
         existing.job = JobViewSchema.parse({
@@ -288,6 +291,7 @@ export class LocalJobRuntime {
       if (kind === "asset_import" && !this.importAuthorized(request)) {
         throw new LocalExecutorError("VALIDATION_FAILED", "The local import token is not authorized.");
       }
+      this.assertJobCapacity(state, true);
 
       const createdAt = now();
       const job = JobViewSchema.parse({
@@ -316,6 +320,14 @@ export class LocalJobRuntime {
   private importAuthorized(request: JobRequest): boolean {
     const source = "source" in request ? request.source : undefined;
     return !!source && this.imports.has(source.ref) && !this.reservedImports.has(source.ref);
+  }
+
+  private assertJobCapacity(state: JobState, newJob: boolean): void {
+    const jobs = Object.values(state.jobs);
+    if (jobs.filter(({ job }) => !terminal(job)).length >= MAX_ACTIVE_JOBS
+      || (newJob && jobs.length >= MAX_RETAINED_JOBS)) {
+      throw new LocalExecutorError("VALIDATION_FAILED", "The workspace job limit is reached; wait for pending work or select a new demo workspace.");
+    }
   }
 
   /** A failed job reruns on resubmission only when its error is retryable and an import still holds its token. */

@@ -1,6 +1,6 @@
 # Replex V2 frontend handoff for Gurbaaz
 
-**Status (1 October 2026):** The local runtime now includes V2-702 immutable video/image/audio import jobs, in addition to project create/open and semantic-operation jobs. The bounded `camera-push.v1` motion path is implemented. A V2-901 core proof adapts an approved browser scene into a content-addressed browser asset, applies one selective replacement revision, and checks unrelated mixed-project state through machine-readable preservation evidence. Gate D remains open and is deferred by owner decision (6 October 2026): the supplied reviews are synthetic (0/3 independent human reviews) and correction times are unmeasured. V2-703 adds agent-edit jobs with persisted same-thread conversations and preview/final render jobs; selective recapture and browser capture are not exposed as local executor jobs. No formal POC result or production readiness is claimed. See the [motion spike report](motion-spike-report.md).
+**Status (21 October 2026):** The local runtime supports immutable video/image/audio imports, semantic operations, agent edits with persisted conversations, browser capture and selective recapture, revision verification, and preview/final render jobs. The bounded `camera-push.v1` motion path is implemented. The final demo branch passed its build and all 455 tests; the actual demo exported a six-second 1080p H.264 MP4 and retained a project listed by discovery after shutdown. PR #23's validation blocker is repaired and its default suite passes 375 tests. The PR stack remains unmerged; see the [validation record](local-demo-validation.md). Gate D remains deferred by owner decision: independent human reviews are 0/3 and correction times are unmeasured. Live-provider quality and production readiness remain unproven.
 
 **Backend source of truth:** [`../architecture/REPLEX_V2.md`](../architecture/REPLEX_V2.md) for architecture and [`../../src/service-contract/index.ts`](../../src/service-contract/index.ts) for transport-independent schemas/types
 
@@ -83,6 +83,8 @@ Create requests carry contract version and idempotency metadata before a project
 Contract v1 has no `list_projects`/`attach_project` command and introduces no database. The local host shell lists only authorized project roots, validates the selected project manifest, and supplies its `projectId` and current `revisionId` to `open_project`; `create_project` returns the new ID. The service contract receives IDs, not host paths or local tokens. A mocked project list is host-shell fixture data, not a service endpoint.
 
 Project discovery remains host-owned. The current local service adds no project-list endpoint, database, filesystem path, or local token field to the project contract.
+
+The implemented host command is `npm run service:v2:projects -- --workspace <directory>`. It returns project IDs, names, current revision IDs, and `unavailableCount` for corrupt or incomplete entries. It does not repair files. Use its IDs with `open_project`; the workspace remains authoritative across restarts.
 
 ## Local executor slice (V2-701)
 

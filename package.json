@@ -13,6 +13,8 @@
     "cli": "tsx src/cli.ts",
     "service:v2": "tsx src/service/cli.ts",
     "service:v2:command": "tsx src/service/command-cli.ts",
+    "service:v2:projects": "tsx src/service/projects-cli.ts",
+    "demo": "tsx src/demo/cli.ts",
     "fixtures": "tsx fixtures/operator.ts"
   },
   "dependencies": {

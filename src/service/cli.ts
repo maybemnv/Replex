@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   let server: LocalExecutorServer | undefined;
   try {
     const { agentModel, browserConfigPath, ...options } = parseArgs(process.argv.slice(2));
-    server = new LocalExecutorServer({ ...options, ...agentOption(agentModel), ...await browserTargetsOption(browserConfigPath) });
+    server = new LocalExecutorServer({ ...options, ...agentOption(agentModel, options.workspaceRoot), ...await browserTargetsOption(browserConfigPath) });
     const session = await server.start();
     process.stdout.write(JSON.stringify({ contractVersion: "v1", url: session.url, bearerToken: session.token }) + "\n");
     let stopping = false;

@@ -2,9 +2,9 @@
 
 > **V2 direction:** Media composition is the project; browser capture is one intelligent media source.
 
-**Repository status (9 October 2026):** The browser-first V1 POC is implemented and has strong technical evidence. Its formal product gate remains `REWORK` because human usefulness and correction-time evidence are incomplete.
+**Repository status (21 October 2026):** The V2 local POC is technically complete through Gate E. The final demo branch passed its build and all 455 tests; the demo exported a six-second 1920×1080 H.264 MP4 and remained discoverable after shutdown. PR #23's inherited path-fixture failure and parallel-suite timeouts are repaired; its build and default test command now pass all 375 tests. The PR stack remains unmerged. See the [validation record](Docs/v2/local-demo-validation.md) for commit IDs, tool versions, and evidence. Gate D (independent human review and correction-time evidence) is deferred, not waived. The historical V1 formal product gate remains `REWORK` for that evidence gap.
 
-Replex V2 is partly implemented as a local POC. Gates A–C (model/contract, media, agent) have bounded technical evidence. On `main` today:
+Replex V2 is implemented as a bounded local POC. Gates A–C (model/contract, media, agent) and Gate E (differentiation) have technical evidence. The core includes:
 
 - the V2 schema, reducer, and frozen service contract v1
 - immutable video/image/audio import with native FFmpeg evidence
@@ -113,7 +113,7 @@ Module boundaries: `Docs/poc/technical_poc.md:7`. Work artifacts are gitignored 
 
 - Node.js `>=22`
 - npm (lockfile committed) — `technical_poc` notes `pnpm` as gated production choice
-- FFmpeg + ffprobe on `PATH` (versions recorded in preflight). V2 render tests are validated against FFmpeg 9.0.x; older system builds (for example 6.1) fail them. Point `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` at absolute direct binaries to use a specific build. Absolute paths also enable the motion tests, which are skipped otherwise.
+- FFmpeg + ffprobe on `PATH` (versions recorded in preflight). The demo requires version 9+ or a compatible development build. The 21 October full-suite pass used `N-127790-g56dbd4cd37-20261020`; older system builds such as 6.1 are unsupported for the demo. Point `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` at absolute direct binaries to use a specific build. Absolute paths also enable the motion tests, which are skipped otherwise.
 - Playwright bundled Chromium (`npx playwright install chromium`)
 
 ---
@@ -144,6 +144,35 @@ npm run service:v2:command -- --workspace <dir> --command <command> --input <req
 ```
 
 Commands: `create_project`, `open_project`, `import_asset` (requires `--source-path`), `apply_operations`, `request_agent_edit`, `start_browser_capture`, `recapture_browser_scene`, `verify_revision`, `render_preview`, `render_final`, `cancel_job`. Agent edits are enabled only when `--agent-model` names a model and `OPENAI_API_KEY` is set in the environment or a local `.env`; otherwise capabilities omit `request_agent_edit` and requests fail with `CAPABILITY_UNAVAILABLE`. Browser capture and recapture are enabled only when `--browser-config` maps approved flow IDs to host-owned browser environments (and, for capture, the approved flow). Final renders require a passed verification of the same revision, from `verify_revision` or a preview. HTTP routes, events, and error shapes are documented in [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md).
+
+Live mode also requires `REPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION` and `REPLEX_AGENT_OUTPUT_MICRO_USD_PER_MILLION`: positive integer, conservative uncached rates for the named model, including image/reasoning tokens. See [`.env.example`](.env.example). Startup fails if rates are missing or invalid. The default cap is USD 0.10 per job (`REPLEX_AGENT_MAX_JOB_MICRO_USD=100000`); the default workspace limit is 12 provider requests/minute (`REPLEX_AGENT_REQUESTS_PER_MINUTE`), counting both input counting and generation. Provider input counting includes linked history and images. A reservation covers counted input and maximum output; retries, failures, and cancellation do not refund it. SDK retries are disabled. The cap depends on correct host rates and the provider honoring counted input/output bounds; it is not an account-wide billing limit. Missing or excessive reported usage blocks further generation for that intent.
+
+The host-only `.replex-agent-budget.json` in the selected workspace persists spending reservations, rate timestamps, and aggregate token usage across restarts. It contains no prompts, images, response IDs, or credentials. Keep it with the workspace; deleting it resets accounting. Corrupt/full ledgers fail closed. No provider call is needed to run the scripted test suite. Gate D remains deferred, not waived.
+
+List existing projects with `npm run service:v2:projects -- --workspace <dir>`. This host-only command rebuilds a catalog from validated project files and prints project IDs, names, and current revision IDs. `unavailableCount` reports corrupt/incomplete entries without repairing them. Use those IDs with `open_project`; service-contract v1 gains no project-list API. Reuse the same workspace on restart to retain projects, revisions, jobs, events, and conversations. Uncommitted file imports need file reselection after restart because their authorization tokens belong to the previous process.
+
+---
+
+## Local invite-only demo
+
+After installing the prerequisites above (Node 22+, compatible FFmpeg/ffprobe 9 or development build, bundled Chromium, and a TrueType font), run:
+
+```bash
+npm run demo
+```
+
+This starts a fake product fixture and the token-protected executor on loopback, captures an approved flow, imports generated sample footage, composes a six-second video, applies a scripted agent edit with a verified preview, changes the fake product, selectively recaptures its scene, verifies preservation, and exports a final MP4. It prints the preview/final file paths and a per-session API URL/bearer token. Open the MP4 locally; the demo runs the backend workflow. Press Ctrl+C to stop the executor and fixture. Each run creates a new project; prior projects remain under `work/invite-demo` and can be reopened through the project-list command.
+
+```bash
+npm run demo -- --check                      # tools only; no provider calls or services
+npm run demo -- --once                       # export, close services, and exit
+npm run demo -- --workspace work/my-demo     # choose a persistent workspace
+npm run service:v2:projects -- --workspace work/invite-demo
+```
+
+The default is deterministic and makes no paid provider calls, even when a key is present. Optional live mode requires `npm run demo -- --live --agent-model <model>` plus the key and conservative pricing settings in [`.env.example`](.env.example). Live mode sends bounded selected evidence to that provider and may incur usage charges under the per-job cap. No provider key is printed or stored in project files. Check prerequisites with `--check`; use absolute `REPLEX_FFMPEG_PATH` / `REPLEX_FFPROBE_PATH` for specific trusted binaries and `REPLEX_FONT_FILE` for a font.
+
+V2 capture/recapture blocks ordinary private/internal destinations using the approved per-capture network guard. Only the launcher’s exact running loopback fixture receives an in-memory exception; browser config and API requests cannot grant private access. Startup cleanup removes recognized abandoned staging older than 24 hours before jobs resume, preserving canonical files and capture evidence. Limits include 256 MiB per import, 4 MiB JSON requests, 16 pending imports, 16 active/pending jobs, and 10,000 retained job records. Hosting remains undecided. Gate D is deferred, not waived; this scripted demo does not establish live-model quality or independent human usefulness.
 
 ---
 
@@ -208,6 +237,7 @@ Checks before render: approved flow completed, every expected checkpoint reached
 | [`Docs/REPLEX_V2_PRD.md`](Docs/REPLEX_V2_PRD.md) | V2 product definition and POC scope |
 | [`Docs/v2/implementation-plan.md`](Docs/v2/implementation-plan.md) | Dependency-ordered implementation plan with per-slice status and validation records |
 | [`Docs/v2/roadmap.md`](Docs/v2/roadmap.md) | V2 phases, decision gates, and current gate status |
+| [`Docs/v2/local-demo-validation.md`](Docs/v2/local-demo-validation.md) | PR #23–#28 validation results, exact commits, toolchain, and merge blocker |
 | [`Docs/v2/frontend-handoff.md`](Docs/v2/frontend-handoff.md) | Gurbaaz frontend handoff |
 | [`Docs/PRD.md`](Docs/PRD.md) | Normative POC scope, requirements POC-01…POC-20, pass/fail gates |
 | [`Docs/poc/technical_poc.md`](Docs/poc/technical_poc.md) | Minimal local architecture, data model, contracts |

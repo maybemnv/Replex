@@ -313,6 +313,7 @@ describe("V2 media render planning", () => {
   });
 
   it.skipIf(!mediaToolsAvailable)("aligns the visible fitted image at each canonical anchor", async () => {
+    // Six real renders/probes/decodes need a process-backed test budget, not Vitest's 5-second default.
     const root = await mkdtemp(join(tmpdir(), "replex-v2-render-anchors-"));
     const source = join(root, "assets", "product.mp4");
     await mkdir(join(root, "assets"));
@@ -366,5 +367,5 @@ describe("V2 media render planning", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

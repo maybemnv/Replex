@@ -1,3 +1,4 @@
+import { issueFixtureNetworkGrant } from "../src/capture-network-policy.js";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -60,6 +61,7 @@ export async function startReleaseFixture() {
     origin,
     flow,
     browserTargets,
+    fixtureGrants: [issueFixtureNetworkGrant(server)],
     setNote(value: string) { note = value; },
     /** Makes the next `count` target resets fail, as a transiently unavailable app would. */
     failResets(count: number) { failingResets = count; },

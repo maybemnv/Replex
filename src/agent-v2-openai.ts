@@ -3,19 +3,22 @@ import { resolve } from "node:path";
 import OpenAI from "openai";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { V2_AGENT_MAX_OUTPUT_TOKENS_PER_CALL, type V2AgentModelClient, type V2AgentModelRequest } from "./agent-v2.js";
+import { AgentBudgetError, AgentBudgetLedger } from "./agent-v2-budget.js";
 
 const MAX_IMAGE_BYTES_PER_RESULT = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES_PER_REQUEST = 4 * 1024 * 1024;
 
 /** OpenAI Responses adapter; credentials and model selection remain host-owned. */
-export function createOpenAIV2ModelClient(client: OpenAI, model: string): V2AgentModelClient {
+export function createOpenAIV2ModelClient(client: OpenAI, model: string, budget: AgentBudgetLedger): V2AgentModelClient {
+  if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(model)) throw new Error("invalid host model name");
   return {
     async respond(request) {
       if (!Number.isInteger(request.maxOutputTokens) || request.maxOutputTokens < 1
         || request.maxOutputTokens > V2_AGENT_MAX_OUTPUT_TOKENS_PER_CALL) {
         throw new Error("requested output-token ceiling is outside the Replex V2 limit");
       }
-      const response = await client.responses.create({
+      request.signal.throwIfAborted();
+      const params = {
         model,
         instructions: request.instructions,
         tools: request.tools.map((tool) => ({
@@ -28,12 +31,29 @@ export function createOpenAIV2ModelClient(client: OpenAI, model: string): V2Agen
         input: modelInput(request),
         ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
         parallel_tool_calls: false,
-        max_output_tokens: request.maxOutputTokens,
-      }, { signal: request.signal });
+      };
+      const options = { signal: request.signal, maxRetries: 0 };
+      const key = budget.key(request.context.projectId, request.intentId);
+      await budget.requestSlot(request.signal);
+      // Count images, tool schemas, and linked history rather than estimating from local bytes.
+      const counted = await client.responses.inputTokens.count(params, options);
+      if (!Number.isSafeInteger(counted.input_tokens) || counted.input_tokens < 0) {
+        throw new AgentBudgetError("provider could not establish the model input cost");
+      }
+      await budget.requestSlot(request.signal);
+      await budget.reserve(key, counted.input_tokens, request.maxOutputTokens, request.signal);
+      request.signal.throwIfAborted();
+      const response = await client.responses.create({ ...params, max_output_tokens: request.maxOutputTokens }, options);
+      const usage = response.usage;
+      const validUsage = usage && Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0
+        && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0;
+      const exceeded = !validUsage || usage.input_tokens > counted.input_tokens || usage.output_tokens > request.maxOutputTokens;
+      await budget.usage(key, validUsage ? usage.input_tokens : 0, validUsage ? usage.output_tokens : 0, exceeded);
 
       if (response.usage && response.usage.output_tokens > request.maxOutputTokens) {
         throw new Error("provider exceeded the requested output-token ceiling");
       }
+      if (exceeded) throw new AgentBudgetError("provider usage is missing or exceeds the reserved model budget");
       if (response.status === "incomplete") throw new Error("provider returned an incomplete response at the output-token ceiling");
 
       const calls = response.output.filter((item) => item.type === "function_call").map((item) => {
@@ -83,9 +103,22 @@ function modelInput(request: V2AgentModelRequest): ResponseInputItem[] {
 }
 
 /** Host bootstrap for an explicitly named model; the key comes from OPENAI_API_KEY or a local .env file. */
-export function createOpenAIV2ModelClientFromEnv(model: string): V2AgentModelClient {
-  if (!process.env.OPENAI_API_KEY && existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
+export function createOpenAIV2ModelClientFromEnv(model: string, workspaceRoot: string): V2AgentModelClient {
+  // Host environment values win, but a host-provided key must not suppress pricing/budget values in .env.
+  if (existsSync(resolve(".env"))) process.loadEnvFile(resolve(".env"));
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is required to enable the agent model");
-  return createOpenAIV2ModelClient(new OpenAI({ apiKey }), model);
+  const positiveInteger = (name: string, fallback?: number): number => {
+    const value = process.env[name];
+    if (value === undefined && fallback !== undefined) return fallback;
+    if (!value || !/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name} must be a positive integer`);
+    return Number(value);
+  };
+  const budget = new AgentBudgetLedger(workspaceRoot, {
+    maxJobMicroUsd: positiveInteger("REPLEX_AGENT_MAX_JOB_MICRO_USD", 100_000),
+    inputMicroUsdPerMillion: positiveInteger("REPLEX_AGENT_INPUT_MICRO_USD_PER_MILLION"),
+    outputMicroUsdPerMillion: positiveInteger("REPLEX_AGENT_OUTPUT_MICRO_USD_PER_MILLION"),
+    requestsPerMinute: positiveInteger("REPLEX_AGENT_REQUESTS_PER_MINUTE", 12),
+  });
+  return createOpenAIV2ModelClient(new OpenAI({ apiKey, maxRetries: 0 }), model, budget);
 }

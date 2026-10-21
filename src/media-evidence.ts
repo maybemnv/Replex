@@ -80,6 +80,8 @@ type EvidenceConfig = {
   ffmpegVersion: string;
   ffprobeVersion: string;
   selectedFrameFractions: number[];
+  frameSampling: "frame-aligned.v1";
+  toolThreads: 1;
   frameSize: [320, 180];
   contactSheetTileSize: [320, 180];
   sceneThreshold: 0.3;
@@ -203,7 +205,8 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
 
   const ffmpeg = request.ffmpegPath ?? process.env.REPLEX_FFMPEG_PATH ?? "ffmpeg";
   const ffprobe = request.ffprobePath ?? process.env.REPLEX_FFPROBE_PATH ?? "ffprobe";
-  const run = (tool: string, args: string[], maxBuffer = MAX_TOOL_OUTPUT_BYTES): ToolResult => runTool(tool, args, startedAt, deadlineMs, maxBuffer);
+  const run = (tool: string, args: string[], maxBuffer = MAX_TOOL_OUTPUT_BYTES): ToolResult =>
+    runTool(tool, tool === ffmpeg && args.includes("-i") ? boundedEvidenceArgs(args) : args, startedAt, deadlineMs, maxBuffer);
   const ffmpegVersion = toolVersion(run(ffmpeg, ["-version"]), "ffmpeg");
   const ffprobeVersion = toolVersion(run(ffprobe, ["-version"]), "ffprobe");
   const probeOutput = run(ffprobe, [
@@ -221,6 +224,8 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
     ffmpegVersion,
     ffprobeVersion,
     selectedFrameFractions: [0.1, 0.35, 0.65, 0.9],
+    frameSampling: "frame-aligned.v1",
+    toolThreads: 1,
     frameSize: [320, 180],
     contactSheetTileSize: [320, 180],
     sceneThreshold: 0.3,
@@ -246,7 +251,7 @@ export async function generateMediaEvidence(request: GenerateMediaEvidenceReques
     artifactFiles.push({ kind: "probe", filename: probeFile, contentType: "application/json" });
 
     if (hasVideo) {
-      const times = sampleTimes(probe.durationMs);
+      const times = sampleTimes(probe.durationMs, probe.streams.find((stream) => stream.type === "video")?.fps);
       const framePaths: string[] = [];
       for (const [index, timestampMs] of times.entries()) {
         const filename = `selected-${index}.png`;
@@ -464,9 +469,13 @@ function finiteOrNull(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function sampleTimes(durationMs?: number): number[] {
-  if (durationMs === undefined) return [0];
-  const values = [0.1, 0.35, 0.65, 0.9].map((fraction) => Math.min(durationMs - 1, Math.max(0, Math.round(durationMs * fraction))));
+function sampleTimes(durationMs?: number, fps?: number): number[] {
+  if (durationMs === undefined || fps === undefined) return [0];
+  // Container duration includes the last frame's display interval, where a forward seek can find no frame.
+  const frameMs = 1000 / fps;
+  const lastFrame = Math.max(0, Math.floor((durationMs - Math.ceil(frameMs)) / frameMs));
+  const values = [0.1, 0.35, 0.65, 0.9].map((fraction) =>
+    Math.max(0, Math.floor(Math.min(lastFrame, Math.floor(durationMs * fraction / frameMs)) * frameMs)));
   return [...new Set(values)].slice(0, MAX_FRAMES);
 }
 
@@ -475,6 +484,16 @@ function toolVersion(result: ToolResult, tool: "ffmpeg" | "ffprobe"): string {
   const match = line.match(new RegExp(`^${tool} version ([A-Za-z0-9._+-]+)`, "i"));
   if (!match) throw new MediaEvidenceError("INVALID_TOOL_OUTPUT");
   return `${tool}-${match[1]}`;
+}
+
+function boundedEvidenceArgs(args: string[]): string[] {
+  // Bound decoder, filter, and encoder pools instead of expanding to the host's advertised CPU count.
+  const bounded = ["-filter_threads", "1", "-filter_complex_threads", "1"];
+  for (const [index, argument] of args.entries()) {
+    if (argument === "-i" || index === args.length - 1) bounded.push("-threads", "1");
+    bounded.push(argument);
+  }
+  return bounded;
 }
 
 function runTool(tool: string, args: string[], startedAt: number, deadlineMs: number, maxBuffer: number): ToolResult {
